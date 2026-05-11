@@ -6,12 +6,12 @@ use crate::network::cookie::CookieJar;
 use parking_lot::RwLock;
 use reqwest::{Client, Response};
 use std::sync::Arc;
-use std::time::Duration;
 use url::Url;
 
 /// HTTP client wrapper with cookie support and configurable defaults.
 pub struct HttpClient {
     client: Client,
+    #[allow(dead_code)]
     config: BrowserConfig,
     cookie_jar: Arc<RwLock<CookieJar>>,
 }

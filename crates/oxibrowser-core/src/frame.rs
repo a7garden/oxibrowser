@@ -3,8 +3,8 @@
 //! Mirrors Lightpanda's `Frame.zig`: holds the parsed DOM tree, document
 //! URL, and child frames. The root Frame represents the main document.
 
-use crate::error::{CoreError, Result};
-use oxibrowser_webapi::dom::{Document, Node, NodeId};
+use crate::error::Result;
+use oxibrowser_webapi::dom::{Document, NodeId};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::debug;
 use url::Url;

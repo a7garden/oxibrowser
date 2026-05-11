@@ -109,3 +109,57 @@ pub mod error_codes {
     pub const INTERNAL_ERROR: i64 = -32603;
     pub const SERVER_ERROR: i64 = -32000;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cdp_request() {
+        let json = r#"{"id":1,"method":"Page.navigate","params":{"url":"https://example.com"}}"#;
+        let req: CdpRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.id, Some(1));
+        assert_eq!(req.method, "Page.navigate");
+        assert!(req.params.is_some());
+        let params = req.params.unwrap();
+        assert_eq!(params["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_serialize_cdp_response() {
+        let resp = CdpResponse {
+            id: 42,
+            result: Some(serde_json::json!({"key": "value"})),
+            error: None,
+            session_id: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"id\":42"));
+        assert!(json.contains("\"key\""));
+        // error should be omitted (skip_serializing_if)
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn test_serialize_cdp_event() {
+        let event = CdpEvent::new("Page.loadEventFired", serde_json::json!({"timestamp": 1234}));
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"method\":\"Page.loadEventFired\""));
+        assert!(json.contains("\"timestamp\""));
+    }
+
+    #[test]
+    fn test_json_version_serialization() {
+        let v = JsonVersion::new("ws://127.0.0.1:9222/ws".to_string());
+        let json = serde_json::to_string(&v).unwrap();
+        // Verify camelCase field names
+        assert!(json.contains("\"protocolVersion\""));
+        assert!(json.contains("\"userAgent\""));
+        assert!(json.contains("webSocketDebuggerUrl") || json.contains("webSocketUrl"),
+            "should contain web socket url field");
+        // Verify round-trip
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["browser"], "OxiBrowser/0.1.0");
+        assert_eq!(parsed["protocolVersion"], "1.3");
+    }
+}

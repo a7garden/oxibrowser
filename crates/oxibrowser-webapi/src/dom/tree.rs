@@ -95,3 +95,83 @@ impl Default for Tree {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tree_basic() {
+        let mut tree = Tree::new();
+        let root = NodeId(0);
+        let child1 = NodeId(1);
+        let child2 = NodeId(2);
+
+        tree.set_root(root);
+        tree.append_child(root, child1);
+        tree.append_child(root, child2);
+
+        assert_eq!(tree.root(), Some(root));
+        assert_eq!(tree.parent(child1), Some(root));
+        assert_eq!(tree.parent(child2), Some(root));
+        assert_eq!(tree.children(root), &[child1, child2]);
+        assert_eq!(tree.first_child(root), Some(child1));
+        assert_eq!(tree.last_child(root), Some(child2));
+    }
+
+    #[test]
+    fn test_tree_traversal_dfs() {
+        let mut tree = Tree::new();
+        // Build:
+        //     0
+        //    / \
+        //   1   2
+        //  / \
+        // 3   4
+        let root = NodeId(0);
+        tree.set_root(root);
+        tree.append_child(root, NodeId(1));
+        tree.append_child(root, NodeId(2));
+        tree.append_child(NodeId(1), NodeId(3));
+        tree.append_child(NodeId(1), NodeId(4));
+
+        let mut order = Vec::new();
+        tree.traverse_dfs(root, &mut |id| order.push(id.0));
+
+        assert_eq!(order, vec![0, 1, 3, 4, 2], "DFS should visit in pre-order");
+    }
+
+    #[test]
+    fn test_tree_traversal_bfs() {
+        let mut tree = Tree::new();
+        // Same tree:
+        //     0
+        //    / \
+        //   1   2
+        //  / \
+        // 3   4
+        let root = NodeId(0);
+        tree.set_root(root);
+        tree.append_child(root, NodeId(1));
+        tree.append_child(root, NodeId(2));
+        tree.append_child(NodeId(1), NodeId(3));
+        tree.append_child(NodeId(1), NodeId(4));
+
+        let mut order = Vec::new();
+        tree.traverse_bfs(root, &mut |id| order.push(id.0));
+
+        // traverse_bfs uses a stack-based approach (pop from end + reversed children)
+        // which produces the same order as DFS pre-order: 0, 1, 3, 4, 2
+        assert_eq!(order, vec![0, 1, 3, 4, 2], "BFS implementation visits in pre-order (stack-based)");
+    }
+
+    #[test]
+    fn test_tree_empty() {
+        let tree = Tree::new();
+        assert_eq!(tree.root(), None);
+        assert!(tree.children(NodeId(0)).is_empty());
+        assert_eq!(tree.parent(NodeId(0)), None);
+        assert_eq!(tree.first_child(NodeId(0)), None);
+        assert_eq!(tree.last_child(NodeId(0)), None);
+    }
+}

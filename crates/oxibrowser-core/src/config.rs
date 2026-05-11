@@ -72,3 +72,36 @@ impl BrowserConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = BrowserConfig::default();
+        assert!(config.user_agent.contains("OxiBrowser"));
+        assert_eq!(config.default_timeout, Duration::from_secs(30));
+        assert!(config.obey_robots, "default should obey robots.txt");
+        assert_eq!(config.max_sessions, 10);
+        assert_eq!(config.viewport_width, 1280);
+        assert_eq!(config.viewport_height, 720);
+        assert!(!config.accept_invalid_certs);
+    }
+
+    #[test]
+    fn test_headless_config() {
+        let config = BrowserConfig::headless();
+        assert!(!config.enable_rendering, "headless should disable rendering");
+        assert_eq!(config.viewport_width, 0, "headless should have zero viewport width");
+        assert_eq!(config.viewport_height, 0, "headless should have zero viewport height");
+    }
+
+    #[test]
+    fn test_automation_config() {
+        let config = BrowserConfig::automation();
+        assert!(!config.obey_robots, "automation should ignore robots.txt");
+        assert_eq!(config.default_timeout, Duration::from_secs(60), "automation should have longer timeout");
+        assert_eq!(config.connection_pool_size, 20);
+    }
+}

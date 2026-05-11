@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //! - `oxibrowser fetch <url>` — fetch a URL and dump HTML/markdown
-//! - `oxibrowser serve` — start the CDP server
+//! - `oxibrowser serve` — start the CDP server (creates a Browser instance)
 //! - `oxibrowser version` — print version
 
 use anyhow::Result;
@@ -107,7 +107,7 @@ async fn run_fetch(url: &str, format: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start the CDP server.
+/// Start the CDP server with a real Browser instance.
 async fn run_serve(host: &str, port: u16) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
@@ -115,7 +115,11 @@ async fn run_serve(host: &str, port: u16) -> Result<()> {
 
     info!(addr = %addr, "starting CDP server");
 
-    let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr));
+    // Create a headless Browser instance
+    let config = oxibrowser_core::BrowserConfig::headless();
+    let browser = Arc::new(oxibrowser_core::Browser::new(config).await?);
+
+    let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr, browser.clone()));
     let bound_addr = server.start().await?;
 
     info!(addr = %bound_addr, "CDP server ready");
@@ -126,7 +130,9 @@ async fn run_serve(host: &str, port: u16) -> Result<()> {
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
+
     server.shutdown();
+    browser.close().await?;
 
     Ok(())
 }

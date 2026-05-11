@@ -58,6 +58,8 @@ log = "0.4"
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
 
 # Internal crates
 oxibrowser-core = { path = "crates/oxibrowser-core" }

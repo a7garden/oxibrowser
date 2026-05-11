@@ -1326,13 +1326,16 @@ name = "oxibrowser-cdp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures",
  "http-body-util",
  "hyper",
  "hyper-util",
  "oxibrowser-core",
+ "oxibrowser-webapi",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror",
  "tokio",
  "tokio-tungstenite",

@@ -6,7 +6,6 @@
 use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
-use crate::frame::Frame;
 use crate::js::JsRuntime;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
@@ -14,7 +13,7 @@ use crate::page::Page;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 use url::Url;
 
 /// Unique session ID.
@@ -39,12 +38,15 @@ pub struct Session {
     /// Unique ID.
     id: SessionId,
     /// Parent browser ID.
+    #[allow(dead_code)]
     browser_id: BrowserId,
     /// Configuration.
+    #[allow(dead_code)]
     config: BrowserConfig,
     /// HTTP client (shared from Browser).
     http_client: Arc<HttpClient>,
     /// Cookie jar (may be shared or isolated).
+    #[allow(dead_code)]
     cookie_jar: Arc<RwLock<CookieJar>>,
     /// Active page (current document).
     active_page: Option<Page>,
@@ -120,7 +122,7 @@ impl Session {
         if self.history_index > 0 {
             self.history_index -= 1;
             let url = self.history[self.history_index].clone();
-            let url_str = url.to_string();
+            
             // Re-fetch without adding to history
             let response = self.http_client.fetch(&url).await?;
             let html = response
@@ -139,7 +141,7 @@ impl Session {
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             let url = self.history[self.history_index].clone();
-            let url_str = url.to_string();
+            
             let response = self.http_client.fetch(&url).await?;
             let html = response
                 .text()
@@ -155,7 +157,7 @@ impl Session {
     /// Reload the current page.
     pub async fn reload(&mut self) -> Result<()> {
         if let Some(url) = self.current_url() {
-            let url_str = url.to_string();
+            
             let response = self.http_client.fetch(&url).await?;
             let html = response
                 .text()

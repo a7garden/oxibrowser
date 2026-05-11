@@ -21,6 +21,7 @@ pub struct Document {
     /// Tree structure (parent/child relationships).
     tree: Tree,
     /// Next node ID.
+    #[allow(dead_code)]
     next_id: usize,
 }
 
@@ -44,6 +45,7 @@ impl Document {
     }
 
     /// Allocate a new node ID.
+    #[allow(dead_code)]
     fn alloc_id(&mut self) -> NodeId {
         let id = NodeId(self.next_id);
         self.next_id += 1;
@@ -543,5 +545,122 @@ impl TreeSink for DomSink {
 
     fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
         *target
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_html() {
+        let html = "<html><head><title>Test</title></head><body><p>Hello</p></body></html>";
+        let doc = Document::parse(html);
+        assert!(doc.node_count() > 0, "document should have nodes");
+        let title_text = doc.query_text("title");
+        assert_eq!(
+            title_text.as_deref(),
+            Some("Test"),
+            "title text should be extracted"
+        );
+    }
+
+    #[test]
+    fn test_parse_empty_input() {
+        let doc = Document::parse("");
+        // Should not panic; may still have a document root node from html5ever
+        let _ = doc.node_count();
+    }
+
+    #[test]
+    fn test_parse_malformed_html() {
+        let html = "<div><span>unclosed";
+        let doc = Document::parse(html);
+        // Should not panic; html5ever is lenient
+        assert!(doc.node_count() > 0, "malformed HTML should still produce nodes");
+    }
+
+    #[test]
+    fn test_query_selector_by_tag() {
+        let html = "<html><body><p>first</p><p>second</p></body></html>";
+        let doc = Document::parse(html);
+        let found = doc.query_selector("p");
+        assert!(found.is_some(), "should find a <p> element");
+        let node = doc.get_node(found.unwrap()).unwrap();
+        assert_eq!(node.tag_name(), Some("p"));
+    }
+
+    #[test]
+    fn test_query_selector_by_class() {
+        let html = r#"<html><body><div class="foo">content</div></body></html>"#;
+        let doc = Document::parse(html);
+        let found = doc.query_selector(".foo");
+        assert!(found.is_some(), "should find element with class .foo");
+    }
+
+    #[test]
+    fn test_query_selector_by_id() {
+        let html = r#"<html><body><span id="bar">text</span></body></html>"#;
+        let doc = Document::parse(html);
+        let found = doc.query_selector("#bar");
+        assert!(found.is_some(), "should find element with id #bar");
+    }
+
+    #[test]
+    fn test_query_selector_all() {
+        let html = "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>";
+        let doc = Document::parse(html);
+        let items = doc.query_selector_all("li");
+        assert_eq!(items.len(), 3, "should find 3 <li> elements");
+    }
+
+    #[test]
+    fn test_query_text() {
+        let html = "<html><head><title>My Title</title></head><body></body></html>";
+        let doc = Document::parse(html);
+        let text = doc.query_text("title");
+        assert_eq!(text.as_deref(), Some("My Title"));
+    }
+
+    #[test]
+    fn test_to_markdown() {
+        let html = r#"<html><body><h1>Heading</h1><p>Paragraph</p><ul><li>item</li></ul><a href="http://example.com">link</a></body></html>"#;
+        let doc = Document::parse(html);
+        let md = doc.to_markdown();
+        assert!(md.contains('#'), "markdown should contain heading #");
+        assert!(md.contains("- "), "markdown should contain list item -");
+    }
+
+    #[test]
+    fn test_tree_traversal() {
+        let html = "<html><head><title>T</title></head><body><p>A</p><p>B</p></body></html>";
+        let doc = Document::parse(html);
+        let root = doc.root().expect("document should have a root");
+        let mut visited = Vec::new();
+        doc.tree().traverse_dfs(root, &mut |id| {
+            if let Some(node) = doc.get_node(id) {
+                if let Some(tag) = node.tag_name() {
+                    visited.push(tag.to_string());
+                }
+            }
+        });
+        // DFS: html comes before head/body, head before title, body before p's
+        let html_idx = visited.iter().position(|t| t == "html").unwrap();
+        let head_idx = visited.iter().position(|t| t == "head").unwrap();
+        let body_idx = visited.iter().position(|t| t == "body").unwrap();
+        let title_idx = visited.iter().position(|t| t == "title").unwrap();
+        assert!(html_idx < head_idx, "html before head");
+        assert!(html_idx < body_idx, "html before body");
+        assert!(head_idx < title_idx, "head before title");
+    }
+
+    #[test]
+    fn test_node_attributes() {
+        let html = r#"<html><body><a href="http://example.com" class="cls">link</a></body></html>"#;
+        let doc = Document::parse(html);
+        let node_id = doc.query_selector("a").expect("should find <a>");
+        let node = doc.get_node(node_id).unwrap();
+        assert_eq!(node.get_attribute("href"), Some("http://example.com"));
+        assert_eq!(node.get_attribute("class"), Some("cls"));
     }
 }

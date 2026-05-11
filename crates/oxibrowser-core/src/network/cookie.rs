@@ -57,3 +57,48 @@ impl CookieJar {
         self.cookies.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cookie_jar_store_and_retrieve() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/page").unwrap();
+        jar.store(&url, "session=abc123; Path=/");
+
+        let cookies = jar.cookies_for_url(&url);
+        assert!(cookies.contains("session=abc123"), "stored cookie should be retrievable");
+    }
+
+    #[test]
+    fn test_cookie_jar_domain_isolation() {
+        let mut jar = CookieJar::new();
+        let url_a = Url::parse("https://site-a.com/").unwrap();
+        let url_b = Url::parse("https://site-b.com/").unwrap();
+
+        jar.store(&url_a, "token=aaa");
+        jar.store(&url_b, "token=bbb");
+
+        let cookies_a = jar.cookies_for_url(&url_a);
+        let cookies_b = jar.cookies_for_url(&url_b);
+
+        assert!(cookies_a.contains("token=aaa"), "site A should see its own cookie");
+        assert!(!cookies_a.contains("token=bbb"), "site A should NOT see site B's cookie");
+        assert!(cookies_b.contains("token=bbb"), "site B should see its own cookie");
+        assert!(!cookies_b.contains("token=aaa"), "site B should NOT see site A's cookie");
+    }
+
+    #[test]
+    fn test_cookie_jar_clear() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "key=val");
+        assert!(!jar.is_empty());
+
+        jar.clear();
+        assert!(jar.is_empty(), "jar should be empty after clear");
+        assert!(jar.cookies_for_url(&url).is_empty(), "no cookies after clear");
+    }
+}

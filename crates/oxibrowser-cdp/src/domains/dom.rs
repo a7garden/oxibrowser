@@ -2,18 +2,28 @@
 //!
 //! Handles DOM.getDocument, DOM.querySelector, DOM.querySelectorAll,
 //! DOM.getOuterHTML, DOM.describeNode, DOM.resolveNode.
+//!
+//! Domain handlers use the real browser session to access parsed DOM data.
 
 use crate::domains::DomainResult;
 use crate::protocol::CdpError;
+use oxibrowser_core::session::Session;
+use oxibrowser_webapi::dom::{Document, NodeId, NodeType};
 use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Dispatch DOM domain methods.
-pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
+pub async fn handle(
+    method: &str,
+    params: Option<Value>,
+    session: &Arc<RwLock<Session>>,
+) -> DomainResult {
     match method {
-        "getDocument" => get_document(),
-        "querySelector" => query_selector(params),
-        "querySelectorAll" => query_selector_all(params),
-        "getOuterHTML" => get_outer_html(params),
+        "getDocument" => get_document(session).await,
+        "querySelector" => query_selector(params, session).await,
+        "querySelectorAll" => query_selector_all(params, session).await,
+        "getOuterHTML" => get_outer_html(params, session).await,
         "describeNode" => describe_node(params),
         "resolveNode" => resolve_node(params),
         _ => Err(CdpError {
@@ -23,90 +33,123 @@ pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
     }
 }
 
-/// DOM.getDocument — returns the root DOM node.
-fn get_document() -> DomainResult {
-    Ok(Some(json!({
-        "root": {
-            "nodeId": 0,
-            "backendNodeId": 0,
-            "nodeType": 9,
-            "nodeName": "#document",
-            "localName": "",
-            "nodeValue": "",
-            "childNodeCount": 1,
-            "children": [
-                {
-                    "nodeId": 1,
-                    "backendNodeId": 1,
-                    "nodeType": 1,
-                    "nodeName": "HTML",
-                    "localName": "html",
-                    "nodeValue": "",
-                    "childNodeCount": 2,
-                    "children": [
-                        {
-                            "nodeId": 2,
-                            "backendNodeId": 2,
-                            "nodeType": 1,
-                            "nodeName": "HEAD",
-                            "localName": "head",
-                            "nodeValue": "",
-                            "childNodeCount": 0
-                        },
-                        {
-                            "nodeId": 3,
-                            "backendNodeId": 3,
-                            "nodeType": 1,
-                            "nodeName": "BODY",
-                            "localName": "body",
+/// DOM.getDocument — returns the root DOM node from the real parsed document.
+async fn get_document(session: &Arc<RwLock<Session>>) -> DomainResult {
+    let guard = session.read().await;
+    match guard.page() {
+        Some(page) => {
+            let document = page.root_frame().document();
+            let tree = page.root_frame().document().tree();
+            let root_id = match tree.root() {
+                Some(id) => id,
+                None => {
+                    return Ok(Some(json!({
+                        "root": {
+                            "nodeId": 0,
+                            "backendNodeId": 0,
+                            "nodeType": 9,
+                            "nodeName": "#document",
+                            "localName": "",
                             "nodeValue": "",
                             "childNodeCount": 0
                         }
-                    ]
+                    })))
                 }
-            ]
+            };
+            Ok(Some(json!({
+                "root": build_cdp_node(document, root_id, 0)
+            })))
         }
-    })))
+        None => Ok(Some(json!({
+            "root": {
+                "nodeId": 0,
+                "backendNodeId": 0,
+                "nodeType": 9,
+                "nodeName": "#document",
+                "localName": "",
+                "nodeValue": "",
+                "childNodeCount": 0
+            }
+        }))),
+    }
 }
 
 /// DOM.querySelector — finds a single node matching a CSS selector.
-fn query_selector(params: Option<Value>) -> DomainResult {
+async fn query_selector(
+    params: Option<Value>,
+    session: &Arc<RwLock<Session>>,
+) -> DomainResult {
     let params = params.unwrap_or_default();
-    let node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
-    let _selector = params
+    let node_id = params
+        .get("nodeId")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let selector = params
         .get("selector")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // In a real implementation, this would query the actual DOM.
-    // For now, return a stub result.
-    Ok(Some(json!({
-        "nodeId": node_id + 100
-    })))
+    let guard = session.read().await;
+    match guard.page() {
+        Some(page) => {
+            let frame = page.root_frame();
+            match frame.query_selector(selector) {
+                Some(found_id) => Ok(Some(json!({
+                    "nodeId": found_id.0
+                }))),
+                None => Ok(Some(json!({
+                    "nodeId": 0
+                }))),
+            }
+        }
+        None => Ok(Some(json!({
+            "nodeId": node_id + 100
+        }))),
+    }
 }
 
 /// DOM.querySelectorAll — finds all nodes matching a CSS selector.
-fn query_selector_all(params: Option<Value>) -> DomainResult {
+async fn query_selector_all(
+    params: Option<Value>,
+    session: &Arc<RwLock<Session>>,
+) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
-    let _selector = params
+    let selector = params
         .get("selector")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    Ok(Some(json!({
-        "nodeIds": []
-    })))
+    let guard = session.read().await;
+    match guard.page() {
+        Some(page) => {
+            let document = page.root_frame().document();
+            let node_ids: Vec<u64> = document
+                .query_selector_all(selector)
+                .iter()
+                .map(|id| id.0 as u64)
+                .collect();
+            Ok(Some(json!({
+                "nodeIds": node_ids
+            })))
+        }
+        None => Ok(Some(json!({
+            "nodeIds": []
+        }))),
+    }
 }
 
-/// DOM.getOuterHTML — returns the outer HTML of a node.
-fn get_outer_html(params: Option<Value>) -> DomainResult {
-    let params = params.unwrap_or_default();
-    let _node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    // In a real implementation, this would serialize the actual DOM node.
+/// DOM.getOuterHTML — returns the actual HTML from the session's page.
+async fn get_outer_html(
+    _params: Option<Value>,
+    session: &Arc<RwLock<Session>>,
+) -> DomainResult {
+    let guard = session.read().await;
+    let html = match guard.page() {
+        Some(page) => page.content().to_string(),
+        None => "<html><head></head><body></body></html>".to_string(),
+    };
     Ok(Some(json!({
-        "outerHTML": "<html><head></head><body></body></html>"
+        "outerHTML": html
     })))
 }
 
@@ -135,7 +178,10 @@ fn describe_node(params: Option<Value>) -> DomainResult {
 /// DOM.resolveNode — resolves a DOM node to a JS remote object.
 fn resolve_node(params: Option<Value>) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+    let _node_id = params
+        .get("nodeId")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     Ok(Some(json!({
         "object": {
@@ -146,4 +192,63 @@ fn resolve_node(params: Option<Value>) -> DomainResult {
             "objectId": format!("node-{}", uuid::Uuid::new_v4())
         }
     })))
+}
+
+// ---------------------------------------------------------------------------
+// CDP node tree builder
+// ---------------------------------------------------------------------------
+
+/// Maximum depth for the CDP node tree (avoids huge outputs).
+const MAX_CDP_TREE_DEPTH: usize = 10;
+
+/// Build a CDP-compatible JSON node from the webapi DOM tree.
+///
+/// Converts the parsed html5ever DOM into the format expected by CDP clients
+/// (e.g., Chrome DevTools, Puppeteer).
+fn build_cdp_node(document: &Document, node_id: NodeId, depth: usize) -> Value {
+    let node = match document.get_node(node_id) {
+        Some(n) => n,
+        None => return json!({}),
+    };
+
+    let (node_type_num, node_name, local_name, node_value) = match &node.node_type {
+        NodeType::Document => (9, "#document".to_string(), String::new(), String::new()),
+        NodeType::Element { tag, .. } => {
+            (1, tag.to_uppercase(), tag.to_lowercase(), String::new())
+        }
+        NodeType::Text(text) => (3, "#text".to_string(), String::new(), text.clone()),
+        NodeType::Comment(text) => (8, "#comment".to_string(), String::new(), text.clone()),
+        NodeType::Doctype { name } => (10, "#doctype".to_string(), String::new(), name.clone()),
+    };
+
+    let children: Vec<Value> = if depth < MAX_CDP_TREE_DEPTH {
+        document
+            .tree()
+            .children(node_id)
+            .iter()
+            .filter(|&&child_id| {
+                // Skip whitespace-only text nodes
+                if let Some(child_node) = document.get_node(child_id) {
+                    if let NodeType::Text(t) = &child_node.node_type {
+                        return !t.trim().is_empty();
+                    }
+                }
+                true
+            })
+            .map(|&child_id| build_cdp_node(document, child_id, depth + 1))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    json!({
+        "nodeId": node_id.0,
+        "backendNodeId": node_id.0,
+        "nodeType": node_type_num,
+        "nodeName": node_name,
+        "localName": local_name,
+        "nodeValue": node_value,
+        "childNodeCount": children.len(),
+        "children": children,
+    })
 }

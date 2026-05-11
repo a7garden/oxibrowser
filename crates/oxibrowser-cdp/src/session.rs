@@ -2,52 +2,74 @@
 //!
 //! Manages a WebSocket connection, dispatches incoming CDP commands to
 //! domain handlers, and sends responses back to the client.
+//!
+//! Each CDP session creates a corresponding Browser `Session` for page
+//! interaction (navigation, DOM access, JS evaluation).
 
 use crate::domains;
 use crate::protocol::{CdpRequest, CdpResponse, CdpEvent};
 use futures::{SinkExt, StreamExt};
+use oxibrowser_core::Browser;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
 /// A single CDP session over a WebSocket connection.
+///
+/// Holds a reference to the shared `Browser` and owns a `Session` that
+/// represents the browsing context for this connection.
 pub struct CdpSession {
     /// The WebSocket sink.
     sink: futures::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
         >,
         tungstenite::Message,
     >,
     /// The WebSocket stream.
     ws: futures::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
         >,
     >,
-    /// Session ID for this connection.
+    /// Session ID for this CDP connection.
     session_id: String,
     /// Target ID this session is attached to.
     target_id: Option<String>,
+    /// Shared browser instance (for creating new sessions, etc.).
+    #[allow(dead_code)]
+    browser: Arc<Browser>,
+    /// Browser session for page interaction.
+    session: Arc<RwLock<oxibrowser_core::session::Session>>,
 }
 
 impl CdpSession {
     /// Create a new CDP session wrapping a WebSocket stream.
-    pub fn new(
+    ///
+    /// This also creates a new Browser `Session` for page interaction.
+    pub async fn new(
         ws_stream: tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
         >,
-    ) -> Self {
+        browser: Arc<Browser>,
+    ) -> anyhow::Result<Self> {
         let (sink, ws) = ws_stream.split();
         let session_id = format!("session-{}", uuid::Uuid::new_v4());
 
+        // Create a browser session for this CDP connection
+        let session = browser.new_session().await?;
+
         info!(session_id = %session_id, "CDP session created");
 
-        Self {
+        Ok(Self {
             ws,
             sink,
             session_id,
             target_id: None,
-        }
+            browser,
+            session,
+        })
     }
 
     /// Run the message dispatch loop.
@@ -108,7 +130,7 @@ impl CdpSession {
         };
 
         let request_id = request.id.unwrap_or(0);
-        let session_id = request.session_id.clone();
+        let session_id_for_response = request.session_id.clone();
 
         debug!(
             id = request_id,
@@ -116,19 +138,25 @@ impl CdpSession {
             "dispatching CDP command"
         );
 
-        // Dispatch to domain handler
-        let response = match domains::dispatch(&request.method, request.params) {
+        // Dispatch to domain handler (async, passes session reference)
+        let response = match domains::dispatch(
+            &request.method,
+            request.params,
+            &self.session,
+        )
+        .await
+        {
             Ok(result) => CdpResponse {
                 id: request_id,
                 result: Some(result.unwrap_or(serde_json::json!({}))),
                 error: None,
-                session_id,
+                session_id: session_id_for_response,
             },
             Err(cdp_error) => CdpResponse {
                 id: request_id,
                 result: None,
                 error: Some(cdp_error),
-                session_id,
+                session_id: session_id_for_response,
             },
         };
 

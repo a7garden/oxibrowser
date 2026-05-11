@@ -4,7 +4,7 @@
 //! interface. When the `full-servo` feature is enabled, it wraps Servo's
 //! evaluate_javascript() for real JS execution.
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -173,5 +173,61 @@ impl JsRuntime {
 impl Default for JsRuntime {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_evaluate_string_literal() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("\"hello\"").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello".into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_number() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("42").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(42.into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_boolean() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("true").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_null() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("null").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_console_log() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("console.log(\"msg\")").await.unwrap();
+        assert!(result.is_ok());
+        assert!(result.value.is_none(), "console.log should return void");
+        assert!(rt.console_output().iter().any(|s| s.contains("msg")),
+            "console should contain 'msg'");
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_global_variable() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("myVar", Value::String("hello world".into()));
+        let result = rt.evaluate("myVar").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello world".into())));
     }
 }
