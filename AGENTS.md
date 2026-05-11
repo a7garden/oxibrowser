@@ -91,12 +91,20 @@ oxibrowser/
 │   │   └── src/
 │   │       ├── lib.rs          # Re-exports (CdpServer)
 │   │       ├── server.rs       # CdpServer: HTTP endpoints (/json, /json/version)
-│   │       ├── session.rs      # CdpSession: per-connection WebSocket dispatch
+│   │       ├── session.rs      # CdpSession: per-connection WebSocket dispatch + events
 │   │       ├── protocol.rs     # CdpRequest, CdpResponse, CdpEvent, JsonVersion, JsonTarget
+│   │       ├── event.rs        # EventSender/EventReceiver (broadcast channel)
 │   │       └── domains/
-│   │           ├── mod.rs      # dispatch() router + DomainResult
+│   │           ├── mod.rs      # dispatch() router + DispatchContext + DomainResult
 │   │           ├── browser.rs  # Browser domain (getVersion, close)
 │   │           ├── dom.rs      # DOM domain (getDocument, querySelector, ...)
+│   │           ├── fetch.rs    # Fetch domain (network interception)
+│   │           ├── network.rs  # Network domain (enable/disable, lifecycle events)
+│   │           ├── page.rs     # Page domain (navigate, reload, getFrameTree, lifecycle events)
+│   │           ├── runtime.rs  # Runtime domain (evaluate, executionContextCreated)
+│   │           └── target.rs   # Target domain (createTarget, attachToTarget)
+│   │   └── tests/
+│   │       └── e2e.rs          # Pure-Rust E2E tests (tokio-tungstenite client)
 │   │           ├── network.rs  # Network domain (enable, disable, ...)
 │   │           ├── page.rs     # Page domain (navigate, reload, screenshot, ...)
 │   │           ├── runtime.rs  # Runtime domain (evaluate, callFunctionOn, ...)
@@ -389,8 +397,8 @@ cargo build --release          # Release build
 | `Browser` | ✅ Complete | Lifecycle, sessions, cookie jar |
 | `Session` | ✅ Complete | Navigation, history, local storage |
 | `Page` | ✅ Complete | HTML loading, title extraction, resources |
-| `Frame` | ✅ Complete | DOM parsing, child frames, queries |
-| `Document` | ✅ Complete | html5ever parsing, CSS selectors, Markdown |
+| `Frame` | ✅ Complete | DOM parsing, child frames, queries, sub-resource extraction |
+| `Document` | ✅ Complete | html5ever parsing, CSS selectors, Markdown, resource URL extraction |
 | `Tree` | ✅ Complete | Adjacency list, DFS/BFS traversal |
 | `Node` | ✅ Complete | Type variants, attribute access |
 | `JsRuntime` | ✅ Stub | Literal evaluation only; servo mode planned |
@@ -400,9 +408,17 @@ cargo build --release          # Release build
 | `BrowserConfig` | ✅ Complete | Timeout, viewport, TLS, pool size |
 | `CoreError` | ✅ Complete | Typed error variants with `From` impls |
 | CDP Protocol types | ✅ Complete | CdpRequest/Response/Event, JsonVersion/Target |
-| CDP Domain dispatch | ✅ Skeleton | Router ready, domain files to be implemented |
-| CDP Server | ✅ Stub | HTTP endpoints `/json/version`, `/json` implemented; WS upgrade pending |
-| CDP Session | ✅ Stub | Per-connection dispatch loop; not yet wired to server WS upgrade |
-| CDP Domain handlers | ✅ Stub | All 6 domains return stub JSON; not yet connected to core browser |
+| CDP Event Broadcasting | ✅ Complete | EventSender/EventReceiver with atomic flags |
+| CDP DispatchContext | ✅ Complete | Session + EventSender in one context |
+| CDP Domain dispatch | ✅ Complete | Router dispatches to 7 domain handlers |
+| CDP Server | ✅ Complete | HTTP endpoints + WebSocket upgrade (RFC 6455) |
+| CDP Session | ✅ Complete | Per-connection dispatch loop with event forwarding |
+| CDP Domain handlers | ✅ Complete | Browser, DOM, Fetch, Network, Page, Runtime, Target |
+| CDP Page events | ✅ Complete | frameNavigated, domContentLoadedEventFired, loadEventFired |
+| CDP Runtime events | ✅ Complete | executionContextCreated, consoleAPICalled |
+| CDP Network events | ✅ Complete | requestWillBeSent, responseReceived, loadingFinished |
+| CDP Fetch domain | ✅ Complete | enable/disable/continueRequest/failRequest/fulfillRequest |
+| E2E Test Suite | ✅ Complete | 15 pure-Rust E2E tests via tokio-tungstenite |
 | Binary / CLI | ✅ Complete | `fetch`, `serve`, `version` subcommands via clap |
 | Servo rendering | 🔲 Planned | Offscreen rendering pipeline |
+| Servo JS engine | 🔲 Planned | Real JS execution via servo feature flag |
