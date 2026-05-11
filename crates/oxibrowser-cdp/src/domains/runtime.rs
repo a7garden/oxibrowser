@@ -96,25 +96,30 @@ async fn evaluate(
                 _ => None,
             };
 
-            // Emit consoleAPICalled for console.log statements
-            if let Value::String(s) = &value {
-                if expression.trim().starts_with("console.log") {
-                    ctx.events.send_runtime_event(
-                        "Runtime.consoleAPICalled",
+            // Emit consoleAPICalled for console.log statements.
+            // The stub evaluator pushes output to JsRuntime.console
+            // (accessible via result.console_output), NOT to result.value.
+            if !result.console_output.is_empty() {
+                let args: Vec<Value> = result
+                    .console_output
+                    .iter()
+                    .map(|msg| {
                         json!({
-                            "type": "log",
-                            "args": [
-                                {
-                                    "type": "string",
-                                    "value": s,
-                                    "description": s
-                                }
-                            ],
-                            "executionContextId": 1,
-                            "timestamp": EventSender::timestamp_ms()
-                        }),
-                    );
-                }
+                            "type": "string",
+                            "value": msg,
+                            "description": msg
+                        })
+                    })
+                    .collect();
+                ctx.events.send_runtime_event(
+                    "Runtime.consoleAPICalled",
+                    json!({
+                        "type": "log",
+                        "args": args,
+                        "executionContextId": 1,
+                        "timestamp": EventSender::timestamp_ms()
+                    }),
+                );
             }
 
             Ok(Some(json!({

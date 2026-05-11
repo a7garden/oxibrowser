@@ -117,7 +117,11 @@ impl JsRuntime {
                 .trim_matches('"')
                 .trim_matches('\'');
             self.console.push(msg.to_string());
-            return Ok(JsEvalResult::void());
+            return Ok(JsEvalResult {
+                value: None,
+                exception: None,
+                console_output: vec![msg.to_string()],
+            });
         }
 
         // String literal

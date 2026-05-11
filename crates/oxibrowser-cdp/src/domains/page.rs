@@ -76,11 +76,12 @@ async fn navigate(
         .unwrap_or("about:blank");
 
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
-    let timestamp = EventSender::timestamp_ms();
 
     let mut guard = ctx.session.write().await;
     match guard.navigate(url).await {
         Ok(()) => {
+            // Capture timestamp after navigation completes
+            let timestamp = EventSender::timestamp_ms();
             let frame_id = guard
                 .page()
                 .map(|p| p.root_frame().id().to_string())
@@ -160,11 +161,12 @@ async fn reload(
     ctx: &DispatchContext,
 ) -> DomainResult {
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
-    let timestamp = EventSender::timestamp_ms();
 
     let mut guard = ctx.session.write().await;
     match guard.reload().await {
         Ok(()) => {
+            // Capture timestamp after reload completes
+            let timestamp = EventSender::timestamp_ms();
             let frame_id = guard
                 .page()
                 .map(|p| p.root_frame().id().to_string())
