@@ -1333,6 +1333,7 @@ dependencies = [
  "hyper-util",
  "oxibrowser-core",
  "oxibrowser-webapi",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",

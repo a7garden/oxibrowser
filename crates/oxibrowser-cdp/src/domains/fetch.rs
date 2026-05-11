@@ -233,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enable_disable() {
-        let (tx, _rx) = crate::event::event_channel();
+        let (_tx, _rx) = crate::event::event_channel();
         let state = intercepted_state();
         {
             let mut s = state.lock().await;

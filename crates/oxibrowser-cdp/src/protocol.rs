@@ -72,6 +72,7 @@ pub struct JsonVersion {
     pub user_agent: String,
     pub v8_version: String,
     pub webkit_version: String,
+    #[serde(rename = "webSocketDebuggerUrl")]
     pub web_socket_url: String,
 }
 
