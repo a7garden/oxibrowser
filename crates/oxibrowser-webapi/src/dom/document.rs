@@ -200,6 +200,83 @@ impl Document {
         }
     }
 
+    /// Extract all sub-resource URLs from the document.
+    ///
+    /// Finds `<script src>`, `<link href>` (stylesheet), `<img src>`,
+    /// `<iframe src>` elements and returns their URLs.
+    pub fn extract_resource_urls(&self) -> Vec<ResourceUrl> {
+        let mut urls = Vec::new();
+        if let Some(root) = self.tree.root() {
+            self.extract_resources_recursive(root, &mut urls);
+        }
+        urls
+    }
+
+    fn extract_resources_recursive(&self, node_id: NodeId, urls: &mut Vec<ResourceUrl>) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            if let NodeType::Element { tag, attributes, .. } = &node.node_type {
+                let tag_lower = tag.to_lowercase();
+                match tag_lower.as_str() {
+                    "script" => {
+                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
+                            (k == "src").then_some(v.as_str())
+                        }) {
+                            urls.push(ResourceUrl {
+                                url: src.to_string(),
+                                kind: ResourceKind::Script,
+                            });
+                        }
+                    }
+                    "link" => {
+                        let rel = attributes.iter().find_map(|(k, v)| {
+                            (k == "rel").then_some(v.as_str())
+                        });
+                        let href = attributes.iter().find_map(|(k, v)| {
+                            (k == "href").then_some(v.as_str())
+                        });
+                        if let (Some(rel), Some(href)) = (rel, href) {
+                            if rel.contains("stylesheet") {
+                                urls.push(ResourceUrl {
+                                    url: href.to_string(),
+                                    kind: ResourceKind::Stylesheet,
+                                });
+                            } else if rel.contains("icon") {
+                                urls.push(ResourceUrl {
+                                    url: href.to_string(),
+                                    kind: ResourceKind::Image,
+                                });
+                            }
+                        }
+                    }
+                    "img" => {
+                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
+                            (k == "src").then_some(v.as_str())
+                        }) {
+                            urls.push(ResourceUrl {
+                                url: src.to_string(),
+                                kind: ResourceKind::Image,
+                            });
+                        }
+                    }
+                    "iframe" => {
+                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
+                            (k == "src").then_some(v.as_str())
+                        }) {
+                            urls.push(ResourceUrl {
+                                url: src.to_string(),
+                                kind: ResourceKind::Iframe,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for &child in self.tree.children(node_id) {
+            self.extract_resources_recursive(child, urls);
+        }
+    }
+
     /// Convert the document to a simple Markdown representation.
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
@@ -321,10 +398,32 @@ impl Document {
         }
     }
 
-    /// Number of nodes in the document.
+/// Number of nodes in the document.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
+}
+
+/// A resource URL extracted from the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceUrl {
+    /// The URL of the resource.
+    pub url: String,
+    /// Kind of resource.
+    pub kind: ResourceKind,
+}
+
+/// Kind of sub-resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// JavaScript file.
+    Script,
+    /// CSS stylesheet.
+    Stylesheet,
+    /// Image.
+    Image,
+    /// Iframe.
+    Iframe,
 }
 
 impl Default for Document {
@@ -662,5 +761,44 @@ mod tests {
         let node = doc.get_node(node_id).unwrap();
         assert_eq!(node.get_attribute("href"), Some("http://example.com"));
         assert_eq!(node.get_attribute("class"), Some("cls"));
+    }
+
+    #[test]
+    fn test_extract_resource_urls() {
+        let html = r#"<html><head>
+            <script src="/app.js"></script>
+            <link rel="stylesheet" href="/style.css">
+            <link rel="icon" href="/favicon.ico">
+        </head><body>
+            <img src="/photo.jpg" alt="photo">
+            <iframe src="/embed.html"></iframe>
+        </body></html>"#;
+        let doc = Document::parse(html);
+        let resources = doc.extract_resource_urls();
+
+        let script_urls: Vec<_> = resources.iter()
+            .filter(|r| r.kind == ResourceKind::Script)
+            .map(|r| r.url.as_str())
+            .collect();
+        assert!(script_urls.contains(&"/app.js"), "should find script src");
+
+        let css_urls: Vec<_> = resources.iter()
+            .filter(|r| r.kind == ResourceKind::Stylesheet)
+            .map(|r| r.url.as_str())
+            .collect();
+        assert!(css_urls.contains(&"/style.css"), "should find stylesheet href");
+
+        let img_urls: Vec<_> = resources.iter()
+            .filter(|r| r.kind == ResourceKind::Image)
+            .map(|r| r.url.as_str())
+            .collect();
+        assert!(img_urls.contains(&"/photo.jpg"), "should find img src");
+        assert!(img_urls.contains(&"/favicon.ico"), "should find favicon");
+
+        let iframe_urls: Vec<_> = resources.iter()
+            .filter(|r| r.kind == ResourceKind::Iframe)
+            .map(|r| r.url.as_str())
+            .collect();
+        assert!(iframe_urls.contains(&"/embed.html"), "should find iframe src");
     }
 }

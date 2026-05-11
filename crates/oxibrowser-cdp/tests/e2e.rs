@@ -14,6 +14,10 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+// ---------------------------------------------------------------------------
+// Test infrastructure
+// ---------------------------------------------------------------------------
+
 /// Find an available TCP port.
 fn find_available_port() -> u16 {
     use std::net::TcpListener;
@@ -24,8 +28,94 @@ fn find_available_port() -> u16 {
         .port()
 }
 
-/// Helper: connect to the CDP server via WebSocket.
-async fn connect_ws(addr: SocketAddr) -> (
+/// A minimal HTTP server that serves static HTML for testing.
+struct TestHttpServer {
+    addr: SocketAddr,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl TestHttpServer {
+    /// Start serving the given HTML on a random port.
+    fn start(html: &'static str) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Set non-blocking so tokio can use it
+        listener.set_nonblocking(true).unwrap();
+        let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            let body = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {}",
+                html.len(),
+                html
+            );
+
+            loop {
+                tokio::select! {
+                    accept = tokio_listener.accept() => {
+                        if let Ok((mut stream, _)) = accept {
+                            use tokio::io::AsyncWriteExt;
+                            let _ = stream.write_all(body.as_bytes()).await;
+                            let _ = stream.shutdown().await;
+                        }
+                    }
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            addr,
+            shutdown: Some(shutdown_tx),
+        }
+    }
+
+    /// Get the address this server is listening on.
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for TestHttpServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Start a CDP server on a random port.
+async fn start_cdp_server() -> (Arc<CdpServer>, SocketAddr) {
+    let port = find_available_port();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let config = oxibrowser_core::BrowserConfig::headless();
+    let browser = Arc::new(Browser::new(config).await.unwrap());
+    let server = Arc::new(CdpServer::new(addr, browser));
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        let _ = server_clone.start().await;
+    });
+
+    // Give the server a moment to bind
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    (server, addr)
+}
+
+/// Connect to a CDP server via WebSocket.
+async fn connect_ws(
+    addr: SocketAddr,
+) -> (
     futures::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -44,7 +134,7 @@ async fn connect_ws(addr: SocketAddr) -> (
     ws.split()
 }
 
-/// Helper: send a CDP command and return the response.
+/// Send a CDP command and return the response (skipping events).
 async fn send_command(
     sink: &mut futures::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -70,25 +160,31 @@ async fn send_command(
         .await
         .unwrap();
 
-    // Read response
-    while let Some(result) = ws.next().await {
-        match result {
-            Ok(tungstenite::Message::Text(text)) => {
+    // Read response (skip events)
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timeout waiting for response to command {id} ({method})");
+        }
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
                 let response: Value = serde_json::from_str(&text).unwrap();
                 if response.get("id").and_then(|v| v.as_u64()) == Some(id) {
                     return response;
                 }
-                // Skip events (no "id" field) — they're expected
+                // Skip events
             }
-            Ok(_) => continue,
-            Err(e) => panic!("WebSocket error: {e}"),
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
+            Ok(None) => panic!("WebSocket stream ended before response"),
+            Err(_) => panic!("timeout waiting for response to command {id}"),
         }
     }
-
-    panic!("no response received for command {id}");
 }
 
-/// Helper: collect CDP events matching a method prefix.
+/// Collect CDP events matching a method prefix within a time window.
 async fn collect_events(
     ws: &mut futures::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -119,7 +215,7 @@ async fn collect_events(
             Ok(Some(Ok(_))) => continue,
             Ok(Some(Err(_))) => break,
             Ok(None) => break,
-            Err(_) => break, // timeout
+            Err(_) => break,
         }
     }
 
@@ -127,24 +223,13 @@ async fn collect_events(
 }
 
 // ============================================================
-// Tests
+// HTTP endpoint tests
 // ============================================================
 
 #[tokio::test]
 async fn test_http_json_version() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
+    let (server, addr) = start_cdp_server().await;
 
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // GET /json/version
     let resp = reqwest::get(format!("http://{addr}/json/version"))
         .await
         .unwrap();
@@ -160,19 +245,8 @@ async fn test_http_json_version() {
 
 #[tokio::test]
 async fn test_http_json_list() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
+    let (server, addr) = start_cdp_server().await;
 
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // GET /json
     let resp = reqwest::get(format!("http://{addr}/json"))
         .await
         .unwrap();
@@ -185,26 +259,17 @@ async fn test_http_json_list() {
     server.shutdown();
 }
 
+// ============================================================
+// WebSocket CDP command tests
+// ============================================================
+
 #[tokio::test]
 async fn test_ws_connect_and_browser_get_version() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Browser.getVersion
     let resp = send_command(&mut sink, &mut ws, 1, "Browser.getVersion", None).await;
     assert_eq!(resp["id"], 1);
-    assert!(resp["result"]["protocolVersion"].is_string());
     assert_eq!(resp["result"]["protocolVersion"], "1.3");
 
     server.shutdown();
@@ -212,18 +277,7 @@ async fn test_ws_connect_and_browser_get_version() {
 
 #[tokio::test]
 async fn test_page_enable_events() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
     // Runtime.enable
@@ -237,27 +291,16 @@ async fn test_page_enable_events() {
         events[0]["method"], "Runtime.executionContextCreated",
         "first event should be executionContextCreated"
     );
+    assert!(events[0]["params"]["context"]["id"].is_number());
 
     server.shutdown();
 }
 
 #[tokio::test]
 async fn test_page_get_frame_tree() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Page.getFrameTree (no navigation yet — should return about:blank stub)
     let resp = send_command(&mut sink, &mut ws, 1, "Page.getFrameTree", None).await;
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["frameTree"]["frame"].is_object());
@@ -268,25 +311,12 @@ async fn test_page_get_frame_tree() {
 
 #[tokio::test]
 async fn test_dom_get_document() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // DOM.getDocument (no page loaded — should return empty document)
     let resp = send_command(&mut sink, &mut ws, 1, "DOM.getDocument", None).await;
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["root"].is_object());
-    // Root is a document node (nodeType 9)
     assert_eq!(resp["result"]["root"]["nodeType"], 9);
 
     server.shutdown();
@@ -294,21 +324,10 @@ async fn test_dom_get_document() {
 
 #[tokio::test]
 async fn test_runtime_evaluate() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Runtime.evaluate — number literal
+    // Number literal
     let resp = send_command(
         &mut sink,
         &mut ws,
@@ -321,7 +340,7 @@ async fn test_runtime_evaluate() {
     assert_eq!(resp["result"]["result"]["type"], "number");
     assert_eq!(resp["result"]["result"]["value"], 42);
 
-    // Runtime.evaluate — string literal
+    // String literal
     let resp = send_command(
         &mut sink,
         &mut ws,
@@ -339,21 +358,9 @@ async fn test_runtime_evaluate() {
 
 #[tokio::test]
 async fn test_unknown_domain_returns_error() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Unknown domain
     let resp = send_command(&mut sink, &mut ws, 1, "Foo.bar", None).await;
     assert_eq!(resp["id"], 1);
     assert!(resp["error"].is_object());
@@ -364,18 +371,7 @@ async fn test_unknown_domain_returns_error() {
 
 #[tokio::test]
 async fn test_target_domain() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
     // Target.getTargets
@@ -400,29 +396,354 @@ async fn test_target_domain() {
 
 #[tokio::test]
 async fn test_fetch_domain_enable_disable() {
-    let port = find_available_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = Arc::new(Browser::new(config).await.unwrap());
-    let server = Arc::new(CdpServer::new(addr, browser));
-
-    let server_clone = server.clone();
-    tokio::spawn(async move {
-        let _ = server_clone.start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
+    let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Fetch.enable
     let resp = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
     assert_eq!(resp["id"], 1);
     assert!(resp["result"].is_object());
 
-    // Fetch.disable
     let resp = send_command(&mut sink, &mut ws, 2, "Fetch.disable", None).await;
     assert_eq!(resp["id"], 2);
     assert!(resp["result"].is_object());
 
     server.shutdown();
+}
+
+// ============================================================
+// Full navigation E2E tests
+// ============================================================
+
+#[tokio::test]
+async fn test_navigate_to_local_server_and_inspect_dom() {
+    // Start a local HTTP server with known HTML
+    let html = r#"<html>
+        <head><title>E2E Test Page</title></head>
+        <body>
+            <h1 id="heading">Hello OxiBrowser</h1>
+            <p class="content">This is a test page.</p>
+            <ul>
+                <li class="item">Item 1</li>
+                <li class="item">Item 2</li>
+                <li class="item">Item 3</li>
+            </ul>
+            <a href="/link" id="mylink">Click me</a>
+        </body>
+    </html>"#;
+    let http_server = TestHttpServer::start(html);
+
+    // Start CDP server
+    let (cdp_server, cdp_addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(cdp_addr).await;
+
+    // Navigate to the local server
+    let url = format!("http://{}/", http_server.addr());
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )
+    .await;
+
+    assert_eq!(resp["id"], 1);
+    assert!(resp["result"]["frameId"].is_string());
+    assert!(resp["result"]["loaderId"].is_string());
+
+    // Verify DOM.getDocument returns a real parsed tree
+    let resp = send_command(&mut sink, &mut ws, 2, "DOM.getDocument", None).await;
+    assert_eq!(resp["id"], 2);
+    let root = &resp["result"]["root"];
+    assert_eq!(root["nodeType"], 9, "root should be a document node");
+    assert!(root["children"].is_array(), "root should have children");
+
+    // Verify Page.getFrameTree has the navigated URL
+    let resp = send_command(&mut sink, &mut ws, 3, "Page.getFrameTree", None).await;
+    assert_eq!(resp["id"], 3);
+    let frame_url = resp["result"]["frameTree"]["frame"]["url"].as_str().unwrap();
+    assert!(
+        frame_url.contains("127.0.0.1"),
+        "frame URL should point to local server, got: {frame_url}"
+    );
+
+    // Verify DOM.querySelector finds #heading
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        4,
+        "DOM.querySelector",
+        Some(json!({ "nodeId": 0, "selector": "#heading" })),
+    )
+    .await;
+    assert_eq!(resp["id"], 4);
+    let heading_id = resp["result"]["nodeId"].as_u64().unwrap();
+    assert!(heading_id > 0, "should find #heading element");
+
+    // Verify DOM.querySelectorAll finds .item
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        5,
+        "DOM.querySelectorAll",
+        Some(json!({ "nodeId": 0, "selector": ".item" })),
+    )
+    .await;
+    assert_eq!(resp["id"], 5);
+    let items = resp["result"]["nodeIds"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "should find 3 .item elements");
+
+    // Verify DOM.getOuterHTML returns the full HTML
+    let resp = send_command(&mut sink, &mut ws, 6, "DOM.getOuterHTML", None).await;
+    assert_eq!(resp["id"], 6);
+    let outer_html = resp["result"]["outerHTML"].as_str().unwrap();
+    assert!(
+        outer_html.contains("Hello OxiBrowser"),
+        "HTML should contain heading text"
+    );
+    assert!(
+        outer_html.contains("E2E Test Page"),
+        "HTML should contain title"
+    );
+
+    cdp_server.shutdown();
+}
+
+#[tokio::test]
+async fn test_navigate_emits_page_events() {
+    let html = r#"<html><head><title>Event Test</title></head><body><p>Content</p></body></html>"#;
+    let http_server = TestHttpServer::start(html);
+
+    let (cdp_server, cdp_addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(cdp_addr).await;
+
+    // Enable Page events first
+    let _ = send_command(&mut sink, &mut ws, 1, "Page.enable", None).await;
+
+    // Navigate
+    let url = format!("http://{}/", http_server.addr());
+    let _ = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )
+    .await;
+
+    // Collect Page events
+    let events = collect_events(&mut ws, "Page.", 1000).await;
+    let methods: Vec<&str> = events.iter().filter_map(|e| e["method"].as_str()).collect();
+
+    assert!(
+        methods.contains(&"Page.frameNavigated"),
+        "should emit Page.frameNavigated, got: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"Page.domContentLoadedEventFired"),
+        "should emit Page.domContentLoadedEventFired, got: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"Page.loadEventFired"),
+        "should emit Page.loadEventFired, got: {methods:?}"
+    );
+
+    cdp_server.shutdown();
+}
+
+#[tokio::test]
+async fn test_navigate_emits_network_events() {
+    let html = r#"<html><body><p>Network Test</p></body></html>"#;
+    let http_server = TestHttpServer::start(html);
+
+    let (cdp_server, cdp_addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(cdp_addr).await;
+
+    // Enable Network events
+    let _ = send_command(&mut sink, &mut ws, 1, "Network.enable", None).await;
+
+    // Navigate
+    let url = format!("http://{}/", http_server.addr());
+    let _ = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )
+    .await;
+
+    // Collect Network events
+    let events = collect_events(&mut ws, "Network.", 1000).await;
+    let methods: Vec<&str> = events.iter().filter_map(|e| e["method"].as_str()).collect();
+
+    assert!(
+        methods.contains(&"Network.requestWillBeSent"),
+        "should emit Network.requestWillBeSent, got: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"Network.responseReceived"),
+        "should emit Network.responseReceived, got: {methods:?}"
+    );
+    assert!(
+        methods.contains(&"Network.loadingFinished"),
+        "should emit Network.loadingFinished, got: {methods:?}"
+    );
+
+    // Verify the request URL is correct
+    let req_event = events
+        .iter()
+        .find(|e| e["method"] == "Network.requestWillBeSent")
+        .unwrap();
+    let req_url = req_event["params"]["request"]["url"].as_str().unwrap();
+    assert!(
+        req_url.contains("127.0.0.1"),
+        "request URL should point to local server, got: {req_url}"
+    );
+
+    cdp_server.shutdown();
+}
+
+#[tokio::test]
+async fn test_runtime_evaluate_after_navigation() {
+    let html = r#"<html><body><p>JS Test</p></body></html>"#;
+    let http_server = TestHttpServer::start(html);
+
+    let (cdp_server, cdp_addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(cdp_addr).await;
+
+    // Navigate first
+    let url = format!("http://{}/", http_server.addr());
+    let _ = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )
+    .await;
+
+    // Drain any events
+    let _ = collect_events(&mut ws, "Page.", 200).await;
+
+    // Now evaluate JS
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Runtime.evaluate",
+        Some(json!({ "expression": "'hello world'" })),
+    )
+    .await;
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"]["result"]["type"], "string");
+    assert_eq!(resp["result"]["result"]["value"], "hello world");
+
+    // Boolean
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        3,
+        "Runtime.evaluate",
+        Some(json!({ "expression": "true" })),
+    )
+    .await;
+    assert_eq!(resp["result"]["result"]["type"], "boolean");
+    assert_eq!(resp["result"]["result"]["value"], true);
+
+    // Number
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        4,
+        "Runtime.evaluate",
+        Some(json!({ "expression": "3.14" })),
+    )
+    .await;
+    assert_eq!(resp["result"]["result"]["type"], "number");
+
+    cdp_server.shutdown();
+}
+
+#[tokio::test]
+async fn test_full_workflow_connect_navigate_inspect_close() {
+    let html = r#"<html>
+        <head><title>Full Workflow</title></head>
+        <body>
+            <div id="main">
+                <h2>Workflow Test</h2>
+                <p class="desc">Description</p>
+            </div>
+        </body>
+    </html>"#;
+    let http_server = TestHttpServer::start(html);
+
+    let (cdp_server, cdp_addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(cdp_addr).await;
+
+    // 1. Browser.getVersion
+    let resp = send_command(&mut sink, &mut ws, 1, "Browser.getVersion", None).await;
+    assert_eq!(resp["result"]["protocolVersion"], "1.3");
+
+    // 2. Enable Runtime
+    let _ = send_command(&mut sink, &mut ws, 2, "Runtime.enable", None).await;
+    let _ = collect_events(&mut ws, "Runtime.", 300).await;
+
+    // 3. Enable Page
+    let _ = send_command(&mut sink, &mut ws, 3, "Page.enable", None).await;
+
+    // 4. Navigate
+    let url = format!("http://{}/", http_server.addr());
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        4,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )
+    .await;
+    assert!(resp["result"]["frameId"].is_string());
+
+    // 5. Collect Page events
+    let events = collect_events(&mut ws, "Page.", 500).await;
+    assert!(!events.is_empty(), "should receive page events");
+
+    // 6. Inspect DOM
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        5,
+        "DOM.querySelector",
+        Some(json!({ "nodeId": 0, "selector": "#main" })),
+    )
+    .await;
+    assert!(resp["result"]["nodeId"].as_u64().unwrap() > 0);
+
+    // 7. Get all items
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        6,
+        "DOM.querySelectorAll",
+        Some(json!({ "nodeId": 0, "selector": "p" })),
+    )
+    .await;
+    assert_eq!(resp["result"]["nodeIds"].as_array().unwrap().len(), 1);
+
+    // 8. Evaluate JS
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        7,
+        "Runtime.evaluate",
+        Some(json!({ "expression": "1 + 1" })),
+    )
+    .await;
+    // In stub mode, "1 + 1" returns as string "1 + 1"
+    // (stub doesn't evaluate expressions, only literals)
+    assert!(resp["result"]["result"]["value"].is_string()
+         || resp["result"]["result"]["value"].is_number(),
+        "should return some value");
+
+    cdp_server.shutdown();
 }

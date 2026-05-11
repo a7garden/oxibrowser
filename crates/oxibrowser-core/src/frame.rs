@@ -131,4 +131,12 @@ impl Frame {
     pub fn text_content(&self, node_id: NodeId) -> Option<String> {
         self.document.text_content(node_id)
     }
+
+    /// Extract sub-resource URLs from the DOM.
+    ///
+    /// Finds `<script src>`, `<link href>` (stylesheet), `<img src>`,
+    /// `<iframe src>` and returns their URLs.
+    pub fn extract_resource_urls(&self) -> Vec<oxibrowser_webapi::dom::ResourceUrl> {
+        self.document.extract_resource_urls()
+    }
 }

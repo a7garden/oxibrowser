@@ -107,7 +107,9 @@ impl Session {
         let page = Page::from_html(parsed.clone(), &html, status, content_type).await?;
 
         // Update history
-        if self.history_index < self.history.len() - 1 {
+        if self.history.is_empty() {
+            // First navigation — just push
+        } else if self.history_index < self.history.len() - 1 {
             self.history.truncate(self.history_index + 1);
         }
         self.history.push(parsed);
