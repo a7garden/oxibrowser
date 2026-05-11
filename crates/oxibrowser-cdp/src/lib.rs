@@ -8,6 +8,7 @@
 pub mod server;
 pub mod session;
 pub mod protocol;
+pub mod event;
 
 pub mod domains;
 

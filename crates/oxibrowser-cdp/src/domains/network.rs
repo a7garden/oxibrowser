@@ -1,19 +1,25 @@
 //! CDP Network domain handler.
 //!
-//! Handles Network.enable, Network.disable, Network.loadResource,
-//! Network.getResponseBody.
+//! Handles Network.enable, Network.disable, and emits network lifecycle
+//! events when enabled:
+//! - Network.requestWillBeSent
+//! - Network.responseReceived
+//! - Network.loadingFinished
 
-use crate::domains::DomainResult;
+use crate::domains::{DispatchContext, DomainResult};
+use crate::event::EventSender;
 use crate::protocol::CdpError;
 use serde_json::{json, Value};
 
 /// Dispatch Network domain methods.
-pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
+pub async fn handle(
+    method: &str,
+    _params: Option<Value>,
+    ctx: &DispatchContext,
+) -> DomainResult {
     match method {
-        "enable" => enable(),
-        "disable" => disable(),
-        "loadResource" => load_resource(params),
-        "getResponseBody" => get_response_body(params),
+        "enable" => enable(ctx),
+        "disable" => disable(ctx),
         "setCacheDisabled" => Ok(Some(json!({}))),
         "setExtraHTTPHeaders" => Ok(Some(json!({}))),
         "emulateNetworkConditions" => Ok(Some(json!({}))),
@@ -24,44 +30,88 @@ pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
     }
 }
 
-/// Network.enable — enables network tracking.
-fn enable() -> DomainResult {
-    // In a real implementation, this would start intercepting network events.
+/// Network.enable — enables network tracking, events will be sent.
+fn enable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_network_enabled(true);
     Ok(Some(json!({})))
 }
 
 /// Network.disable — disables network tracking.
-fn disable() -> DomainResult {
+fn disable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_network_enabled(false);
     Ok(Some(json!({})))
 }
 
-/// Network.loadResource — loads a resource from the network.
-fn load_resource(params: Option<Value>) -> DomainResult {
-    let params = params.unwrap_or_default();
-    let _url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+/// Emit network events for a navigation request.
+///
+/// Called from Page.navigate when Network domain is enabled.
+pub fn emit_navigation_events(
+    events: &EventSender,
+    request_id: &str,
+    url: &str,
+    loader_id: &str,
+    status: u16,
+    content_type: &str,
+) {
+    let timestamp = EventSender::timestamp_ms();
 
-    // In a real implementation, this would fetch the resource.
-    Ok(Some(json!({
-        "resource": {
-            "success": true,
-            "httpStatusCode": 200,
-            "stream": "",
-            "headers": {}
-        }
-    })))
-}
+    // Network.requestWillBeSent
+    events.send_network_event(
+        "Network.requestWillBeSent",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "documentURL": url,
+            "request": {
+                "url": url,
+                "method": "GET",
+                "headers": {},
+                "initialPriority": "VeryHigh",
+                "urlFragment": "",
+            },
+            "timestamp": timestamp,
+            "wallTime": timestamp / 1000.0,
+            "initiator": {
+                "type": "other"
+            },
+            "type": "Document",
+            "frameId": "main",
+            "hasUserGesture": false,
+        }),
+    );
 
-/// Network.getResponseBody — returns the body of a previously loaded resource.
-fn get_response_body(params: Option<Value>) -> DomainResult {
-    let params = params.unwrap_or_default();
-    let _request_id = params
-        .get("requestId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    // Network.responseReceived
+    events.send_network_event(
+        "Network.responseReceived",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "timestamp": timestamp,
+            "type": "Document",
+            "response": {
+                "url": url,
+                "status": status,
+                "statusText": if status == 200 { "OK" } else { "" },
+                "headers": {
+                    "Content-Type": content_type,
+                },
+                "mimeType": content_type,
+                "connectionReused": false,
+                "connectionId": 0,
+                "encodedDataLength": 0,
+                "securityState": "secure",
+            },
+            "frameId": "main",
+        }),
+    );
 
-    // In a real implementation, this would return the cached response body.
-    Ok(Some(json!({
-        "body": "",
-        "base64Encoded": false
-    })))
+    // Network.loadingFinished
+    events.send_network_event(
+        "Network.loadingFinished",
+        json!({
+            "requestId": request_id,
+            "timestamp": timestamp,
+            "encodedDataLength": 0,
+        }),
+    );
 }

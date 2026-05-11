@@ -3,26 +3,22 @@
 //! Handles Runtime.enable, Runtime.disable, Runtime.evaluate,
 //! Runtime.callFunctionOn, Runtime.getProperties.
 //!
-//! Runtime.evaluate delegates to the real JS runtime in the browser session
-//! when a page is loaded; otherwise falls back to a stub evaluator.
+//! After Runtime.enable, emits Runtime.executionContextCreated.
 
-use crate::domains::DomainResult;
+use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
-use oxibrowser_core::session::Session;
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Dispatch Runtime domain methods.
 pub async fn handle(
     method: &str,
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     match method {
-        "enable" => enable(),
-        "disable" => disable(),
-        "evaluate" => evaluate(params, session).await,
+        "enable" => enable(ctx),
+        "disable" => disable(ctx),
+        "evaluate" => evaluate(params, ctx).await,
         "callFunctionOn" => call_function_on(params),
         "getProperties" => get_properties(params),
         "compileScript" => Ok(Some(json!({ "scriptId": "", "exceptionDetails": null }))),
@@ -38,22 +34,39 @@ pub async fn handle(
 }
 
 /// Runtime.enable — enables runtime event reporting.
-fn enable() -> DomainResult {
+fn enable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_runtime_enabled(true);
+
+    // Emit executionContextCreated
+    ctx.events.send_runtime_event(
+        "Runtime.executionContextCreated",
+        json!({
+            "context": {
+                "id": 1,
+                "origin": "",
+                "name": "main",
+                "uniqueId": format!("context-{}", uuid::Uuid::new_v4()),
+                "auxData": {
+                    "isDefault": true,
+                    "type": "default"
+                }
+            }
+        }),
+    );
+
     Ok(Some(json!({})))
 }
 
 /// Runtime.disable — disables runtime event reporting.
-fn disable() -> DomainResult {
+fn disable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_runtime_enabled(false);
     Ok(Some(json!({})))
 }
 
 /// Runtime.evaluate — evaluates a JavaScript expression.
-///
-/// If a page is loaded in the session, delegates to the real JS runtime.
-/// Otherwise, falls back to the stub evaluator.
 async fn evaluate(
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     let params = params.unwrap_or_default();
     let expression = params
@@ -61,7 +74,7 @@ async fn evaluate(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let mut guard = session.write().await;
+    let mut guard = ctx.session.write().await;
 
     // Try the real JS runtime if we have a session
     match guard.evaluate_js(expression).await {
@@ -83,6 +96,27 @@ async fn evaluate(
                 _ => None,
             };
 
+            // Emit consoleAPICalled for console.log statements
+            if let Value::String(s) = &value {
+                if expression.trim().starts_with("console.log") {
+                    ctx.events.send_runtime_event(
+                        "Runtime.consoleAPICalled",
+                        json!({
+                            "type": "log",
+                            "args": [
+                                {
+                                    "type": "string",
+                                    "value": s,
+                                    "description": s
+                                }
+                            ],
+                            "executionContextId": 1,
+                            "timestamp": EventSender::timestamp_ms()
+                        }),
+                    );
+                }
+            }
+
             Ok(Some(json!({
                 "result": {
                     "type": result_type,
@@ -93,7 +127,6 @@ async fn evaluate(
             })))
         }
         Err(_) => {
-            // Fallback to stub evaluator for sessions without JS support
             let (result_type, value) = classify_expression(expression);
             Ok(Some(json!({
                 "result": {
@@ -199,3 +232,6 @@ fn classify_expression(expr: &str) -> (String, Value) {
         Value::String(trimmed.to_string()),
     )
 }
+
+// Import EventSender for timestamp_ms
+use crate::event::EventSender;

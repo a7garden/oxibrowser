@@ -2,28 +2,23 @@
 //!
 //! Handles DOM.getDocument, DOM.querySelector, DOM.querySelectorAll,
 //! DOM.getOuterHTML, DOM.describeNode, DOM.resolveNode.
-//!
-//! Domain handlers use the real browser session to access parsed DOM data.
 
-use crate::domains::DomainResult;
+use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
-use oxibrowser_core::session::Session;
-use oxibrowser_webapi::dom::{Document, NodeId, NodeType};
+use oxibrowser_webapi::dom::{NodeId, NodeType};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Dispatch DOM domain methods.
 pub async fn handle(
     method: &str,
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     match method {
-        "getDocument" => get_document(session).await,
-        "querySelector" => query_selector(params, session).await,
-        "querySelectorAll" => query_selector_all(params, session).await,
-        "getOuterHTML" => get_outer_html(params, session).await,
+        "getDocument" => get_document(ctx).await,
+        "querySelector" => query_selector(params, ctx).await,
+        "querySelectorAll" => query_selector_all(params, ctx).await,
+        "getOuterHTML" => get_outer_html(ctx).await,
         "describeNode" => describe_node(params),
         "resolveNode" => resolve_node(params),
         _ => Err(CdpError {
@@ -34,8 +29,8 @@ pub async fn handle(
 }
 
 /// DOM.getDocument — returns the root DOM node from the real parsed document.
-async fn get_document(session: &Arc<RwLock<Session>>) -> DomainResult {
-    let guard = session.read().await;
+async fn get_document(ctx: &DispatchContext) -> DomainResult {
+    let guard = ctx.session.read().await;
     match guard.page() {
         Some(page) => {
             let document = page.root_frame().document();
@@ -77,19 +72,15 @@ async fn get_document(session: &Arc<RwLock<Session>>) -> DomainResult {
 /// DOM.querySelector — finds a single node matching a CSS selector.
 async fn query_selector(
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     let params = params.unwrap_or_default();
-    let node_id = params
-        .get("nodeId")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
     let selector = params
         .get("selector")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let guard = session.read().await;
+    let guard = ctx.session.read().await;
     match guard.page() {
         Some(page) => {
             let frame = page.root_frame();
@@ -103,7 +94,7 @@ async fn query_selector(
             }
         }
         None => Ok(Some(json!({
-            "nodeId": node_id + 100
+            "nodeId": 0
         }))),
     }
 }
@@ -111,7 +102,7 @@ async fn query_selector(
 /// DOM.querySelectorAll — finds all nodes matching a CSS selector.
 async fn query_selector_all(
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     let params = params.unwrap_or_default();
     let selector = params
@@ -119,7 +110,7 @@ async fn query_selector_all(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let guard = session.read().await;
+    let guard = ctx.session.read().await;
     match guard.page() {
         Some(page) => {
             let document = page.root_frame().document();
@@ -139,11 +130,8 @@ async fn query_selector_all(
 }
 
 /// DOM.getOuterHTML — returns the actual HTML from the session's page.
-async fn get_outer_html(
-    _params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
-) -> DomainResult {
-    let guard = session.read().await;
+async fn get_outer_html(ctx: &DispatchContext) -> DomainResult {
+    let guard = ctx.session.read().await;
     let html = match guard.page() {
         Some(page) => page.content().to_string(),
         None => "<html><head></head><body></body></html>".to_string(),
@@ -202,10 +190,7 @@ fn resolve_node(params: Option<Value>) -> DomainResult {
 const MAX_CDP_TREE_DEPTH: usize = 10;
 
 /// Build a CDP-compatible JSON node from the webapi DOM tree.
-///
-/// Converts the parsed html5ever DOM into the format expected by CDP clients
-/// (e.g., Chrome DevTools, Puppeteer).
-fn build_cdp_node(document: &Document, node_id: NodeId, depth: usize) -> Value {
+fn build_cdp_node(document: &oxibrowser_webapi::dom::Document, node_id: NodeId, depth: usize) -> Value {
     let node = match document.get_node(node_id) {
         Some(n) => n,
         None => return json!({}),
@@ -227,7 +212,6 @@ fn build_cdp_node(document: &Document, node_id: NodeId, depth: usize) -> Value {
             .children(node_id)
             .iter()
             .filter(|&&child_id| {
-                // Skip whitespace-only text nodes
                 if let Some(child_node) = document.get_node(child_id) {
                     if let NodeType::Text(t) = &child_node.node_type {
                         return !t.trim().is_empty();

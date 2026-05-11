@@ -1,13 +1,15 @@
 //! CDP session — a single WebSocket connection for CDP communication.
 //!
 //! Manages a WebSocket connection, dispatches incoming CDP commands to
-//! domain handlers, and sends responses back to the client.
+//! domain handlers, and sends responses and events back to the client.
 //!
 //! Each CDP session creates a corresponding Browser `Session` for page
 //! interaction (navigation, DOM access, JS evaluation).
 
 use crate::domains;
-use crate::protocol::{CdpRequest, CdpResponse, CdpEvent};
+use crate::domains::DispatchContext;
+use crate::event::{event_channel, EventReceiver, EventSender};
+use crate::protocol::{CdpEvent, CdpRequest, CdpResponse};
 use futures::{SinkExt, StreamExt};
 use oxibrowser_core::Browser;
 use std::sync::Arc;
@@ -17,37 +19,38 @@ use tracing::{debug, error, info, warn};
 
 /// A single CDP session over a WebSocket connection.
 ///
-/// Holds a reference to the shared `Browser` and owns a `Session` that
-/// represents the browsing context for this connection.
+/// Holds a reference to the shared `Browser`, owns a `Session` that
+/// represents the browsing context, and runs an event broadcaster that
+/// forwards CDP events to the WebSocket client.
 pub struct CdpSession {
-    /// The WebSocket sink.
-    sink: futures::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
-        >,
-        tungstenite::Message,
-    >,
-    /// The WebSocket stream.
+    /// The WebSocket sink (for sending responses).
+    sink:
+        futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>, tungstenite::Message>,
+    /// The WebSocket stream (for receiving commands).
     ws: futures::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
-        >,
+        tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
     >,
     /// Session ID for this CDP connection.
     session_id: String,
     /// Target ID this session is attached to.
+    #[allow(dead_code)]
     target_id: Option<String>,
     /// Shared browser instance (for creating new sessions, etc.).
     #[allow(dead_code)]
     browser: Arc<Browser>,
     /// Browser session for page interaction.
     session: Arc<RwLock<oxibrowser_core::session::Session>>,
+    /// Event sender (cloned into DispatchContext for domain handlers).
+    event_sender: EventSender,
+    /// Event receiver (drained by background task).
+    event_receiver: Option<EventReceiver>,
 }
 
 impl CdpSession {
     /// Create a new CDP session wrapping a WebSocket stream.
     ///
-    /// This also creates a new Browser `Session` for page interaction.
+    /// This also creates a new Browser `Session` for page interaction
+    /// and an event broadcaster for CDP event publishing.
     pub async fn new(
         ws_stream: tokio_tungstenite::WebSocketStream<
             hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
@@ -60,6 +63,9 @@ impl CdpSession {
         // Create a browser session for this CDP connection
         let session = browser.new_session().await?;
 
+        // Create event broadcaster
+        let (event_sender, event_receiver) = event_channel();
+
         info!(session_id = %session_id, "CDP session created");
 
         Ok(Self {
@@ -69,37 +75,64 @@ impl CdpSession {
             target_id: None,
             browser,
             session,
+            event_sender,
+            event_receiver: Some(event_receiver),
         })
     }
 
     /// Run the message dispatch loop.
     ///
-    /// Reads messages from the WebSocket, dispatches CDP commands,
-    /// and sends responses back.
+    /// Reads commands from WebSocket, dispatches to domain handlers,
+    /// sends responses back, and forwards CDP events to the client.
     pub async fn run(mut self) -> anyhow::Result<()> {
         info!(session_id = %self.session_id, "CDP session started");
 
-        while let Some(msg) = self.ws.next().await {
-            match msg {
-                Ok(tungstenite::Message::Text(text)) => {
-                    debug!(text = %text, "received CDP message");
-                    self.handle_text_message(&text).await?;
+        // Take the event receiver out — the forwarding task owns it.
+        let mut event_rx = self.event_receiver.take().unwrap();
+
+        loop {
+            tokio::select! {
+                // Incoming CDP commands
+                msg = self.ws.next() => {
+                    match msg {
+                        Some(Ok(tungstenite::Message::Text(text))) => {
+                            debug!(text = %text, "received CDP message");
+                            self.handle_text_message(&text).await?;
+                        }
+                        Some(Ok(tungstenite::Message::Close(_))) => {
+                            info!(session_id = %self.session_id, "WebSocket closed by client");
+                            break;
+                        }
+                        Some(Ok(tungstenite::Message::Ping(data))) => {
+                            self.sink.send(tungstenite::Message::Pong(data)).await?;
+                        }
+                        Some(Ok(_)) => {
+                            // Binary, Pong, Frame — ignore
+                        }
+                        Some(Err(e)) => {
+                            error!(error = %e, "WebSocket read error");
+                            break;
+                        }
+                        None => {
+                            info!(session_id = %self.session_id, "WebSocket stream ended");
+                            break;
+                        }
+                    }
                 }
-                Ok(tungstenite::Message::Close(_)) => {
-                    info!(session_id = %self.session_id, "WebSocket closed by client");
-                    break;
-                }
-                Ok(tungstenite::Message::Ping(data)) => {
-                    self.sink
-                        .send(tungstenite::Message::Pong(data))
-                        .await?;
-                }
-                Ok(_) => {
-                    // Binary, Pong, Frame — ignore
-                }
-                Err(e) => {
-                    error!(error = %e, "WebSocket read error");
-                    break;
+                // Outgoing CDP events
+                event = event_rx.recv() => {
+                    match event {
+                        Some(event) => {
+                            if let Err(e) = self.send_event(event).await {
+                                warn!(error = %e, "failed to send CDP event");
+                                break;
+                            }
+                        }
+                        None => {
+                            // Channel closed
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -138,14 +171,14 @@ impl CdpSession {
             "dispatching CDP command"
         );
 
-        // Dispatch to domain handler (async, passes session reference)
-        let response = match domains::dispatch(
-            &request.method,
-            request.params,
-            &self.session,
-        )
-        .await
-        {
+        // Create dispatch context with session + event sender
+        let ctx = DispatchContext {
+            session: self.session.clone(),
+            events: self.event_sender.clone(),
+        };
+
+        // Dispatch to domain handler
+        let response = match domains::dispatch(&request.method, request.params, &ctx).await {
             Ok(result) => CdpResponse {
                 id: request_id,
                 result: Some(result.unwrap_or(serde_json::json!({}))),
@@ -174,7 +207,7 @@ impl CdpSession {
     }
 
     /// Send a CDP event to the client.
-    pub async fn send_event(&mut self, event: CdpEvent) -> anyhow::Result<()> {
+    async fn send_event(&mut self, event: CdpEvent) -> anyhow::Result<()> {
         let text = serde_json::to_string(&event)?;
         debug!(text = %text, "sending CDP event");
         self.sink

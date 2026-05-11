@@ -4,32 +4,34 @@
 //! Page.getFrameTree, Page.getFrameMetrics, Page.captureScreenshot,
 //! Page.printToPDF.
 //!
-//! Domain handlers that need access to page/frame data receive the
-//! browser `Session` and perform async operations.
+//! After Page.enable, navigation events are emitted:
+//! - Page.frameNavigated
+//! - Page.domContentLoadedEventFired
+//! - Page.loadEventFired
 
-use crate::domains::DomainResult;
+use crate::domains::{DispatchContext, DomainResult};
+use crate::event::EventSender;
 use crate::protocol::CdpError;
-use oxibrowser_core::session::Session;
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use crate::domains::network;
 
 /// Dispatch Page domain methods.
 pub async fn handle(
     method: &str,
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     match method {
-        "enable" => enable(),
-        "disable" => disable(),
-        "navigate" => navigate(params, session).await,
-        "reload" => reload(params, session).await,
-        "getFrameTree" => get_frame_tree(session).await,
+        "enable" => enable(ctx),
+        "disable" => disable(ctx),
+        "navigate" => navigate(params, ctx).await,
+        "reload" => reload(params, ctx).await,
+        "getFrameTree" => get_frame_tree(ctx).await,
         "getFrameMetrics" => get_frame_metrics(),
         "captureScreenshot" => capture_screenshot(params),
         "printToPDF" => print_to_pdf(params),
         "getLifecycleEvents" => Ok(Some(json!({ "events": [] }))),
+        "setLifecycleEventsEnabled" => set_lifecycle_events_enabled(params, ctx),
         _ => Err(CdpError {
             code: -32601,
             message: format!("Page.{} not implemented", method),
@@ -38,19 +40,34 @@ pub async fn handle(
 }
 
 /// Page.enable — enables page domain events.
-fn enable() -> DomainResult {
+fn enable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_page_enabled(true);
     Ok(Some(json!({})))
 }
 
 /// Page.disable — disables page domain events.
-fn disable() -> DomainResult {
+fn disable(ctx: &DispatchContext) -> DomainResult {
+    ctx.events.set_page_enabled(false);
+    Ok(Some(json!({})))
+}
+
+/// Page.setLifecycleEventsEnabled — controls lifecycle event emission.
+fn set_lifecycle_events_enabled(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    ctx.events.set_page_enabled(enabled);
     Ok(Some(json!({})))
 }
 
 /// Page.navigate — navigates to a URL using the real browser session.
+///
+/// After navigation completes, emits CDP events:
+/// - Page.frameNavigated
+/// - Page.domContentLoadedEventFired
+/// - Page.loadEventFired
 async fn navigate(
     params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
     let params = params.unwrap_or_default();
     let url = params
@@ -58,18 +75,75 @@ async fn navigate(
         .and_then(|v| v.as_str())
         .unwrap_or("about:blank");
 
-    let mut guard = session.write().await;
+    let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
+    let timestamp = EventSender::timestamp_ms();
+
+    let mut guard = ctx.session.write().await;
     match guard.navigate(url).await {
         Ok(()) => {
-            // Get the frame ID from the current page
             let frame_id = guard
                 .page()
                 .map(|p| p.root_frame().id().to_string())
                 .unwrap_or_else(|| "main".to_string());
 
+            let final_url = guard
+                .current_url()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| url.to_string());
+
+            // Emit CDP events
+            ctx.events.send_page_event(
+                "Page.frameNavigated",
+                json!({
+                    "frame": {
+                        "id": frame_id,
+                        "loaderId": loader_id,
+                        "url": final_url,
+                        "domainAndRegistry": "",
+                        "securityOrigin": final_url,
+                        "mimeType": "text/html",
+                        "adFrameStatus": { "adFrameType": "none" },
+                        "secureContextType": "Secure",
+                        "crossOriginIsolatedContextType": "NotIsolated",
+                    },
+                    "type": "Navigation"
+                }),
+            );
+
+            ctx.events.send_page_event(
+                "Page.domContentLoadedEventFired",
+                json!({ "timestamp": timestamp }),
+            );
+
+            ctx.events.send_page_event(
+                "Page.loadEventFired",
+                json!({ "timestamp": timestamp }),
+            );
+
+            // Emit network lifecycle events if Network domain is enabled
+            let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
+            network::emit_navigation_events(
+                &ctx.events,
+                &request_id,
+                &final_url,
+                &loader_id,
+                200,
+                "text/html",
+            );
+
+            // Emit Fetch.requestPaused if Fetch domain is enabled
+            if ctx.events.is_fetch_enabled() {
+                crate::domains::fetch::emit_request_paused(
+                    &ctx.events,
+                    &request_id,
+                    &final_url,
+                    "Document",
+                );
+            }
+
             Ok(Some(json!({
                 "frameId": frame_id,
-                "loaderId": format!("loader-{}", uuid::Uuid::new_v4()),
+                "loaderId": loader_id,
                 "errorText": Value::Null
             })))
         }
@@ -80,12 +154,15 @@ async fn navigate(
     }
 }
 
-/// Page.reload — reloads the current page using the real browser session.
+/// Page.reload — reloads the current page and emits lifecycle events.
 async fn reload(
     _params: Option<Value>,
-    session: &Arc<RwLock<Session>>,
+    ctx: &DispatchContext,
 ) -> DomainResult {
-    let mut guard = session.write().await;
+    let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
+    let timestamp = EventSender::timestamp_ms();
+
+    let mut guard = ctx.session.write().await;
     match guard.reload().await {
         Ok(()) => {
             let frame_id = guard
@@ -93,9 +170,37 @@ async fn reload(
                 .map(|p| p.root_frame().id().to_string())
                 .unwrap_or_else(|| "main".to_string());
 
+            let final_url = guard
+                .current_url()
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "about:blank".to_string());
+
+            ctx.events.send_page_event(
+                "Page.frameNavigated",
+                json!({
+                    "frame": {
+                        "id": frame_id,
+                        "loaderId": loader_id,
+                        "url": final_url,
+                        "mimeType": "text/html",
+                    },
+                    "type": "Navigation"
+                }),
+            );
+
+            ctx.events.send_page_event(
+                "Page.domContentLoadedEventFired",
+                json!({ "timestamp": timestamp }),
+            );
+
+            ctx.events.send_page_event(
+                "Page.loadEventFired",
+                json!({ "timestamp": timestamp }),
+            );
+
             Ok(Some(json!({
                 "frameId": frame_id,
-                "loaderId": format!("loader-{}", uuid::Uuid::new_v4())
+                "loaderId": loader_id
             })))
         }
         Err(e) => Err(CdpError {
@@ -106,8 +211,8 @@ async fn reload(
 }
 
 /// Page.getFrameTree — returns the actual frame tree from the session.
-async fn get_frame_tree(session: &Arc<RwLock<Session>>) -> DomainResult {
-    let guard = session.read().await;
+async fn get_frame_tree(ctx: &DispatchContext) -> DomainResult {
+    let guard = ctx.session.read().await;
     match guard.page() {
         Some(page) => {
             let frame = page.root_frame();
