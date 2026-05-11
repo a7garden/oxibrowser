@@ -1,0 +1,22 @@
+[package]
+name = "oxibrowser-cdp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Chrome DevTools Protocol server for browser automation"
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio-tungstenite = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+uuid = { workspace = true }
+
+oxibrowser-core = { workspace = true }

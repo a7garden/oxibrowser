@@ -1,0 +1,15 @@
+[package]
+name = "oxibrowser-webapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DOM and WebAPI implementations backed by html5ever"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+html5ever = { workspace = true }
+markup5ever = { workspace = true }
+string_cache = { workspace = true }
+thiserror = { workspace = true }
