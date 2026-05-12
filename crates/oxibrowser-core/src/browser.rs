@@ -11,6 +11,7 @@ use crate::session::Session;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 /// Unique browser instance ID.
@@ -48,6 +49,8 @@ pub struct Browser {
     cookie_jar: Arc<RwLock<CookieJar>>,
     /// Whether the browser has been closed.
     closed: std::sync::atomic::AtomicBool,
+    /// Shutdown signal — broadcast to all session holders.
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 impl Browser {
@@ -55,16 +58,19 @@ impl Browser {
     pub async fn new(config: BrowserConfig) -> Result<Self> {
         let cookie_jar = Arc::new(RwLock::new(CookieJar::new()));
         let http_client = Arc::new(HttpClient::new(&config, cookie_jar.clone())?);
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
-        info!(id = %BrowserId::next(), "browser created");
+        let id = BrowserId::next();
+        info!(id = %id, "browser created");
 
         Ok(Self {
-            id: BrowserId::next(),
+            id,
             config,
             http_client,
             sessions: RwLock::new(Vec::new()),
             cookie_jar,
             closed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_tx,
         })
     }
 
@@ -109,6 +115,9 @@ impl Browser {
             return Ok(()); // Already closed
         }
 
+        // Broadcast shutdown signal to all session holders
+        let _ = self.shutdown_tx.send(());
+
         // Drain sessions while holding the lock, then drop the lock
         // before awaiting session.close() to avoid holding a sync lock across await.
         let sessions: Vec<_> = self.sessions.write().drain(..).collect();
@@ -122,6 +131,14 @@ impl Browser {
 
         info!("browser closed");
         Ok(())
+    }
+
+    /// Get a receiver for the shutdown signal.
+    ///
+    /// This can be used to detect when `close()` is called on the browser,
+    /// e.g., for graceful shutdown in long-running tasks.
+    pub fn shutdown_rx(&self) -> broadcast::Receiver<()> {
+        self.shutdown_tx.subscribe()
     }
 
     /// Get the browser ID.

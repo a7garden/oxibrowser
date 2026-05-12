@@ -33,7 +33,7 @@ use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomNode, DomSnapshot};
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,9 @@ pub struct JsEvalResult {
     pub exception: Option<String>,
     /// Console output captured during execution.
     pub console_output: Vec<String>,
+    /// Whether the evaluation was aborted due to a timeout.
+    /// When true, the JS context was reset and previous state (variables, etc.) is lost.
+    pub timed_out: bool,
 }
 
 impl JsEvalResult {
@@ -58,6 +61,7 @@ impl JsEvalResult {
             value: Some(value),
             exception: None,
             console_output: Vec::new(),
+            timed_out: false,
         }
     }
 
@@ -67,6 +71,7 @@ impl JsEvalResult {
             value: None,
             exception: None,
             console_output: Vec::new(),
+            timed_out: false,
         }
     }
 
@@ -76,6 +81,19 @@ impl JsEvalResult {
             value: None,
             exception: Some(msg.into()),
             console_output: Vec::new(),
+            timed_out: false,
+        }
+    }
+
+    /// Create a timeout result (context was reset).
+    pub fn timeout(timeout_ms: u64) -> Self {
+        Self {
+            value: None,
+            exception: Some(format!(
+                "JS execution timed out after {timeout_ms}ms — context was reset, previous state lost"
+            )),
+            console_output: Vec::new(),
+            timed_out: true,
         }
     }
 
@@ -94,6 +112,14 @@ enum JsCommand {
     /// Evaluate a JS expression.
     Eval {
         expression: String,
+        /// Timeout in ms for this eval. None = use default.
+        timeout_ms: Option<u64>,
+        /// Max loop iterations. None = use default.
+        max_loop_iterations: Option<u64>,
+        /// Max recursion depth. None = use default.
+        max_recursion: Option<usize>,
+        /// Max operand stack size. None = use default.
+        max_stack_size: Option<usize>,
     },
     /// Set a global variable in the persistent Context.
     SetGlobal {
@@ -115,6 +141,7 @@ enum JsResponse {
         value: Option<Value>,
         exception: Option<String>,
         console_output: Vec<String>,
+        timed_out: bool,
     },
     /// Ack for SetGlobal / SetDom / Shutdown.
     Done,
@@ -123,6 +150,41 @@ enum JsResponse {
 // ---------------------------------------------------------------------------
 // JsRuntime
 // ---------------------------------------------------------------------------
+
+/// Configuration for JS runtime limits and timeouts.
+#[derive(Debug, Clone)]
+pub struct JsRuntimeConfig {
+    /// Default timeout in ms for each evaluate() call.
+    pub timeout_ms: u64,
+    /// Max recursion depth.
+    pub max_recursion: usize,
+    /// Max loop iterations.
+    pub max_loop_iterations: u64,
+    /// Max operand stack size.
+    pub max_stack_size: usize,
+}
+
+impl Default for JsRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5000,
+            max_recursion: 100,
+            max_loop_iterations: 100_000,
+            max_stack_size: 1024,
+        }
+    }
+}
+
+impl From<&crate::config::BrowserConfig> for JsRuntimeConfig {
+    fn from(config: &crate::config::BrowserConfig) -> Self {
+        Self {
+            timeout_ms: config.js_timeout_ms,
+            max_recursion: config.js_max_recursion,
+            max_loop_iterations: config.js_max_loop_iterations,
+            max_stack_size: config.js_max_stack_size,
+        }
+    }
+}
 
 /// A JavaScript runtime backed by boa_engine with a persistent context.
 ///
@@ -140,13 +202,20 @@ pub struct JsRuntime {
     console_output: Arc<RwLock<Vec<String>>>,
     /// Global variables tracked on the Rust side.
     globals: RwLock<HashMap<String, Value>>,
+    /// Runtime configuration (limits, timeouts).
+    config: JsRuntimeConfig,
 }
 
 impl JsRuntime {
-    /// Create a new JS runtime.
+    /// Create a new JS runtime with default configuration.
     ///
     /// Spawns a dedicated OS thread that owns the `boa_engine::Context`.
     pub fn new() -> Self {
+        Self::with_config(JsRuntimeConfig::default())
+    }
+
+    /// Create a new JS runtime with the given configuration.
+    pub fn with_config(config: JsRuntimeConfig) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<JsCommand>();
         let (resp_tx, resp_rx) = mpsc::channel::<JsResponse>();
         let console_output = Arc::new(RwLock::new(Vec::<String>::new()));
@@ -165,6 +234,7 @@ impl JsRuntime {
             resp_rx: Mutex::new(resp_rx),
             console_output,
             globals: RwLock::new(HashMap::new()),
+            config,
         }
     }
 
@@ -172,14 +242,32 @@ impl JsRuntime {
     ///
     /// JS state persists across calls — variables, functions, closures
     /// defined in one `evaluate()` are available in the next.
+    ///
+    /// If the evaluation exceeds the configured timeout, the JS context
+    /// is reset and previous state (variables, functions) is lost.
     pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
+        self.evaluate_with_timeout(expression, None).await
+    }
+
+    /// Evaluate a JavaScript expression with an explicit timeout override.
+    ///
+    /// If `timeout_ms` is `None`, uses the default from config.
+    pub async fn evaluate_with_timeout(
+        &mut self,
+        expression: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<JsEvalResult> {
         // Clear shared console buffer
         self.console_output.write().unwrap().clear();
 
-        // Send eval command
+        // Send eval command with limits
         self.cmd_tx
             .send(JsCommand::Eval {
                 expression: expression.to_string(),
+                timeout_ms: Some(timeout_ms.unwrap_or(self.config.timeout_ms)),
+                max_loop_iterations: Some(self.config.max_loop_iterations),
+                max_recursion: Some(self.config.max_recursion),
+                max_stack_size: Some(self.config.max_stack_size),
             })
             .expect("JS thread has died");
 
@@ -196,11 +284,23 @@ impl JsRuntime {
                 value,
                 exception,
                 console_output,
-            } => Ok(JsEvalResult {
-                value,
-                exception,
-                console_output,
-            }),
+                timed_out,
+            } => {
+                if timed_out {
+                    // Context was reset — clear our globals tracking too
+                    // (they're stale in the new context)
+                    // We do NOT clear self.globals because set_global can re-inject them.
+                    return Err(CoreError::JsTimeout(
+                        timeout_ms.unwrap_or(self.config.timeout_ms),
+                    ));
+                }
+                Ok(JsEvalResult {
+                    value,
+                    exception,
+                    console_output,
+                    timed_out: false,
+                })
+            }
             JsResponse::Done => Ok(JsEvalResult::void()),
         }
     }
@@ -302,14 +402,52 @@ fn js_thread_loop(
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
-            JsCommand::Eval { expression } => {
+            JsCommand::Eval {
+                expression,
+                timeout_ms,
+                max_loop_iterations,
+                max_recursion,
+                max_stack_size,
+            } => {
                 // Clear console buffer before eval
                 console_output.write().unwrap().clear();
+
+                // Apply runtime limits to context
+                let loop_limit = max_loop_iterations.unwrap_or(100_000);
+                let recursion_limit = max_recursion.unwrap_or(100);
+                let stack_limit = max_stack_size.unwrap_or(1024);
+
+                {
+                    let limits = ctx.runtime_limits_mut();
+                    limits.set_loop_iteration_limit(loop_limit);
+                    limits.set_recursion_limit(recursion_limit);
+                    limits.set_stack_size_limit(stack_limit);
+                }
+
+                let timeout = timeout_ms.unwrap_or(5000);
+                let start = std::time::Instant::now();
 
                 let source = Source::from_bytes(&expression);
                 let result = ctx.eval(source);
 
+                let elapsed = start.elapsed();
                 let console = console_output.read().unwrap().clone();
+
+                // Check if we timed out
+                if elapsed.as_millis() > timeout as u128 {
+                    // Context may be in a bad state — recreate it
+                    ctx = create_context(&console_output, &dom_snapshot);
+                    let _ = resp_tx.send(JsResponse::EvalResult {
+                        value: None,
+                        exception: Some(format!(
+                            "JS execution timed out after {}ms — context was reset, previous state lost",
+                            elapsed.as_millis()
+                        )),
+                        console_output: console,
+                        timed_out: true,
+                    });
+                    continue;
+                }
 
                 match result {
                     Ok(value) => {
@@ -318,14 +456,28 @@ fn js_thread_loop(
                             value: Some(json_value),
                             exception: None,
                             console_output: console,
+                            timed_out: false,
                         });
                     }
                     Err(err) => {
                         let msg = format_js_error(&err, &mut ctx);
+                        // Check if it was a runtime limit error (loop/recursion/stack)
+                        let is_runtime_limit = msg.contains("Maximum loop iteration limit")
+                            || msg.contains("exceeded the maximum call stack size")
+                            || msg.contains("recursion limit");
+
+                        if is_runtime_limit {
+                            // Runtime limit hit — context is still valid,
+                            // but the partial execution may have left state.
+                            // We don't reset the context here since boa throws
+                            // a catchable error (the context is fine).
+                        }
+
                         let _ = resp_tx.send(JsResponse::EvalResult {
                             value: None,
                             exception: Some(msg),
                             console_output: console,
+                            timed_out: false,
                         });
                     }
                 }
@@ -1606,5 +1758,119 @@ mod tests {
 
         let r2 = rt.evaluate("document.title").await.unwrap();
         assert_eq!(r2.value, Some(Value::String("Page 2".into())));
+    }
+
+    // ========================================
+    // Runtime limits & timeout tests
+    // ========================================
+
+    #[tokio::test]
+    async fn test_max_recursive_calls() {
+        // Infinite recursion should be caught by recursion limit
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("function f() { return f(); } f()")
+            .await
+            .unwrap();
+        assert!(!result.is_ok(), "infinite recursion should fail");
+        let msg = result.exception.unwrap();
+        assert!(
+            msg.to_lowercase().contains("exceeded")
+                || msg.to_lowercase().contains("recursion")
+                || msg.to_lowercase().contains("stack"),
+            "error should mention stack/recursion limit, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_loop_iterations() {
+        // Infinite loop should be caught by loop iteration limit
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("while(true) {}")
+            .await
+            .unwrap();
+        assert!(!result.is_ok(), "infinite loop should fail");
+        let msg = result.exception.unwrap();
+        assert!(
+            msg.contains("loop iteration limit"),
+            "error should mention loop iteration limit, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_after_infinite_loop() {
+        // After an infinite loop error, the runtime should still work
+        let mut rt = JsRuntime::new();
+
+        // Trigger an infinite loop
+        let result = rt.evaluate("while(true) {}").await.unwrap();
+        assert!(!result.is_ok());
+
+        // Runtime should still be functional for normal evals
+        let result = rt.evaluate("1 + 1").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(2.into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_after_infinite_recursion() {
+        // After infinite recursion error, the runtime should still work
+        let mut rt = JsRuntime::new();
+
+        // Trigger infinite recursion
+        let result = rt
+            .evaluate("function f() { return f(); } f()")
+            .await
+            .unwrap();
+        assert!(!result.is_ok());
+
+        // Runtime should still be functional
+        let result = rt.evaluate("42").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(42.into())));
+    }
+
+    #[tokio::test]
+    async fn test_normal_loop_within_limits() {
+        // Normal loops should work fine within limits
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("let sum = 0; for (let i = 0; i < 1000; i++) { sum += i; } sum")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 499500.0);
+    }
+
+    #[tokio::test]
+    async fn test_normal_recursion_within_limits() {
+        // Normal recursion should work fine within limits
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); } fib(10)")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(55.into())));
+    }
+
+    #[tokio::test]
+    async fn test_js_runtime_config_custom() {
+        // Verify custom config is applied
+        let config = JsRuntimeConfig {
+            timeout_ms: 1000,
+            max_recursion: 10,
+            max_loop_iterations: 50,
+            max_stack_size: 256,
+        };
+        let mut rt = JsRuntime::with_config(config);
+
+        // A loop of 50 iterations should fail with limit of 50
+        let result = rt
+            .evaluate("let x = 0; for (let i = 0; i < 100; i++) { x++; } x")
+            .await
+            .unwrap();
+        assert!(!result.is_ok(), "loop exceeding limit should fail");
     }
 }

@@ -8,6 +8,7 @@ use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
 use crate::js::dom_snapshot::DomSnapshot;
+use crate::js::runtime::JsRuntimeConfig;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::page::Page;
@@ -59,6 +60,8 @@ pub struct Session {
     local_storage: std::collections::HashMap<String, String>,
     /// JS runtime (per-session).
     js_runtime: JsRuntime,
+    /// Whether the session has been closed.
+    closed: bool,
 }
 
 impl Session {
@@ -69,6 +72,7 @@ impl Session {
         http_client: Arc<HttpClient>,
         cookie_jar: Arc<RwLock<CookieJar>>,
     ) -> Result<Self> {
+        let js_config = JsRuntimeConfig::from(&config);
         Ok(Self {
             id: SessionId::next(),
             browser_id,
@@ -79,12 +83,17 @@ impl Session {
             history: Vec::new(),
             history_index: 0,
             local_storage: std::collections::HashMap::new(),
-            js_runtime: JsRuntime::new(),
+            js_runtime: JsRuntime::with_config(js_config),
+            closed: false,
         })
     }
 
     /// Navigate to a URL.
     pub async fn navigate(&mut self, url: &str) -> Result<()> {
+        if self.closed {
+            return Err(CoreError::SessionClosed);
+        }
+
         let parsed = Url::parse(url)?;
 
         info!(url = %parsed, "navigating");
@@ -92,6 +101,15 @@ impl Session {
         // Fetch the document
         let response = self.http_client.fetch(&parsed).await?;
         let status = response.status().as_u16();
+
+        // Check for HTTP errors
+        if status >= 400 {
+            return Err(CoreError::HttpError {
+                status,
+                message: format!("HTTP {} for {}", status, parsed),
+            });
+        }
+
         let content_type = response
             .headers()
             .get("content-type")
@@ -122,6 +140,45 @@ impl Session {
         self.inject_dom_snapshot();
 
         Ok(())
+    }
+
+    /// Navigate to a URL with automatic retries on transient failures.
+    ///
+    /// Retries DNS errors, connection timeouts, and 5xx errors with
+    /// exponential backoff (500ms, 1000ms, 1500ms, ...).
+    pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Result<()> {
+        let mut last_error: Option<CoreError> = None;
+
+        for attempt in 0..=max_retries {
+            match self.navigate(url).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let is_retryable = match &e {
+                        CoreError::DnsError(_)
+                        | CoreError::ConnectionTimeout(_)
+                        | CoreError::NetworkError(_) => true,
+                        CoreError::HttpError { status, .. } => *status >= 500,
+                        _ => false,
+                    };
+
+                    if !is_retryable || attempt >= max_retries {
+                        return Err(e);
+                    }
+
+                    last_error = Some(e);
+                    let delay = std::time::Duration::from_millis(500 * (attempt + 1) as u64);
+                    info!(
+                        attempt = attempt + 1,
+                        max_retries,
+                        delay_ms = delay.as_millis(),
+                        "retrying navigation"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
     }
     pub async fn go_back(&mut self) -> Result<()> {
         if self.history_index > 0 {
@@ -180,8 +237,78 @@ impl Session {
         }
     }
 
-    /// Evaluate JavaScript in the current page context.
+    /// Send a POST request and load the response as a page.
+    ///
+    /// The `content_type` determines how the body is encoded:
+    /// - `"application/json"` — body is parsed as JSON and sent as JSON
+    /// - `"application/x-www-form-urlencoded"` — body is parsed as `key=value&key2=value2` form data
+    /// - Any other value — body is sent as raw bytes
+    pub async fn post(&mut self, url: &str, body: &str, content_type: &str) -> Result<()> {
+        let parsed = Url::parse(url)?;
+
+        info!(url = %parsed, content_type, "POST request");
+
+        let response = match content_type {
+            "application/json" => {
+                let json_value = serde_json::from_str::<serde_json::Value>(body)
+                    .unwrap_or(serde_json::Value::Null);
+                self.http_client.post_json(&parsed, &json_value).await?
+            }
+            "application/x-www-form-urlencoded" => {
+                let form: Vec<(&str, &str)> = body
+                    .split('&')
+                    .filter_map(|pair| {
+                        let mut parts = pair.splitn(2, '=');
+                        Some((parts.next()?, parts.next().unwrap_or("")))
+                    })
+                    .collect();
+                self.http_client.post_form(&parsed, &form).await?
+            }
+            _ => self.http_client.post(&parsed, body.to_string()).await?,
+        };
+
+        let status = response.status().as_u16();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("text/html")
+            .to_string();
+
+        let html = response
+            .text()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        // Create a new page for this navigation
+        let page = Page::from_html(parsed.clone(), &html, status, ct).await?;
+
+        // Update history
+        if self.history.is_empty() {
+            // First navigation
+        } else if self.history_index < self.history.len() - 1 {
+            self.history.truncate(self.history_index + 1);
+        }
+        self.history.push(parsed);
+        self.history_index = self.history.len() - 1;
+
+        self.active_page = Some(page);
+
+        // Inject DOM snapshot into JS runtime
+        self.inject_dom_snapshot();
+
+        Ok(())
+    }
+
+    /// Evaluate JavaScript.
+    ///
+    /// Works with or without an active page. Without a page, the DOM bridge
+    /// (document.querySelector etc.) will return empty/null results, but
+    /// pure JS expressions (arithmetic, JSON, etc.) work fine.
     pub async fn evaluate_js(&mut self, expression: &str) -> Result<crate::js::runtime::JsEvalResult> {
+        if self.closed {
+            return Err(CoreError::SessionClosed);
+        }
         self.js_runtime.evaluate(expression).await
     }
 
@@ -260,11 +387,20 @@ impl Session {
 
     /// Close the session.
     pub async fn close(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
         info!(id = %self.id, "session closed");
+        self.closed = true;
         self.active_page = None;
         self.history.clear();
         self.local_storage.clear();
         Ok(())
+    }
+
+    /// Whether the session has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Fetch sub-resources (JS, CSS, images) referenced by the current page.

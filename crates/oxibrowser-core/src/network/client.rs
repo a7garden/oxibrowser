@@ -74,6 +74,74 @@ impl HttpClient {
         Ok(text)
     }
 
+    /// Send a POST request with a raw body.
+    pub async fn post(&self, url: &Url, body: impl Into<reqwest::Body>) -> Result<Response> {
+        let response = self
+            .client
+            .post(url.as_str())
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        // Store response cookies
+        if let Some(set_cookie) = response.headers().get("set-cookie") {
+            if let Ok(val) = set_cookie.to_str() {
+                self.cookie_jar.write().store(url, val);
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Send a POST request with a JSON body.
+    pub async fn post_json(
+        &self,
+        url: &Url,
+        json: &serde_json::Value,
+    ) -> Result<Response> {
+        let response = self
+            .client
+            .post(url.as_str())
+            .json(json)
+            .send()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        // Store response cookies
+        if let Some(set_cookie) = response.headers().get("set-cookie") {
+            if let Ok(val) = set_cookie.to_str() {
+                self.cookie_jar.write().store(url, val);
+            }
+        }
+
+        Ok(response)
+    }
+
+    /// Send a POST request with URL-encoded form data.
+    pub async fn post_form(
+        &self,
+        url: &Url,
+        form: &[(&str, &str)],
+    ) -> Result<Response> {
+        let response = self
+            .client
+            .post(url.as_str())
+            .form(form)
+            .send()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        // Store response cookies
+        if let Some(set_cookie) = response.headers().get("set-cookie") {
+            if let Ok(val) = set_cookie.to_str() {
+                self.cookie_jar.write().store(url, val);
+            }
+        }
+
+        Ok(response)
+    }
+
     /// Get the underlying reqwest client.
     pub fn raw_client(&self) -> &Client {
         &self.client

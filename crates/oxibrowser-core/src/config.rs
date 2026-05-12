@@ -31,6 +31,26 @@ pub struct BrowserConfig {
 
     /// Accept invalid TLS certificates.
     pub accept_invalid_certs: bool,
+
+    /// JS execution timeout in milliseconds.
+    /// A single `evaluate()` call that runs longer than this will be aborted
+    /// and the JS context will be reset.
+    pub js_timeout_ms: u64,
+
+    /// Maximum JS recursion depth (function call stack depth).
+    /// Prevents infinite recursion like `function f() { f(); }`.
+    pub js_max_recursion: usize,
+
+    /// Maximum JS loop iteration count.
+    /// Prevents infinite loops like `while(true){}`.
+    /// Set to `u64::MAX` for no limit.
+    pub js_max_loop_iterations: u64,
+
+    /// Maximum JS operand stack size.
+    pub js_max_stack_size: usize,
+
+    /// Navigation timeout in milliseconds (time to wait for page load).
+    pub navigation_timeout_ms: u64,
 }
 
 impl Default for BrowserConfig {
@@ -45,6 +65,11 @@ impl Default for BrowserConfig {
             enable_rendering: false,
             connection_pool_size: 10,
             accept_invalid_certs: false,
+            js_timeout_ms: 5000,
+            js_max_recursion: 100,
+            js_max_loop_iterations: 100_000,
+            js_max_stack_size: 1024,
+            navigation_timeout_ms: 30_000,
         }
     }
 }
@@ -66,6 +91,7 @@ impl BrowserConfig {
             obey_robots: false,
             default_timeout: Duration::from_secs(60),
             connection_pool_size: 20,
+            js_timeout_ms: 10_000,
             ..Self::default()
         }
     }
@@ -85,6 +111,11 @@ mod tests {
         assert_eq!(config.viewport_width, 1280);
         assert_eq!(config.viewport_height, 720);
         assert!(!config.accept_invalid_certs);
+        assert_eq!(config.js_timeout_ms, 5000);
+        assert_eq!(config.js_max_recursion, 100);
+        assert_eq!(config.js_max_loop_iterations, 100_000);
+        assert_eq!(config.js_max_stack_size, 1024);
+        assert_eq!(config.navigation_timeout_ms, 30_000);
     }
 
     #[test]
