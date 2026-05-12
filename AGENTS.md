@@ -401,7 +401,7 @@ cargo build --release          # Release build
 | `Document` | ✅ Complete | html5ever parsing, CSS selectors, Markdown, resource URL extraction |
 | `Tree` | ✅ Complete | Adjacency list, DFS/BFS traversal |
 | `Node` | ✅ Complete | Type variants, attribute access |
-| `JsRuntime` | ✅ Stub | Literal evaluation only; servo mode planned |
+| `JsRuntime` | ✅ **boa_engine** | Real JS execution (ES2024+), pure Rust, no C deps |
 | `HttpClient` | ✅ Complete | reqwest wrapper with cookies |
 | `CookieJar` | ✅ Complete | Domain-scoped storage |
 | `Resource` | ✅ Complete | Typed resource tracking |
@@ -420,5 +420,46 @@ cargo build --release          # Release build
 | CDP Fetch domain | ✅ Complete | enable/disable/continueRequest/failRequest/fulfillRequest |
 | E2E Test Suite | ✅ Complete | 15 pure-Rust E2E tests via tokio-tungstenite |
 | Binary / CLI | ✅ Complete | `fetch`, `serve`, `version` subcommands via clap |
-| Servo rendering | 🔲 Planned | Offscreen rendering pipeline |
-| Servo JS engine | 🔲 Planned | Real JS execution via servo feature flag |
+| Servo rendering | 🔲 Planned | Offscreen rendering pipeline (separate from JS engine) |
+
+## Key Technical Decisions
+
+### boa_engine vs servo
+
+**servo** was initially considered for JS execution, but:
+- servo 0.1.0's embedder API is still `pub(crate)` (not public)
+- servo is a full browser engine (rendering, layout, etc.) — overkill for JS-only need
+- servo embedder API is still evolving
+
+**boa_engine** (pure Rust JS engine) is the right choice:
+- 100% pure Rust — no C dependencies (no SpiderMonkey, no V8)
+- MIT licensed
+- ES2024+ standard compliance
+- Lightweight (~1MB compiled vs servo >10MB)
+- Stable, public API with `Context::eval()`, `register_global_callable()`, etc.
+- `JsArray::from_iter()`, `JsArray::at()` for array access
+
+### JsRuntime architecture
+
+Since `boa_engine::Context` is `!Send` (internal GC uses `NonNull`):
+- We create a **fresh Context** on each `evaluate()` call (~μs overhead, acceptable)
+- Global state (variables) is tracked in Rust `RwLock<HashMap>` and injected per-eval
+- Thread-safe for tokio multi-thread: `JsRuntime` itself is `Send + Sync`
+
+### JsValue ↔ serde_json::Value
+
+Conversion implemented for all JS types:
+- `null`/`undefined` → `Value::Null`
+- `boolean` → `Value::Bool`
+- `integer`/`rational` → `Value::Number`
+- `string` → `Value::String`
+- `symbol` → `Value::String("[symbol]")`
+- `bigint` → stringified
+- `object` → arrays use `JsArray::from_object()` + `length()`/`at()`, others stringify
+
+### console.log implementation
+
+- `console_log_fn` as `NativeFunction::from_fn_ptr(console_log_fn)`
+- Registered via `context.register_global_callable()` as `log`
+- `console` object registered via `ObjectInitializer::new()` with `.log` method
+
