@@ -286,6 +286,7 @@ impl Document {
         md
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn node_to_markdown(&self, node_id: NodeId, md: &mut String, depth: usize) {
         if let Some(node) = self.nodes.get(&node_id) {
             match &node.node_type {
@@ -510,7 +511,7 @@ impl TreeSink for DomSink {
         static FALLBACK: std::sync::OnceLock<QualName> = std::sync::OnceLock::new();
         let fallback = FALLBACK.get_or_init(|| QualName {
             prefix: None,
-            ns: ns!(html).into(),
+            ns: ns!(html),
             local: string_cache::Atom::from(""),
         });
         fallback.expanded()

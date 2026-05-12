@@ -82,7 +82,7 @@ impl Browser {
         }
 
         let session = Session::new(
-            self.id.clone(),
+            self.id,
             self.config.clone(),
             self.http_client.clone(),
             self.cookie_jar.clone(),
@@ -109,8 +109,11 @@ impl Browser {
             return Ok(()); // Already closed
         }
 
-        let mut sessions = self.sessions.write();
-        for session in sessions.drain(..) {
+        // Drain sessions while holding the lock, then drop the lock
+        // before awaiting session.close() to avoid holding a sync lock across await.
+        let sessions: Vec<_> = self.sessions.write().drain(..).collect();
+        // Lock is released here (sessions Vec goes out of scope implicitly)
+        for session in sessions {
             let mut s = session.write().await;
             if let Err(e) = s.close().await {
                 warn!("error closing session: {e}");

@@ -143,7 +143,7 @@ impl Session {
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             let url = self.history[self.history_index].clone();
-            
+
             let response = self.http_client.fetch(&url).await?;
             let html = response
                 .text()
@@ -159,8 +159,8 @@ impl Session {
     /// Reload the current page.
     pub async fn reload(&mut self) -> Result<()> {
         if let Some(url) = self.current_url() {
-            
-            let response = self.http_client.fetch(&url).await?;
+
+            let response = self.http_client.fetch(url).await?;
             let html = response
                 .text()
                 .await

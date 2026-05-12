@@ -36,9 +36,7 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            user_agent: format!(
-                "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)"
-            ),
+            user_agent: "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)".to_string(),
             default_timeout: Duration::from_secs(30),
             obey_robots: true,
             max_sessions: 10,
