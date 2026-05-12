@@ -34,7 +34,7 @@ use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
 
 use crate::error::{CoreError, Result};
-use crate::js::dom_snapshot::{DomNode, DomSnapshot};
+use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -200,6 +200,8 @@ pub struct JsRuntime {
     resp_rx: Mutex<Receiver<JsResponse>>,
     /// Shared console output buffer (also shared with JS thread closures).
     console_output: Arc<RwLock<Vec<String>>>,
+    /// Shared mutation buffer — JS thread pushes, main thread drains.
+    mutations: Arc<RwLock<Vec<DomMutation>>>,
     /// Global variables tracked on the Rust side.
     globals: RwLock<HashMap<String, Value>>,
     /// Runtime configuration (limits, timeouts).
@@ -219,13 +221,15 @@ impl JsRuntime {
         let (cmd_tx, cmd_rx) = mpsc::channel::<JsCommand>();
         let (resp_tx, resp_rx) = mpsc::channel::<JsResponse>();
         let console_output = Arc::new(RwLock::new(Vec::<String>::new()));
+        let mutations = Arc::new(RwLock::new(Vec::<DomMutation>::new()));
 
         // Spawn JS thread
         let console_output_clone = console_output.clone();
+        let mutations_clone = mutations.clone();
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
             .spawn(move || {
-                js_thread_loop(cmd_rx, resp_tx, console_output_clone);
+                js_thread_loop(cmd_rx, resp_tx, console_output_clone, mutations_clone);
             })
             .expect("failed to spawn JS thread");
 
@@ -233,6 +237,7 @@ impl JsRuntime {
             cmd_tx,
             resp_rx: Mutex::new(resp_rx),
             console_output,
+            mutations,
             globals: RwLock::new(HashMap::new()),
             config,
         }
@@ -320,6 +325,14 @@ impl JsRuntime {
         self.console_output.write().unwrap().clear();
     }
 
+    /// Drain all pending DOM mutations collected by JS execution.
+    ///
+    /// After calling this, the internal buffer is empty.
+    pub fn drain_mutations(&self) -> Vec<DomMutation> {
+        let mut guard = self.mutations.write().unwrap();
+        std::mem::take(&mut *guard)
+    }
+
     /// Set a global variable — injected into the persistent JS Context.
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
@@ -354,8 +367,11 @@ impl JsRuntime {
     /// Set the DOM snapshot (called after navigate).
     ///
     /// Sends the snapshot to the JS thread so that `document.querySelector`
-    /// and friends operate on real DOM data.
+    /// and friends operate on real DOM data. Also clears the mutation buffer.
     pub fn set_dom_snapshot(&mut self, snapshot: Option<DomSnapshot>) {
+        // Clear mutations when snapshot changes
+        self.mutations.write().unwrap().clear();
+
         self.cmd_tx
             .send(JsCommand::SetDom { snapshot })
             .expect("JS thread has died");
@@ -396,9 +412,10 @@ fn js_thread_loop(
     cmd_rx: Receiver<JsCommand>,
     resp_tx: Sender<JsResponse>,
     console_output: Arc<RwLock<Vec<String>>>,
+    mutations: Arc<RwLock<Vec<DomMutation>>>,
 ) {
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
-    let mut ctx = create_context(&console_output, &dom_snapshot);
+    let mut ctx = create_context(&console_output, &dom_snapshot, &mutations);
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -411,6 +428,8 @@ fn js_thread_loop(
             } => {
                 // Clear console buffer before eval
                 console_output.write().unwrap().clear();
+                // Clear mutation buffer before eval
+                mutations.write().unwrap().clear();
 
                 // Apply runtime limits to context
                 let loop_limit = max_loop_iterations.unwrap_or(100_000);
@@ -436,7 +455,7 @@ fn js_thread_loop(
                 // Check if we timed out
                 if elapsed.as_millis() > timeout as u128 {
                     // Context may be in a bad state — recreate it
-                    ctx = create_context(&console_output, &dom_snapshot);
+                    ctx = create_context(&console_output, &dom_snapshot, &mutations);
                     let _ = resp_tx.send(JsResponse::EvalResult {
                         value: None,
                         exception: Some(format!(
@@ -522,6 +541,7 @@ fn js_thread_loop(
 fn create_context(
     output: &Arc<RwLock<Vec<String>>>,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+    mutations: &Arc<RwLock<Vec<DomMutation>>>,
 ) -> Context {
     let mut context = Context::default();
 
@@ -676,7 +696,7 @@ fn create_context(
 
     // --- Document object ---
 
-    register_document_object(&mut context, dom_snapshot);
+    register_document_object(&mut context, dom_snapshot, mutations);
 
     context
 }
@@ -689,6 +709,7 @@ fn create_context(
 fn register_document_object(
     ctx: &mut Context,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+    mutations: &Arc<RwLock<Vec<DomMutation>>>,
 ) {
     let dom_capture_title = dom_snapshot.clone();
     let title_getter = unsafe {
@@ -734,6 +755,7 @@ fn register_document_object(
 
     // querySelector(selector)
     let dom_capture_qs = dom_snapshot.clone();
+    let mutations_capture_qs = mutations.clone();
     let query_selector_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector = args
@@ -746,7 +768,7 @@ fn register_document_object(
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.query_selector(&selector) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(snapshot, node, ctx));
+                        return Ok(create_element_object(snapshot, node, ctx, &mutations_capture_qs));
                     }
                 }
             }
@@ -756,6 +778,7 @@ fn register_document_object(
 
     // querySelectorAll(selector)
     let dom_capture_qsa = dom_snapshot.clone();
+    let mutations_capture_qsa = mutations.clone();
     let query_selector_all_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector = args
@@ -770,7 +793,7 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_qsa))
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -783,6 +806,7 @@ fn register_document_object(
 
     // getElementById(id)
     let dom_capture_gbi = dom_snapshot.clone();
+    let mutations_capture_gbi = mutations.clone();
     let get_element_by_id_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let id = args
@@ -795,7 +819,7 @@ fn register_document_object(
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.get_element_by_id(&id) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(snapshot, node, ctx));
+                        return Ok(create_element_object(snapshot, node, ctx, &mutations_capture_gbi));
                     }
                 }
             }
@@ -805,6 +829,7 @@ fn register_document_object(
 
     // getElementsByTagName(tag)
     let dom_capture_gtn = dom_snapshot.clone();
+    let mutations_capture_gtn = mutations.clone();
     let get_elements_by_tag_name_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let tag = args
@@ -819,7 +844,7 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_gtn))
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -832,6 +857,7 @@ fn register_document_object(
 
     // getElementsByClassName(class)
     let dom_capture_gcn = dom_snapshot.clone();
+    let mutations_capture_gcn = mutations.clone();
     let get_elements_by_class_name_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let class = args
@@ -846,7 +872,7 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_gcn))
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -900,6 +926,7 @@ fn create_element_object(
     snapshot: &DomSnapshot,
     node: &DomNode,
     ctx: &mut Context,
+    mutations: &Arc<RwLock<Vec<DomMutation>>>,
 ) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
     let id_val = node
@@ -964,6 +991,81 @@ fn create_element_object(
             Ok(JsValue::from(true))
         })
     };
+
+    // click() → records DomMutation::ClickElement
+    let node_id_click = node.id;
+    let mutations_click = mutations.clone();
+    let click_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            mutations_click
+                .write()
+                .unwrap()
+                .push(DomMutation::ClickElement { node_id: node_id_click });
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // setAttribute(name, value) → records DomMutation::SetAttribute
+    let node_id_sa = node.id;
+    let mutations_sa = mutations.clone();
+    let set_attribute_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let value = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            mutations_sa
+                .write()
+                .unwrap()
+                .push(DomMutation::SetAttribute {
+                    node_id: node_id_sa,
+                    name,
+                    value,
+                });
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // value getter
+    let value_val = node.attributes.get("value").map(|s| s.as_str()).unwrap_or("").to_string();
+    let value_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::from(JsString::from(value_val.as_str())))
+        })
+    };
+    let value_getter_fn = FunctionObjectBuilder::new(ctx.realm(), value_getter)
+        .name(js_string!("get value"))
+        .build();
+
+    // value setter → records DomMutation::InputElement
+    let node_id_vs = node.id;
+    let mutations_vs = mutations.clone();
+    let value_setter = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let val = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            mutations_vs
+                .write()
+                .unwrap()
+                .push(DomMutation::InputElement {
+                    node_id: node_id_vs,
+                    value: val,
+                });
+            Ok(JsValue::undefined())
+        })
+    };
+    let value_setter_fn = FunctionObjectBuilder::new(ctx.realm(), value_setter)
+        .name(js_string!("set value"))
+        .build();
 
     // children → [element children IDs as lightweight objects]
     // Note: we avoid recursively calling create_element_object for children/parentNode
@@ -1077,6 +1179,9 @@ fn create_element_object(
         .function(add_event_listener_fn, js_string!("addEventListener"), 2)
         .function(remove_event_listener_fn, js_string!("removeEventListener"), 2)
         .function(dispatch_event_fn, js_string!("dispatchEvent"), 1)
+        .function(click_fn, js_string!("click"), 0)
+        .function(set_attribute_fn, js_string!("setAttribute"), 2)
+        .accessor(js_string!("value"), Some(value_getter_fn), Some(value_setter_fn), Attribute::all())
         .build();
 
     obj.into()
@@ -2156,5 +2261,146 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::String("ok".into())));
+    }
+
+    // ========================================
+    // Mutation tests
+    // ========================================
+
+    #[tokio::test]
+    async fn test_mutation_set_attribute() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><input id="q" value="old"></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.getElementById('q').setAttribute('value', 'new')")
+            .await
+            .unwrap();
+
+        let mutations = rt.drain_mutations();
+        assert_eq!(mutations.len(), 1);
+        match &mutations[0] {
+            DomMutation::SetAttribute { name, value, .. } => {
+                assert_eq!(name, "value");
+                assert_eq!(value, "new");
+            }
+            _ => panic!("Expected SetAttribute, got {:?}", mutations[0]),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mutation_click() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.getElementById('btn').click()")
+            .await
+            .unwrap();
+        let mutations = rt.drain_mutations();
+        assert!(!mutations.is_empty());
+        match &mutations[0] {
+            DomMutation::ClickElement { .. } => {}
+            _ => panic!("Expected ClickElement, got {:?}", mutations[0]),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mutation_input_value_setter() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><input id="inp" value="old"></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.getElementById('inp').value = 'new'")
+            .await
+            .unwrap();
+        let mutations = rt.drain_mutations();
+        assert_eq!(mutations.len(), 1);
+        match &mutations[0] {
+            DomMutation::InputElement { value, .. } => {
+                assert_eq!(value, "new");
+            }
+            _ => panic!("Expected InputElement, got {:?}", mutations[0]),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mutation_value_getter() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><input id="inp" value="hello"></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.getElementById('inp').value")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello".into())));
+    }
+
+    #[tokio::test]
+    async fn test_drain_mutations_clears_buffer() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.getElementById('btn').click()")
+            .await
+            .unwrap();
+        let first = rt.drain_mutations();
+        assert!(!first.is_empty());
+
+        let second = rt.drain_mutations();
+        assert!(second.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_dom_snapshot_clears_mutations() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.getElementById('btn').click()")
+            .await
+            .unwrap();
+
+        let snapshot2 = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot2));
+        let mutations = rt.drain_mutations();
+        assert!(mutations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mutation_set_attribute_via_query_selector() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        rt.evaluate("document.querySelector('a').setAttribute('href', '/new-page')")
+            .await
+            .unwrap();
+        let mutations = rt.drain_mutations();
+        assert_eq!(mutations.len(), 1);
+        match &mutations[0] {
+            DomMutation::SetAttribute { name, value, .. } => {
+                assert_eq!(name, "href");
+                assert_eq!(value, "/new-page");
+            }
+            _ => panic!("Expected SetAttribute, got {:?}", mutations[0]),
+        }
     }
 }

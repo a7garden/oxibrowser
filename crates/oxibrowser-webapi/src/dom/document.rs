@@ -409,6 +409,39 @@ impl Document {
         self.nodes.get_mut(&id)
     }
 
+    /// Extract iframe `src` URLs from the document.
+    ///
+    /// Returns a list of `(src_url, node_id)` tuples for every `<iframe>`
+    /// element that has a `src` attribute.
+    pub fn extract_iframe_srcs(&self) -> Vec<(String, NodeId)> {
+        let mut results = Vec::new();
+        if let Some(root) = self.tree.root() {
+            self.extract_iframe_srcs_recursive(root, &mut results);
+        }
+        results
+    }
+
+    fn extract_iframe_srcs_recursive(
+        &self,
+        node_id: NodeId,
+        results: &mut Vec<(String, NodeId)>,
+    ) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            if let NodeType::Element { tag, attributes, .. } = &node.node_type {
+                if tag.eq_ignore_ascii_case("iframe") {
+                    if let Some(src) = attributes.iter().find_map(|(k, v)| {
+                        (k == "src").then_some(v.as_str())
+                    }) {
+                        results.push((src.to_string(), node_id));
+                    }
+                }
+            }
+        }
+        for &child in self.tree.children(node_id) {
+            self.extract_iframe_srcs_recursive(child, results);
+        }
+    }
+
     /// Set an attribute on a node.
     ///
     /// If the node exists and is an element, its attribute is set (or added).
@@ -836,5 +869,30 @@ mod tests {
             .map(|r| r.url.as_str())
             .collect();
         assert!(iframe_urls.contains(&"/embed.html"), "should find iframe src");
+    }
+
+    #[test]
+    fn test_extract_iframe_srcs() {
+        let html = r#"<html><body>
+            <iframe src="/embed1.html"></iframe>
+            <iframe src="https://other.com/widget"></iframe>
+            <iframe></iframe>
+            <div>not an iframe</div>
+        </body></html>"#;
+        let doc = Document::parse(html);
+        let iframes = doc.extract_iframe_srcs();
+
+        assert_eq!(iframes.len(), 2, "should find 2 iframes with src");
+        let urls: Vec<&str> = iframes.iter().map(|(u, _)| u.as_str()).collect();
+        assert!(urls.contains(&"/embed1.html"), "should find /embed1.html");
+        assert!(urls.contains(&"https://other.com/widget"), "should find absolute URL");
+    }
+
+    #[test]
+    fn test_extract_iframe_srcs_empty() {
+        let html = "<html><body><p>No iframes here</p></body></html>";
+        let doc = Document::parse(html);
+        let iframes = doc.extract_iframe_srcs();
+        assert!(iframes.is_empty(), "should find no iframes");
     }
 }

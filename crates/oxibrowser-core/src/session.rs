@@ -7,7 +7,7 @@ use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
-use crate::js::dom_snapshot::DomSnapshot;
+use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
 use crate::js::runtime::JsRuntimeConfig;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
@@ -330,11 +330,66 @@ impl Session {
     /// Works with or without an active page. Without a page, the DOM bridge
     /// (document.querySelector etc.) will return empty/null results, but
     /// pure JS expressions (arithmetic, JSON, etc.) work fine.
+    ///
+    /// After evaluation, any DOM mutations recorded by JS (setAttribute,
+    /// click, value setter) are applied to the actual DOM and the snapshot
+    /// is re-injected into the JS runtime.
     pub async fn evaluate_js(&mut self, expression: &str) -> Result<crate::js::runtime::JsEvalResult> {
         if self.closed {
             return Err(CoreError::SessionClosed);
         }
-        self.js_runtime.evaluate(expression).await
+        let result = self.js_runtime.evaluate(expression).await?;
+
+        // Collect and apply DOM mutations
+        let mutations = self.js_runtime.drain_mutations();
+        if !mutations.is_empty() {
+            self.apply_mutations(&mutations);
+            self.inject_dom_snapshot();
+        }
+
+        Ok(result)
+    }
+
+    /// Apply recorded DOM mutations to the active page's DOM tree.
+    fn apply_mutations(&mut self, mutations: &[DomMutation]) {
+        for m in mutations {
+            match m {
+                DomMutation::SetAttribute {
+                    node_id,
+                    name,
+                    value,
+                } => {
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().set_attribute(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            name,
+                            value,
+                        );
+                    }
+                }
+                DomMutation::SetTextContent { node_id, text } => {
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().set_text_content(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            text,
+                        );
+                    }
+                }
+                DomMutation::ClickElement { node_id } => {
+                    // Click doesn't modify DOM directly, but could trigger navigation
+                    tracing::info!(node_id, "element clicked");
+                }
+                DomMutation::InputElement { node_id, value } => {
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().set_attribute(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            "value",
+                            value,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Inject the current page's DOM snapshot into the JS runtime.

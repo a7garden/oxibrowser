@@ -11,6 +11,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 /// OxiBrowser — a headless browser engine with CDP support.
@@ -43,6 +44,9 @@ enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
 
     /// Evaluate JavaScript on a page.
@@ -54,6 +58,9 @@ enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
 
     /// Extract structured data from a page.
@@ -81,6 +88,9 @@ enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
 
     /// Start the CDP server.
@@ -91,6 +101,12 @@ enum Commands {
         /// Port to listen on.
         #[arg(long, default_value_t = 9222)]
         port: u16,
+        /// Cookie persistence file.
+        #[arg(long)]
+        cookie_file: Option<String>,
+        /// Request timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
 
     /// Print version information.
@@ -108,6 +124,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Set up Ctrl+C handler for graceful shutdown.
+    let ctrlc = tokio::signal::ctrl_c();
+    tokio::pin!(ctrlc);
+
     match cli.command {
         Commands::Fetch {
             url,
@@ -116,12 +136,32 @@ async fn main() -> Result<()> {
             status,
             method,
             json,
-        } => run_fetch(&url, &format, headers, status, &method, json).await?,
+            timeout,
+        } => {
+            let op = run_fetch(&url, &format, headers, status, &method, json, timeout);
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    eprintln!("\nInterrupted.");
+                    std::process::exit(130);
+                }
+            }
+        }
         Commands::Eval {
             url,
             expression,
             json,
-        } => run_eval(&url, &expression, json).await?,
+            timeout,
+        } => {
+            let op = run_eval(&url, &expression, json, timeout);
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    eprintln!("\nInterrupted.");
+                    std::process::exit(130);
+                }
+            }
+        }
         Commands::Extract {
             url,
             links,
@@ -131,9 +171,34 @@ async fn main() -> Result<()> {
             selector,
             all,
             json,
-        } => run_extract(&url, links, title, text, markdown, selector.as_deref(), all, json)
-            .await?,
-        Commands::Serve { host, port } => run_serve(&host, port).await?,
+            timeout,
+        } => {
+            let op = run_extract(
+                &url, links, title, text, markdown, selector.as_deref(), all, json, timeout,
+            );
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    eprintln!("\nInterrupted.");
+                    std::process::exit(130);
+                }
+            }
+        }
+        Commands::Serve {
+            host,
+            port,
+            cookie_file,
+            timeout: _timeout,
+        } => {
+            let op = run_serve(&host, port, cookie_file.as_deref());
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    // Ctrl+C is handled inside run_serve via its own ctrl_c listener.
+                    // This branch is a fallback.
+                }
+            }
+        }
         Commands::Version => {
             println!("oxibrowser {}", env!("CARGO_PKG_VERSION"));
         }
@@ -154,14 +219,33 @@ async fn run_fetch(
     status_only: bool,
     method: &str,
     json_output: bool,
+    timeout: u64,
 ) -> Result<()> {
     let _ = method; // Method selection is a future enhancement (HTTP client currently GETs only).
 
-    info!(url = %url, format = %format, "fetching URL");
+    info!(url = %url, format = %format, timeout, "fetching URL");
 
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
-    let session = browser.new_page(url).await?;
+
+    let session_result = tokio::time::timeout(
+        Duration::from_secs(timeout),
+        browser.new_page(url),
+    )
+    .await;
+
+    let session = match session_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: timed out after {timeout}s");
+            std::process::exit(1);
+        }
+    };
+
     let session_guard = session.read().await;
 
     match session_guard.page() {
@@ -229,12 +313,29 @@ async fn run_fetch(
 // ---------------------------------------------------------------------------
 
 /// Evaluate JavaScript on a page and print the result.
-async fn run_eval(url: &str, expression: &str, json_output: bool) -> Result<()> {
-    info!(url = %url, expr = %expression, "evaluating JS");
+async fn run_eval(url: &str, expression: &str, json_output: bool, timeout: u64) -> Result<()> {
+    info!(url = %url, expr = %expression, timeout, "evaluating JS");
 
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
-    let session = browser.new_page(url).await?;
+
+    let session_result = tokio::time::timeout(
+        Duration::from_secs(timeout),
+        browser.new_page(url),
+    )
+    .await;
+
+    let session = match session_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: timed out after {timeout}s");
+            std::process::exit(1);
+        }
+    };
 
     // Need write access for evaluate_js (it takes &mut Session).
     let result = {
@@ -290,12 +391,31 @@ async fn run_extract(
     selector: Option<&str>,
     all: bool,
     json_output: bool,
+    timeout: u64,
 ) -> Result<()> {
-    info!(url = %url, "extracting data");
+    info!(url = %url, timeout, "extracting data");
 
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
-    let session = browser.new_page(url).await?;
+
+    let session_result = tokio::time::timeout(
+        Duration::from_secs(timeout),
+        browser.new_page(url),
+    )
+    .await;
+
+    let session = match session_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: timed out after {timeout}s");
+            std::process::exit(1);
+        }
+    };
+
     let session_guard = session.read().await;
 
     let page = match session_guard.page() {
@@ -433,14 +553,17 @@ async fn run_extract(
 // ---------------------------------------------------------------------------
 
 /// Start the CDP server with a real Browser instance.
-async fn run_serve(host: &str, port: u16) -> Result<()> {
+async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|e: std::net::AddrParseError| anyhow::anyhow!("invalid address: {e}"))?;
 
     info!(addr = %addr, "starting CDP server");
 
-    let config = oxibrowser_core::BrowserConfig::headless();
+    let mut config = oxibrowser_core::BrowserConfig::headless();
+    if let Some(path) = cookie_file {
+        config.cookie_file = Some(std::path::PathBuf::from(path));
+    }
     let browser = Arc::new(oxibrowser_core::Browser::new(config).await?);
 
     let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr, browser.clone()));

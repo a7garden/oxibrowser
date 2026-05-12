@@ -1,5 +1,6 @@
 //! Browser configuration.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Configuration for a Browser instance.
@@ -51,6 +52,9 @@ pub struct BrowserConfig {
 
     /// Navigation timeout in milliseconds (time to wait for page load).
     pub navigation_timeout_ms: u64,
+
+    /// Cookie jar persistence file path. `None` = in-memory only (default).
+    pub cookie_file: Option<PathBuf>,
 }
 
 impl Default for BrowserConfig {
@@ -70,6 +74,7 @@ impl Default for BrowserConfig {
             js_max_loop_iterations: 100_000,
             js_max_stack_size: 1024,
             navigation_timeout_ms: 30_000,
+            cookie_file: None,
         }
     }
 }
@@ -116,6 +121,7 @@ mod tests {
         assert_eq!(config.js_max_loop_iterations, 100_000);
         assert_eq!(config.js_max_stack_size, 1024);
         assert_eq!(config.navigation_timeout_ms, 30_000);
+        assert!(config.cookie_file.is_none(), "default should have no cookie file");
     }
 
     #[test]

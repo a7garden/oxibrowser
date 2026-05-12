@@ -56,7 +56,27 @@ pub struct Browser {
 impl Browser {
     /// Create a new Browser instance with the given config.
     pub async fn new(config: BrowserConfig) -> Result<Self> {
-        let cookie_jar = Arc::new(RwLock::new(CookieJar::new()));
+        let cookie_jar = if let Some(ref path) = config.cookie_file {
+            match CookieJar::load_from_file(path) {
+                Ok(jar) => {
+                    info!(path = %path.display(), "loaded cookies from file");
+                    jar
+                }
+                Err(e) => {
+                    // File missing or invalid is not fatal — start with empty jar
+                    info!(
+                        path = %path.display(),
+                        error = %e,
+                        "could not load cookie file, starting with empty jar"
+                    );
+                    CookieJar::new()
+                }
+            }
+        } else {
+            CookieJar::new()
+        };
+
+        let cookie_jar = Arc::new(RwLock::new(cookie_jar));
         let http_client = Arc::new(HttpClient::new(&config, cookie_jar.clone())?);
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -104,6 +124,7 @@ impl Browser {
 
     /// Convenience: create a session and navigate to a URL.
     pub async fn new_page(&self, url: &str) -> Result<Arc<tokio::sync::RwLock<Session>>> {
+        let _span = tracing::info_span!("new_page", browser = %self.id, url = %url).entered();
         let session = self.new_session().await?;
         session.write().await.navigate(url).await?;
         Ok(session)
@@ -113,6 +134,16 @@ impl Browser {
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(()); // Already closed
+        }
+
+        // Save cookies to disk if a cookie_file path is configured
+        if let Some(ref path) = self.config.cookie_file {
+            let jar = self.cookie_jar.read();
+            if let Err(e) = jar.save_to_file(path) {
+                warn!(path = %path.display(), error = %e, "failed to save cookies to file");
+            } else {
+                info!(path = %path.display(), "saved cookies to file");
+            }
         }
 
         // Broadcast shutdown signal to all session holders

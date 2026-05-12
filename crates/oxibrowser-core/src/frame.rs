@@ -152,6 +152,13 @@ impl Frame {
         self.document.extract_resource_urls()
     }
 
+    /// Extract iframe `src` URLs from this frame's document.
+    ///
+    /// Returns `(src_url, NodeId)` for every `<iframe>` with a `src`.
+    pub fn iframe_srcs(&self) -> Vec<(String, NodeId)> {
+        self.document.extract_iframe_srcs()
+    }
+
     /// Set an attribute on a node in this frame's document.
     pub fn set_attribute(&mut self, node_id: NodeId, name: &str, value: &str) {
         self.document_mut().set_attribute(node_id, name, value);
@@ -160,5 +167,51 @@ impl Frame {
     /// Set the text content of a node in this frame's document.
     pub fn set_text_content(&mut self, node_id: NodeId, text: &str) {
         self.document_mut().set_text_content(node_id, text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_frame(html: &str) -> Frame {
+        let url = Url::parse("https://example.com").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(Frame::from_html(url, html)).unwrap()
+    }
+
+    #[test]
+    fn test_iframe_srcs() {
+        let html = r#"<html><body>
+            <iframe src="/embed.html"></iframe>
+            <iframe src="https://other.com/widget"></iframe>
+            <iframe></iframe>
+        </body></html>"#;
+        let frame = make_frame(html);
+        let srcs = frame.iframe_srcs();
+
+        assert_eq!(srcs.len(), 2, "should find 2 iframes with src");
+        let urls: Vec<&str> = srcs.iter().map(|(u, _)| u.as_str()).collect();
+        assert!(urls.contains(&"/embed.html"));
+        assert!(urls.contains(&"https://other.com/widget"));
+    }
+
+    #[test]
+    fn test_iframe_srcs_empty() {
+        let html = "<html><body><p>No iframes</p></body></html>";
+        let frame = make_frame(html);
+        let srcs = frame.iframe_srcs();
+        assert!(srcs.is_empty(), "should find no iframes");
+    }
+
+    #[test]
+    fn test_add_child_frame() {
+        let html = "<html><body><p>Parent</p></body></html>";
+        let mut frame = make_frame(html);
+        assert_eq!(frame.children().len(), 0);
+
+        let child = make_frame("<html><body><p>Child</p></body></html>");
+        frame.add_child(child);
+        assert_eq!(frame.children().len(), 1);
     }
 }
