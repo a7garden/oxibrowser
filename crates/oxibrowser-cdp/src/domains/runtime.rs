@@ -4,8 +4,10 @@
 //! Runtime.callFunctionOn, Runtime.getProperties.
 //!
 //! After Runtime.enable, emits Runtime.executionContextCreated.
+//! Runtime.evaluate delegates to boa_engine via Session::evaluate_js().
 
 use crate::domains::{DispatchContext, DomainResult};
+use crate::event::EventSender;
 use crate::protocol::CdpError;
 use serde_json::{json, Value};
 
@@ -63,11 +65,8 @@ fn disable(ctx: &DispatchContext) -> DomainResult {
     Ok(Some(json!({})))
 }
 
-/// Runtime.evaluate — evaluates a JavaScript expression.
-async fn evaluate(
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+/// Runtime.evaluate — evaluates a JavaScript expression via boa_engine.
+async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let expression = params
         .get("expression")
@@ -76,9 +75,9 @@ async fn evaluate(
 
     let mut guard = ctx.session.write().await;
 
-    // Try the real JS runtime if we have a session
     match guard.evaluate_js(expression).await {
         Ok(result) => {
+            // Handle exceptions
             if let Some(exception) = &result.exception {
                 return Ok(Some(json!({
                     "result": { "type": "undefined" },
@@ -91,14 +90,8 @@ async fn evaluate(
 
             let value = result.value.unwrap_or(Value::Null);
             let result_type = classify_json_type(&value);
-            let description = match &value {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            };
 
-            // Emit consoleAPICalled for console.log statements.
-            // The stub evaluator pushes output to JsRuntime.console
-            // (accessible via result.console_output), NOT to result.value.
+            // Emit consoleAPICalled for any captured console output
             if !result.console_output.is_empty() {
                 let args: Vec<Value> = result
                     .console_output
@@ -126,26 +119,17 @@ async fn evaluate(
                 "result": {
                     "type": result_type,
                     "value": value,
-                    "description": description,
                 },
                 "exceptionDetails": null
             })))
         }
-        Err(_) => {
-            let (result_type, value) = classify_expression(expression);
-            Ok(Some(json!({
-                "result": {
-                    "type": result_type,
-                    "value": value,
-                    "description": if result_type == "string" {
-                        value.as_str().map(|s| s.to_string())
-                    } else {
-                        None::<String>
-                    }
-                },
-                "exceptionDetails": null
-            })))
-        }
+        Err(e) => Ok(Some(json!({
+            "result": { "type": "undefined" },
+            "exceptionDetails": {
+                "text": e.to_string(),
+                "exception": { "type": "string", "value": e.to_string() }
+            }
+        }))),
     }
 }
 
@@ -190,53 +174,3 @@ fn classify_json_type(value: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
-
-/// Classify a simple JS expression and return (type, value) — stub fallback.
-fn classify_expression(expr: &str) -> (String, Value) {
-    let trimmed = expr.trim();
-
-    if trimmed.is_empty() {
-        return ("undefined".to_string(), Value::Null);
-    }
-
-    // Boolean literals
-    if trimmed == "true" {
-        return ("boolean".to_string(), Value::Bool(true));
-    }
-    if trimmed == "false" {
-        return ("boolean".to_string(), Value::Bool(false));
-    }
-
-    // Null / undefined
-    if trimmed == "null" {
-        return ("object".to_string(), Value::Null);
-    }
-    if trimmed == "undefined" {
-        return ("undefined".to_string(), Value::Null);
-    }
-
-    // Numeric literals
-    if let Ok(n) = trimmed.parse::<i64>() {
-        return ("number".to_string(), json!(n));
-    }
-    if let Ok(f) = trimmed.parse::<f64>() {
-        return ("number".to_string(), json!(f));
-    }
-
-    // String literals (single or double quoted)
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        let s = &trimmed[1..trimmed.len() - 1];
-        return ("string".to_string(), Value::String(s.to_string()));
-    }
-
-    // Default: return as string
-    (
-        "string".to_string(),
-        Value::String(trimmed.to_string()),
-    )
-}
-
-// Import EventSender for timestamp_ms
-use crate::event::EventSender;
