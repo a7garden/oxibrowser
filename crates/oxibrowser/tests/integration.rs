@@ -127,3 +127,48 @@ async fn test_httpbin_get() {
 
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_korean_encoding_naver() {
+    // Naver — one of the largest Korean websites
+    let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+    let session = browser.new_page("https://www.naver.com").await.unwrap();
+
+    let guard = session.read().await;
+    let page = guard.page().expect("page should be loaded");
+    let content = page.content();
+
+    // The page should contain readable Korean text
+    let has_korean = content.contains("네이버")
+        || content.contains("naver")
+        || content.contains("NAVER");
+    assert!(
+        has_korean,
+        "page should contain Korean text, got first 500 chars: {}",
+        content.chars().take(500).collect::<String>()
+    );
+    drop(guard);
+
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_encoding_meta_charset() {
+    // Verify a standard UTF-8 page decodes cleanly
+    let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+    let session = browser.new_page("https://example.com").await.unwrap();
+
+    let guard = session.read().await;
+    let page = guard.page().expect("page should be loaded");
+    let content = page.content();
+
+    assert!(
+        content.contains("Example Domain") || content.contains("example"),
+        "should contain readable text"
+    );
+    drop(guard);
+
+    browser.close().await.unwrap();
+}

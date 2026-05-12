@@ -58,6 +58,9 @@ string_cache = "0.8"
 # Logging / tracing
 log = "0.4"
 
+# Encoding
+encoding_rs = "0.8"
+
 # Utilities
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }

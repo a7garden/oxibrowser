@@ -64,14 +64,24 @@ impl HttpClient {
         Ok(response)
     }
 
-    /// Fetch URL and return body as string.
+    /// Fetch URL and return body as a string, auto-detecting encoding.
+    ///
+    /// Uses `Content-Type` header charset, BOM, and HTML `<meta>` tags
+    /// to detect the character encoding. Falls back to UTF-8.
     pub async fn fetch_text(&self, url: &Url) -> Result<String> {
         let response = self.fetch(url).await?;
-        let text = response
-            .text()
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
-        Ok(text)
+
+        Ok(crate::encoding::decode_html(&bytes, content_type.as_deref()))
     }
 
     /// Send a POST request with a raw body.

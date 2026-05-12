@@ -12,6 +12,8 @@ pub mod session;
 pub mod network;
 pub mod js;
 
+pub mod encoding;
+
 pub mod error;
 
 pub use browser::Browser;

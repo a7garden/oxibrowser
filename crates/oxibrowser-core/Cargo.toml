@@ -20,6 +20,7 @@ bytes = { workspace = true }
 image = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
+encoding_rs = { workspace = true }
 html5ever = { workspace = true }
 markup5ever = { workspace = true }
 string_cache = { workspace = true }

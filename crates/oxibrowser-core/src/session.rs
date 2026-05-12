@@ -110,20 +110,22 @@ impl Session {
             });
         }
 
-        let content_type = response
+        let ct_header = response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("text/html")
             .to_string();
 
-        let html = response
-            .text()
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
+        let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
+
         // Create a new page for this navigation
-        let page = Page::from_html(parsed.clone(), &html, status, content_type).await?;
+        let page = Page::from_html(parsed.clone(), &html, status, ct_header).await?;
 
         // Update history
         if self.history.is_empty() {
@@ -187,11 +189,18 @@ impl Session {
             
             // Re-fetch without adding to history
             let response = self.http_client.fetch(&url).await?;
-            let html = response
-                .text()
+            let ct_header = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("text/html")
+                .to_string();
+            let bytes = response
+                .bytes()
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
-            self.active_page = Some(Page::from_html(url, &html, 200, "text/html".into()).await?);
+            let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
+            self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
             self.inject_dom_snapshot();
             Ok(())
         } else {
@@ -206,11 +215,18 @@ impl Session {
             let url = self.history[self.history_index].clone();
 
             let response = self.http_client.fetch(&url).await?;
-            let html = response
-                .text()
+            let ct_header = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("text/html")
+                .to_string();
+            let bytes = response
+                .bytes()
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
-            self.active_page = Some(Page::from_html(url, &html, 200, "text/html".into()).await?);
+            let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
+            self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
             self.inject_dom_snapshot();
             Ok(())
         } else {
@@ -223,12 +239,19 @@ impl Session {
         if let Some(url) = self.current_url() {
 
             let response = self.http_client.fetch(url).await?;
-            let html = response
-                .text()
+            let ct_header = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("text/html")
+                .to_string();
+            let bytes = response
+                .bytes()
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(
-                Page::from_html(url.clone(), &html, 200, "text/html".into()).await?,
+                Page::from_html(url.clone(), &html, 200, ct_header).await?,
             );
             self.inject_dom_snapshot();
             Ok(())
@@ -275,10 +298,12 @@ impl Session {
             .unwrap_or("text/html")
             .to_string();
 
-        let html = response
-            .text()
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        let html = crate::encoding::decode_html(&bytes, Some(&ct));
 
         // Create a new page for this navigation
         let page = Page::from_html(parsed.clone(), &html, status, ct).await?;
