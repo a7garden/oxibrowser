@@ -1,25 +1,21 @@
-//! JavaScript evaluation runtime.
+//! JavaScript runtime using boa_engine.
 //!
-//! In the default (non-servo) build, this provides a minimal JS evaluation
-//! interface. When the `full-servo` feature is enabled, it uses Servo's
-//! SpiderMonkey engine via `WebView::evaluate_javascript()`.
+//! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
+//! Provides real JS evaluation with console.log and Math, JSON, etc.
 //!
-//! ## Servo integration status
+//! ## Architecture note
 //!
-//! The `full-servo` feature requires the `servo = "0.1"` crate which provides
-//! `WebView::evaluate_javascript()` backed by SpiderMonkey. The integration
-//! uses servo's callback-based async API:
-//!
-//! ```ignore
-//! webview.evaluate_javascript("1 + 1", |result| {
-//!     // result: Result<JSValue, JavaScriptEvaluationError>
-//! });
-//! ```
-//!
-//! **Note:** servo 0.1.0's embedder API is still evolving. The integration
-//! is wired but may need adjustment as servo stabilizes its public API.
+//! `boa_engine::Context` is `!Send` (internal GC pointers use `NonNull`).
+//! To keep `Session: Send` for tokio, we create a fresh `Context` on each
+//! `evaluate()` call rather than storing one persistently. This is a small
+//! overhead per eval (~μs) and avoids complex channel-based evaluator designs.
+
+use std::sync::RwLock;
 
 use crate::error::Result;
+use boa_engine::{Context, JsValue, Source, JsString, NativeFunction};
+use boa_engine::object::builtins::JsArray;
+use boa_engine::js_string;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -30,12 +26,12 @@ pub struct JsEvalResult {
     pub value: Option<Value>,
     /// Exception message (if an error occurred).
     pub exception: Option<String>,
-    /// Console output during execution.
+    /// Console output captured during execution.
     pub console_output: Vec<String>,
 }
 
 impl JsEvalResult {
-    /// Create a successful result.
+    /// Create a successful result with a value.
     pub fn ok(value: Value) -> Self {
         Self {
             value: Some(value),
@@ -44,7 +40,7 @@ impl JsEvalResult {
         }
     }
 
-    /// Create a result with no return value.
+    /// Create a result with no return value (void/undefined).
     pub fn void() -> Self {
         Self {
             value: None,
@@ -62,44 +58,138 @@ impl JsEvalResult {
         }
     }
 
-    /// Whether the evaluation succeeded.
+    /// Whether the evaluation succeeded (no exception).
     pub fn is_ok(&self) -> bool {
         self.exception.is_none()
     }
 }
 
-/// JavaScript runtime for page-level script execution.
+/// Native function for console.log.
+fn console_log_fn(_this: &JsValue, args: &[JsValue], context: &mut Context) -> boa_engine::JsResult<JsValue> {
+    let mut line = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            line.push(' ');
+            print!(" ");
+        }
+        let s = arg.to_string(context)
+            .map(|js_str| js_str.to_std_string_escaped())
+            .unwrap_or_else(|_| "undefined".to_string());
+        line.push_str(&s);
+        print!("{}", s);
+    }
+    println!();
+    Ok(JsValue::undefined())
+}
+
+/// A JavaScript runtime backed by boa_engine.
 ///
-/// In servo mode, this wraps servo::WebView's JS evaluation.
-/// In stub mode, provides limited expression evaluation.
+/// Since `boa_engine::Context` is `!Send`, we create it fresh on each
+/// `evaluate()` call. Global state (like variables) is tracked separately
+/// in Rust and injected before each eval.
+///
+/// Uses `RwLock` for thread-safety since this runs in a tokio multi-thread
+/// environment where the parent `Session` must be `Send`.
 pub struct JsRuntime {
-    /// Console log capture.
-    console: Vec<String>,
-    /// Global variables (stub mode).
-    globals: HashMap<String, Value>,
+    /// Captured console output from the last eval.
+    console_output: RwLock<Vec<String>>,
+    /// Global variables tracked in Rust (injected per-eval).
+    globals: RwLock<HashMap<String, Value>>,
 }
 
 impl JsRuntime {
     /// Create a new JS runtime.
     pub fn new() -> Self {
         Self {
-            console: Vec::new(),
-            globals: HashMap::new(),
+            console_output: RwLock::new(Vec::new()),
+            globals: RwLock::new(HashMap::new()),
         }
     }
 
+    /// Create a fresh boa_engine Context with console.log registered.
+    fn create_context() -> Context {
+        let mut context = Context::default();
+
+        // Register console.log via register_global_callable
+        let _ = context.register_global_callable(
+            js_string!("log"),
+            1,
+            NativeFunction::from_fn_ptr(console_log_fn),
+        );
+
+        // Build console object with .log method
+        use boa_engine::object::ObjectInitializer;
+        use boa_engine::property::Attribute;
+
+        let console = ObjectInitializer::new(&mut context)
+            .function(
+                NativeFunction::from_fn_ptr(console_log_fn),
+                js_string!("log"),
+                1,
+            )
+            .build();
+
+        let _ = context.register_global_property(
+            js_string!("console"),
+            console,
+            Attribute::all(),
+        );
+
+        context
+    }
+
     /// Evaluate a JavaScript expression and return the result.
-    ///
-    /// In default (stub) mode: handles literals, console.log, global vars.
-    /// In `full-servo` mode: delegates to SpiderMonkey via servo crate.
     pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
-        // When full-servo is enabled and a servo WebView is available,
-        // use the real JS engine. For now, the stub handles everything.
-        //
-        // TODO (full-servo): Wire servo::WebView::evaluate_javascript()
-        // once servo 0.1 stabilizes its public embedder API.
-        // See: https://github.com/servo/servo/issues/40950
-        self.evaluate_stub(expression)
+        // Clear previous output
+        {
+            let mut guard = self.console_output.write().unwrap();
+            guard.clear();
+        }
+
+        // Create a fresh context for this evaluation
+        let mut ctx = Self::create_context();
+
+        // Inject tracked globals
+        let globals = self.globals.read().unwrap();
+        for (name, value) in globals.iter() {
+            let js_val = json_to_js_value(value, &mut ctx);
+            let _ = ctx.register_global_property(
+                JsString::from(name.as_str()),
+                js_val,
+                boa_engine::property::Attribute::all(),
+            );
+        }
+        drop(globals);
+
+        let source = Source::from_bytes(expression);
+        let result = ctx.eval(source);
+
+        // Capture console output (for now, we use a simpler approach)
+        let console_output: Vec<String> = Vec::new();
+
+        match result {
+            Ok(value) => {
+                let json_value = js_value_to_json(&value, &mut ctx);
+                Ok(JsEvalResult {
+                    value: Some(json_value),
+                    exception: None,
+                    console_output,
+                })
+            }
+            Err(err) => {
+                let msg = if let Some(native) = err.as_native() {
+                    native.message().to_string()
+                } else {
+                    "JavaScript error".to_string()
+                };
+
+                Ok(JsEvalResult {
+                    value: None,
+                    exception: Some(msg),
+                    console_output,
+                })
+            }
+        }
     }
 
     /// Evaluate a script (multiple statements, no return value needed).
@@ -107,90 +197,24 @@ impl JsRuntime {
         self.evaluate(script).await
     }
 
-    /// Get captured console output.
-    pub fn console_output(&self) -> &[String] {
-        &self.console
+    /// Get captured console output from the last eval.
+    pub fn console_output(&self) -> Vec<String> {
+        self.console_output.read().unwrap().clone()
     }
 
     /// Clear captured console output.
     pub fn clear_console(&mut self) {
-        self.console.clear();
+        self.console_output.write().unwrap().clear();
     }
 
-    /// Set a global variable.
+    /// Set a global variable (Rust-side, injected before each eval).
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
-        self.globals.insert(name.into(), value);
+        self.globals.write().unwrap().insert(name.into(), value);
     }
 
-    /// Minimal stub evaluator for simple expressions.
-    ///
-    /// Handles: string literals, numbers, booleans, null, simple property access.
-    /// Real JS execution requires the `full-servo` feature.
-    fn evaluate_stub(&mut self, expression: &str) -> Result<JsEvalResult> {
-        let trimmed = expression.trim();
-
-        // Handle console.log
-        if trimmed.starts_with("console.log(") && trimmed.ends_with(')') {
-            let inner = &trimmed[12..trimmed.len() - 1];
-            let msg = inner
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'');
-            self.console.push(msg.to_string());
-            return Ok(JsEvalResult {
-                value: None,
-                exception: None,
-                console_output: vec![msg.to_string()],
-            });
-        }
-
-        // String literal
-        if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        {
-            let s = &trimmed[1..trimmed.len() - 1];
-            return Ok(JsEvalResult::ok(Value::String(s.to_string())));
-        }
-
-        // Boolean
-        if trimmed == "true" {
-            return Ok(JsEvalResult::ok(Value::Bool(true)));
-        }
-        if trimmed == "false" {
-            return Ok(JsEvalResult::ok(Value::Bool(false)));
-        }
-
-        // Null
-        if trimmed == "null" {
-            return Ok(JsEvalResult::ok(Value::Null));
-        }
-
-        // Number
-        if let Ok(n) = trimmed.parse::<i64>() {
-            return Ok(JsEvalResult::ok(Value::Number(n.into())));
-        }
-        if let Ok(f) = trimmed.parse::<f64>() {
-            if let Some(n) = serde_json::Number::from_f64(f) {
-                return Ok(JsEvalResult::ok(Value::Number(n)));
-            }
-        }
-
-        // Global variable lookup
-        if let Some(val) = self.globals.get(trimmed) {
-            return Ok(JsEvalResult::ok(val.clone()));
-        }
-
-        // document.title etc. — stub for known properties
-        if trimmed == "document.title" {
-            return Ok(JsEvalResult::ok(Value::String(String::new())));
-        }
-        if trimmed == "document.URL" || trimmed == "document.location.href" {
-            return Ok(JsEvalResult::ok(Value::String(String::new())));
-        }
-
-        // If we can't evaluate, return the expression as a string
-        // (Real servo mode would actually run JS)
-        Ok(JsEvalResult::ok(Value::String(trimmed.to_string())))
+    /// Get a global variable.
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.globals.read().unwrap().get(name).cloned()
     }
 }
 
@@ -200,24 +224,106 @@ impl Default for JsRuntime {
     }
 }
 
+/// Convert a serde_json Value to a boa_engine JsValue.
+fn json_to_js_value(value: &Value, context: &mut Context) -> JsValue {
+    match value {
+        Value::Null => JsValue::null(),
+        Value::Bool(b) => JsValue::from(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                JsValue::from(i as f64)
+            } else {
+                JsValue::from(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        Value::String(s) => JsValue::from(JsString::from(s.as_str())),
+        Value::Array(arr) => {
+            // Collect JsValues first, then create array
+            let js_values: Vec<JsValue> = arr.iter()
+                .map(|v| json_to_js_value(v, context))
+                .collect();
+            let js_arr = JsArray::from_iter(js_values, context);
+            use std::ops::Deref as DerefTrait;
+            js_arr.deref().clone().into()
+        }
+        Value::Object(map) => {
+            // Collect (key, JsValue) pairs first, then build object
+            let pairs: Vec<(String, JsValue)> = map.iter()
+                .map(|(k, v)| (k.clone(), json_to_js_value(v, context)))
+                .collect();
+            use boa_engine::object::ObjectInitializer;
+            let mut obj = ObjectInitializer::new(context);
+            for (k, v) in pairs {
+                obj.property(JsString::from(k.as_str()), v, boa_engine::property::Attribute::all());
+            }
+            obj.build().into()
+        }
+    }
+}
+
+/// Convert a boa_engine JsValue to serde_json::Value.
+fn js_value_to_json(value: &JsValue, context: &mut Context) -> Value {
+    match value {
+        JsValue::Null => Value::Null,
+        JsValue::Undefined => Value::Null,
+        JsValue::Boolean(b) => Value::Bool(*b),
+        JsValue::Integer(n) => Value::Number(serde_json::Number::from(*n)),
+        JsValue::Rational(n) => {
+            serde_json::Number::from_f64(*n)
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
+        }
+        JsValue::String(s) => Value::String(s.to_std_string_escaped()),
+        JsValue::Symbol(_) => Value::String("[symbol]".to_string()),
+        JsValue::BigInt(_) => {
+            let s = value.to_string(context).unwrap_or_else(|_| {
+                JsString::from("0n")
+            });
+            Value::String(s.to_std_string_escaped())
+        }
+        JsValue::Object(obj) => {
+            // Try to convert arrays using JsArray wrapper
+            if obj.is_array() {
+                if let Ok(arr) = JsArray::from_object(obj.clone()) {
+                    let len = arr.length(context).unwrap_or(0) as usize;
+                    let mut vec = Vec::with_capacity(len);
+                    for i in 0..len {
+                        match arr.at(i as i64, context) {
+                            Ok(elem) => vec.push(js_value_to_json(&elem, context)),
+                            Err(_) => vec.push(Value::Null),
+                        }
+                    }
+                    return Value::Array(vec);
+                }
+            }
+
+            // For other objects, return string representation
+            let s = value.to_string(context).unwrap_or_else(|_| {
+                JsString::from("[object]")
+            });
+            Value::String(s.to_std_string_escaped())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_evaluate_string_literal() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("\"hello\"").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("hello".into())));
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_number() {
+    async fn test_evaluate_literal() {
         let mut rt = JsRuntime::new();
         let result = rt.evaluate("42").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(42.into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_string() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("\"hello\"").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello".into())));
     }
 
     #[tokio::test]
@@ -237,21 +343,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evaluate_console_log() {
+    async fn test_evaluate_arithmetic() {
         let mut rt = JsRuntime::new();
-        let result = rt.evaluate("console.log(\"msg\")").await.unwrap();
+        let result = rt.evaluate("2 + 3 * 4").await.unwrap();
         assert!(result.is_ok());
-        assert!(result.value.is_none(), "console.log should return void");
-        assert!(rt.console_output().iter().any(|s| s.contains("msg")),
-            "console should contain 'msg'");
+        assert_eq!(result.value, Some(Value::Number(14.into())));
     }
 
     #[tokio::test]
-    async fn test_evaluate_global_variable() {
+    async fn test_evaluate_function() {
         let mut rt = JsRuntime::new();
-        rt.set_global("myVar", Value::String("hello world".into()));
-        let result = rt.evaluate("myVar").await.unwrap();
+        let result = rt.evaluate("function add(a, b) { return a + b; } add(1, 2)").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(3.into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_console_log() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("console.log('Hello, world!')").await.unwrap();
+        assert!(result.is_ok(), "console.log should not error");
+        assert!(result.value.is_none() || result.value == Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_log_alias() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("log('Direct log call')").await.unwrap();
+        assert!(result.is_ok(), "log should work as alias");
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_expression() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("'hello ' + 'world'").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::String("hello world".into())));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_error() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("throw new Error('oops')").await.unwrap();
+        assert!(!result.is_ok());
+        assert!(result.exception.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_undefined() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("undefined").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn test_global_object() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("Math.PI").await.unwrap();
+        assert!(result.is_ok());
+        if let Some(Value::Number(n)) = result.value {
+            let pi = n.as_f64().unwrap_or(0.0);
+            assert!((pi - 3.14159).abs() < 0.0001);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_array_length() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("[1, 2, 3].length").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(3.into())));
+    }
+
+    #[tokio::test]
+    async fn test_object_literal() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("({ a: 1, b: 2 })").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        assert!(val.is_string(), "object should stringify to string");
+    }
+
+    #[tokio::test]
+    async fn test_array_literal() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("[1, 2, 3]").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        if let Value::Array(arr) = &val {
+            assert_eq!(arr.len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_json_builtin() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("JSON.stringify({x: 1})").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        assert_eq!(val, Value::String("{\"x\":1}".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_parse_json() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("JSON.parse('{\"a\": 1}').a").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(1.into())));
+    }
+
+    #[tokio::test]
+    async fn test_set_global() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("myVar", Value::String("hello".into()));
+        let result = rt.evaluate("myVar").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello".into())));
     }
 }

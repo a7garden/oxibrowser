@@ -1,8 +1,7 @@
 //! JavaScript runtime abstraction.
 //!
-//! When the `full-servo` feature is enabled, uses Servo's JS engine
-//! (SpiderMonkey) via the servo crate's `WebView::evaluate_javascript()`.
-//! Otherwise, provides a minimal JS evaluation stub.
+//! Uses **boa_engine** (pure Rust JavaScript engine) for real JS execution.
+//! No C dependencies — no V8, no SpiderMonkey, no Node.js.
 
 pub mod runtime;
 

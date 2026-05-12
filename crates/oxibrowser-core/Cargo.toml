@@ -23,12 +23,7 @@ reqwest = { workspace = true }
 html5ever = { workspace = true }
 markup5ever = { workspace = true }
 string_cache = { workspace = true }
+boa_engine = { workspace = true }
+boa_gc = { workspace = true }
 
 oxibrowser-webapi = { workspace = true }
-
-# Servo engine (optional - for real JS execution and rendering)
-servo = { version = "0.1", optional = true }
-
-[features]
-default = []
-full-servo = ["dep:servo"]

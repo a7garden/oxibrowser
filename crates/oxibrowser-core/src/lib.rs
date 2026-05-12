@@ -1,8 +1,7 @@
 //! OxiBrowser Core — Browser lifecycle, Session, Page, and Frame management.
 //!
 //! Architecture mirrors Lightpanda's Browser → Session → Page → Frame hierarchy,
-//! but uses Servo's html5ever for HTML parsing and (optionally) the servo crate
-//! for full offscreen rendering.
+//! using Servo's html5ever for HTML parsing and boa_engine for JavaScript execution.
 
 pub mod browser;
 pub mod config;
