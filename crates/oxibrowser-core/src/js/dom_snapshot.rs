@@ -13,6 +13,34 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// DOM 변경 사항
+///
+/// Records mutations applied to the DOM so they can be replayed,
+/// inspected, or transmitted over the CDP protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DomMutation {
+    /// Set an attribute on a node.
+    SetAttribute {
+        node_id: u32,
+        name: String,
+        value: String,
+    },
+    /// Set the text content of a node.
+    SetTextContent {
+        node_id: u32,
+        text: String,
+    },
+    /// Simulate a click on an element.
+    ClickElement {
+        node_id: u32,
+    },
+    /// Input text into a form element.
+    InputElement {
+        node_id: u32,
+        value: String,
+    },
+}
+
 /// Serializable DOM node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomNode {

@@ -403,6 +403,31 @@ impl Document {
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
+
+    /// Get a mutable reference to a node by ID.
+    pub fn mut_node(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(&id)
+    }
+
+    /// Set an attribute on a node.
+    ///
+    /// If the node exists and is an element, its attribute is set (or added).
+    /// For the special name `"value"`, delegates to [`Node::set_value`].
+    pub fn set_attribute(&mut self, node_id: NodeId, name: &str, value: &str) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            match name {
+                "value" => node.set_value(value),
+                _ => node.set_attribute(name, value),
+            }
+        }
+    }
+
+    /// Set the text content of a node.
+    pub fn set_text_content(&mut self, node_id: NodeId, text: &str) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.set_text_content(text);
+        }
+    }
 }
 
 /// A resource URL extracted from the document.
@@ -503,8 +528,13 @@ impl TreeSink for DomSink {
     }
 
     fn elem_name<'a>(&self, target: &'a Self::Handle) -> ExpandedName<'a> {
-        let names = self.elem_names.borrow();
-        if let Some(qname) = names.get(target) {
+        // The QualNames are 'static (leaked), so we can safely drop the Ref
+        // after extracting the reference.
+        let qname = {
+            let names = self.elem_names.borrow();
+            names.get(target).copied()
+        };
+        if let Some(qname) = qname {
             return qname.expanded();
         }
         // Fallback — should not be reached in normal parsing
@@ -590,7 +620,12 @@ impl TreeSink for DomSink {
         self.nodes
             .borrow_mut()
             .insert(id, Node::new(id, NodeType::Doctype { name: name.to_string() }));
-        if let Some(root) = self.tree.borrow().root() {
+        // Extract root ID, dropping the Ref borrow before the mutable borrow
+        let root_id = {
+            let guard = self.tree.borrow();
+            guard.root()
+        };
+        if let Some(root) = root_id {
             self.tree.borrow_mut().append_child(root, id);
         }
     }

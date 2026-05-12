@@ -101,4 +101,48 @@ impl Node {
     pub fn src(&self) -> Option<&str> {
         self.get_attribute("src")
     }
+
+    /// Set an attribute on this node (element nodes only).
+    ///
+    /// If the attribute already exists, its value is updated.
+    /// If this is not an element node, this is a no-op.
+    pub fn set_attribute(&mut self, name: &str, value: &str) {
+        if let NodeType::Element { attributes, .. } = &mut self.node_type {
+            if let Some(entry) = attributes.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+                entry.1 = value.to_string();
+            } else {
+                attributes.push((name.to_string(), value.to_string()));
+            }
+        }
+    }
+
+    /// Set the `value` property on this node.
+    ///
+    /// Stores the value as a special `"value"` attribute on element nodes.
+    pub fn set_value(&mut self, value: &str) {
+        self.set_attribute("value", value);
+    }
+
+    /// Set the text content of this node.
+    ///
+    /// For text nodes, replaces the text directly.
+    /// For element nodes, updates or creates a text child representation
+    /// via a special `"data-oxi-text"` attribute (the actual DOM text
+    /// mutation would require tree surgery, which we defer).
+    pub fn set_text_content(&mut self, text: &str) {
+        match &mut self.node_type {
+            NodeType::Text(ref mut t) => {
+                *t = text.to_string();
+            }
+            NodeType::Element { attributes, .. } => {
+                // Store as a data attribute so it round-trips through snapshot.
+                if let Some(entry) = attributes.iter_mut().find(|(k, _)| k == "data-oxi-text") {
+                    entry.1 = text.to_string();
+                } else {
+                    attributes.push(("data-oxi-text".to_string(), text.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
 }

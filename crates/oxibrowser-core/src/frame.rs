@@ -151,4 +151,14 @@ impl Frame {
     pub fn extract_resource_urls(&self) -> Vec<oxibrowser_webapi::dom::ResourceUrl> {
         self.document.extract_resource_urls()
     }
+
+    /// Set an attribute on a node in this frame's document.
+    pub fn set_attribute(&mut self, node_id: NodeId, name: &str, value: &str) {
+        self.document_mut().set_attribute(node_id, name, value);
+    }
+
+    /// Set the text content of a node in this frame's document.
+    pub fn set_text_content(&mut self, node_id: NodeId, text: &str) {
+        self.document_mut().set_text_content(node_id, text);
+    }
 }

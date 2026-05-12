@@ -573,6 +573,107 @@ fn create_context(
 
     let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
 
+    // --- Timer functions (synchronous emulation) ---
+    //
+    // setTimeout(fn, delay, ...args) — callback is invoked immediately (no event loop).
+    // setInterval(fn, delay)        — same: executes once immediately.
+    // clearTimeout / clearInterval   — no-ops.
+
+    let set_timeout_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            if args.is_empty() {
+                return Ok(JsValue::undefined());
+            }
+            let callback = &args[0];
+            if let Some(func) = callback.as_object() {
+                if func.is_callable() {
+                    let cb_args = &args[2..]; // args after (fn, delay)
+                    let _ = func.call(&JsValue::undefined(), cb_args, ctx);
+                }
+            }
+            Ok(JsValue::from(1)) // timer id (simplified)
+        })
+    };
+
+    let set_interval_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            if args.is_empty() {
+                return Ok(JsValue::undefined());
+            }
+            let callback = &args[0];
+            if let Some(func) = callback.as_object() {
+                if func.is_callable() {
+                    let cb_args = &args[2..];
+                    let _ = func.call(&JsValue::undefined(), cb_args, ctx);
+                }
+            }
+            Ok(JsValue::from(1))
+        })
+    };
+
+    let clear_timer_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let _ = context.register_global_callable(js_string!("setTimeout"), 2, set_timeout_fn);
+    let _ = context.register_global_callable(js_string!("setInterval"), 2, set_interval_fn);
+    let _ = context.register_global_callable(js_string!("clearTimeout"), 1, clear_timer_fn.clone());
+    let _ = context.register_global_callable(js_string!("clearInterval"), 1, clear_timer_fn);
+
+    // --- fetch() stub ---
+    //
+    // Returns a minimal Response object without making a real network request.
+    // text() / json() return Promise.resolve with empty values.
+    // Will be connected to HttpClient in a future iteration.
+
+    // Create the text() and json() response method closures outside the fetch
+    // closure to avoid nested unsafe { NativeFunction::from_closure(...) }.
+    // Each fetch() call will .clone() them into the Response object.
+    let fetch_text_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve('')")).unwrap();
+            Ok(promise_val)
+        })
+    };
+
+    let fetch_json_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve({})")).unwrap();
+            Ok(promise_val)
+        })
+    };
+
+    let fetch_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let url = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let response = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("status"),
+                    JsValue::from(200),
+                    Attribute::all(),
+                )
+                .property(js_string!("ok"), JsValue::from(true), Attribute::all())
+                .property(
+                    js_string!("url"),
+                    JsValue::from(JsString::from(url.as_str())),
+                    Attribute::all(),
+                )
+                .function(fetch_text_fn.clone(), js_string!("text"), 0)
+                .function(fetch_json_fn.clone(), js_string!("json"), 0)
+                .build();
+            Ok(response.into())
+        })
+    };
+
+    let _ = context.register_global_callable(js_string!("fetch"), 1, fetch_fn);
+
     // --- Document object ---
 
     register_document_object(&mut context, dom_snapshot);
@@ -756,6 +857,23 @@ fn register_document_object(
         })
     };
 
+    // EventTarget noop methods for document
+    let doc_add_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+    let doc_remove_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+    let doc_dispatch_event_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::from(true))
+        })
+    };
+
     let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .accessor(js_string!("title"), Some(title_getter_fn), None, Attribute::all())
         .accessor(js_string!("URL"), Some(url_getter_fn), None, Attribute::all())
@@ -765,6 +883,9 @@ fn register_document_object(
         .function(get_element_by_id_fn, js_string!("getElementById"), 1)
         .function(get_elements_by_tag_name_fn, js_string!("getElementsByTagName"), 1)
         .function(get_elements_by_class_name_fn, js_string!("getElementsByClassName"), 1)
+        .function(doc_add_event_listener_fn, js_string!("addEventListener"), 2)
+        .function(doc_remove_event_listener_fn, js_string!("removeEventListener"), 2)
+        .function(doc_dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .build();
 
     let _ = ctx.register_global_property(
@@ -820,6 +941,27 @@ fn create_element_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             Ok(JsValue::from(attrs_clone2.contains_key(&name)))
+        })
+    };
+
+    // addEventListener — noop (event system not yet implemented)
+    let add_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // removeEventListener — noop
+    let remove_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // dispatchEvent — noop (returns true)
+    let dispatch_event_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::from(true))
         })
     };
 
@@ -932,6 +1074,9 @@ fn create_element_object(
         .property(js_string!("parentNode"), parent_val, Attribute::all())
         .function(get_attribute_fn, js_string!("getAttribute"), 1)
         .function(has_attribute_fn, js_string!("hasAttribute"), 1)
+        .function(add_event_listener_fn, js_string!("addEventListener"), 2)
+        .function(remove_event_listener_fn, js_string!("removeEventListener"), 2)
+        .function(dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .build();
 
     obj.into()
@@ -1872,5 +2017,144 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.is_ok(), "loop exceeding limit should fail");
+    }
+
+    // ========================================
+    // Timer / async API tests (sync emulation)
+    // ========================================
+
+    #[tokio::test]
+    async fn test_set_timeout() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("let x = 0; setTimeout(() => { x = 42; }, 100); x")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(42.into())));
+    }
+
+    #[tokio::test]
+    async fn test_set_timeout_with_args() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("let r; setTimeout((a, b) => { r = a + b; }, 0, 3, 4); r")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(7.into())));
+    }
+
+    #[tokio::test]
+    async fn test_set_interval_executes_once() {
+        let mut rt = JsRuntime::new();
+        // setInterval also executes immediately in our sync model
+        let result = rt
+            .evaluate("let c = 0; setInterval(() => { c++; }, 100); c")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(1.into())));
+    }
+
+    #[tokio::test]
+    async fn test_clear_timeout_noop() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("clearTimeout(1); clearTimeout(999); 'ok'")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("ok".into())));
+    }
+
+    #[tokio::test]
+    async fn test_clear_interval_noop() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("clearInterval(1); clearInterval(99); 'done'")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("done".into())));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stub() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("let r = fetch('https://example.com'); r.status")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(200.into())));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stub_url() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("fetch('https://example.com/page').url")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.value,
+            Some(Value::String("https://example.com/page".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stub_ok() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("fetch('/api').ok")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_element_add_event_listener_noop() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div id="test">hi</div></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('div').addEventListener('click', () => {}); 'ok'")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("ok".into())));
+    }
+
+    #[tokio::test]
+    async fn test_element_dispatch_event_noop() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><button id="btn">click</button></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('button').dispatchEvent({})")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_document_add_event_listener_noop() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("document.addEventListener('DOMContentLoaded', () => {}); document.removeEventListener('DOMContentLoaded', () => {}); 'ok'")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("ok".into())));
     }
 }
