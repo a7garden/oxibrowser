@@ -557,7 +557,7 @@ impl TreeSink for DomSink {
     }
 
     fn get_document(&self) -> Self::Handle {
-        self.tree.borrow().root().unwrap()
+        self.tree.borrow().root().expect("tree must have a root node")
     }
 
     fn elem_name<'a>(&self, target: &'a Self::Handle) -> ExpandedName<'a> {

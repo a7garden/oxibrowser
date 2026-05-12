@@ -180,7 +180,7 @@ impl Session {
             }
         }
 
-        Err(last_error.unwrap())
+        Err(last_error.expect("at least one retry attempt must have occurred"))
     }
     pub async fn go_back(&mut self) -> Result<()> {
         if self.history_index > 0 {

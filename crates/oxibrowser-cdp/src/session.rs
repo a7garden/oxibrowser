@@ -88,7 +88,7 @@ impl CdpSession {
         info!(session_id = %self.session_id, "CDP session started");
 
         // Take the event receiver out — the forwarding task owns it.
-        let mut event_rx = self.event_receiver.take().unwrap();
+        let mut event_rx = self.event_receiver.take().expect("event_receiver must be present at session start");
 
         loop {
             tokio::select! {

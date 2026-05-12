@@ -25,7 +25,8 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex};
 
 use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
@@ -263,7 +264,7 @@ impl JsRuntime {
         timeout_ms: Option<u64>,
     ) -> Result<JsEvalResult> {
         // Clear shared console buffer
-        self.console_output.write().unwrap().clear();
+        self.console_output.write().clear();
 
         // Send eval command with limits
         self.cmd_tx
@@ -280,7 +281,7 @@ impl JsRuntime {
         let resp = self
             .resp_rx
             .lock()
-            .unwrap()
+            .expect("resp_rx lock poisoned")
             .recv()
             .expect("JS thread has died");
 
@@ -317,19 +318,19 @@ impl JsRuntime {
 
     /// Get captured console output from the last eval.
     pub fn console_output(&self) -> Vec<String> {
-        self.console_output.read().unwrap().clone()
+        self.console_output.read().clone()
     }
 
     /// Clear captured console output.
     pub fn clear_console(&mut self) {
-        self.console_output.write().unwrap().clear();
+        self.console_output.write().clear();
     }
 
     /// Drain all pending DOM mutations collected by JS execution.
     ///
     /// After calling this, the internal buffer is empty.
     pub fn drain_mutations(&self) -> Vec<DomMutation> {
-        let mut guard = self.mutations.write().unwrap();
+        let mut guard = self.mutations.write();
         std::mem::take(&mut *guard)
     }
 
@@ -338,7 +339,6 @@ impl JsRuntime {
         let name = name.into();
         self.globals
             .write()
-            .unwrap()
             .insert(name.clone(), value.clone());
 
         // Also inject into the persistent JS Context
@@ -353,7 +353,7 @@ impl JsRuntime {
         let resp = self
             .resp_rx
             .lock()
-            .unwrap()
+            .expect("resp_rx lock poisoned")
             .recv()
             .expect("JS thread has died");
         let _ = resp; // JsResponse::Done
@@ -361,7 +361,7 @@ impl JsRuntime {
 
     /// Get a global variable (Rust-side tracking).
     pub fn get_global(&self, name: &str) -> Option<Value> {
-        self.globals.read().unwrap().get(name).cloned()
+        self.globals.read().get(name).cloned()
     }
 
     /// Set the DOM snapshot (called after navigate).
@@ -370,7 +370,7 @@ impl JsRuntime {
     /// and friends operate on real DOM data. Also clears the mutation buffer.
     pub fn set_dom_snapshot(&mut self, snapshot: Option<DomSnapshot>) {
         // Clear mutations when snapshot changes
-        self.mutations.write().unwrap().clear();
+        self.mutations.write().clear();
 
         self.cmd_tx
             .send(JsCommand::SetDom { snapshot })
@@ -379,7 +379,7 @@ impl JsRuntime {
         let resp = self
             .resp_rx
             .lock()
-            .unwrap()
+            .expect("resp_rx lock poisoned")
             .recv()
             .expect("JS thread has died");
         let _ = resp;
@@ -396,7 +396,7 @@ impl Drop for JsRuntime {
     fn drop(&mut self) {
         // Signal the JS thread to shut down
         let _ = self.cmd_tx.send(JsCommand::Shutdown);
-        let _ = self.resp_rx.lock().unwrap().recv();
+        let _ = self.resp_rx.lock().expect("resp_rx lock poisoned").recv();
     }
 }
 
@@ -427,9 +427,9 @@ fn js_thread_loop(
                 max_stack_size,
             } => {
                 // Clear console buffer before eval
-                console_output.write().unwrap().clear();
+                console_output.write().clear();
                 // Clear mutation buffer before eval
-                mutations.write().unwrap().clear();
+                mutations.write().clear();
 
                 // Apply runtime limits to context
                 let loop_limit = max_loop_iterations.unwrap_or(100_000);
@@ -450,7 +450,7 @@ fn js_thread_loop(
                 let result = ctx.eval(source);
 
                 let elapsed = start.elapsed();
-                let console = console_output.read().unwrap().clone();
+                let console = console_output.read().clone();
 
                 // Check if we timed out
                 if elapsed.as_millis() > timeout as u128 {
@@ -511,9 +511,9 @@ fn js_thread_loop(
                 let _ = resp_tx.send(JsResponse::Done);
             }
             JsCommand::SetDom { snapshot } => {
-                *dom_snapshot.write().unwrap() = snapshot;
+                *dom_snapshot.write() = snapshot;
                 // Update document title/URL in the JS context
-                let snap = dom_snapshot.read().unwrap();
+                let snap = dom_snapshot.read();
                 if let Some(ref s) = *snap {
                     let _ = ctx.register_global_property(
                         js_string!("__domTitle"),
@@ -563,7 +563,8 @@ fn create_context(
                                 .unwrap_or_else(|_| "undefined".to_string());
                             line.push_str(&s);
                         }
-                        if let Ok(mut guard) = $out.write() {
+                        {
+                            let mut guard = $out.write();
                             guard.push(line);
                         }
                         Ok(JsValue::undefined())
@@ -653,14 +654,14 @@ fn create_context(
     // Each fetch() call will .clone() them into the Response object.
     let fetch_text_fn = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve('')")).unwrap();
+            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve('')")).expect("failed to set up Promise support");
             Ok(promise_val)
         })
     };
 
     let fetch_json_fn = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve({})")).unwrap();
+            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve({})")).expect("failed to set up Promise support");
             Ok(promise_val)
         })
     };
@@ -714,7 +715,7 @@ fn register_document_object(
     let dom_capture_title = dom_snapshot.clone();
     let title_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            let dom = dom_capture_title.read().unwrap();
+            let dom = dom_capture_title.read();
             if let Some(ref s) = *dom {
                 Ok(JsValue::from(JsString::from(s.title.as_str())))
             } else {
@@ -729,7 +730,7 @@ fn register_document_object(
     let dom_capture_url = dom_snapshot.clone();
     let url_getter: NativeFunction = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            let dom = dom_capture_url.read().unwrap();
+            let dom = dom_capture_url.read();
             if let Some(ref s) = *dom {
                 Ok(JsValue::from(JsString::from(s.url.as_str())))
             } else {
@@ -744,7 +745,7 @@ fn register_document_object(
     let dom_capture_cookie = dom_snapshot.clone();
     let cookie_getter: NativeFunction = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            let _unused = dom_capture_cookie.read().unwrap();
+            let _unused = dom_capture_cookie.read();
             // Simplified: no cookie jar integration yet
             Ok(JsValue::from(JsString::from("")))
         })
@@ -764,7 +765,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let dom = dom_capture_qs.read().unwrap();
+            let dom = dom_capture_qs.read();
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.query_selector(&selector) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
@@ -787,7 +788,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let dom = dom_capture_qsa.read().unwrap();
+            let dom = dom_capture_qsa.read();
             if let Some(ref snapshot) = *dom {
                 let ids = snapshot.query_selector_all(&selector);
                 let js_values: Vec<JsValue> = ids
@@ -815,7 +816,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let dom = dom_capture_gbi.read().unwrap();
+            let dom = dom_capture_gbi.read();
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.get_element_by_id(&id) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
@@ -838,7 +839,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let dom = dom_capture_gtn.read().unwrap();
+            let dom = dom_capture_gtn.read();
             if let Some(ref snapshot) = *dom {
                 let ids = snapshot.get_elements_by_tag_name(&tag);
                 let js_values: Vec<JsValue> = ids
@@ -866,7 +867,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let dom = dom_capture_gcn.read().unwrap();
+            let dom = dom_capture_gcn.read();
             if let Some(ref snapshot) = *dom {
                 let ids = snapshot.get_elements_by_class_name(&class);
                 let js_values: Vec<JsValue> = ids
@@ -999,7 +1000,6 @@ fn create_element_object(
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             mutations_click
                 .write()
-                .unwrap()
                 .push(DomMutation::ClickElement { node_id: node_id_click });
             Ok(JsValue::undefined())
         })
@@ -1022,7 +1022,6 @@ fn create_element_object(
                 .unwrap_or_default();
             mutations_sa
                 .write()
-                .unwrap()
                 .push(DomMutation::SetAttribute {
                     node_id: node_id_sa,
                     name,
@@ -1055,7 +1054,6 @@ fn create_element_object(
                 .unwrap_or_default();
             mutations_vs
                 .write()
-                .unwrap()
                 .push(DomMutation::InputElement {
                     node_id: node_id_vs,
                     value: val,
@@ -1272,17 +1270,17 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
     if let Some(json_obj) = json_global.as_object() {
         if let Ok(stringify_fn) = json_obj.get(js_string!("stringify"), context) {
             if stringify_fn.is_callable() {
-                if let Ok(result) = stringify_fn
-                    .as_object()
-                    .unwrap()
-                    .call(&JsValue::undefined(), &[obj.clone().into()], context)
-                {
-                    if let Some(s) = result.as_string() {
-                        let json_str = s.to_std_string_escaped();
-                        if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                            return parsed;
+                if let Some(obj_inner) = stringify_fn.as_object() {
+                    if let Ok(result) = obj_inner
+                        .call(&JsValue::undefined(), &[obj.clone().into()], context)
+                    {
+                        if let Some(s) = result.as_string() {
+                            let json_str = s.to_std_string_escaped();
+                            if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
+                                return parsed;
+                            }
+                            return Value::String(json_str);
                         }
-                        return Value::String(json_str);
                     }
                 }
             }
