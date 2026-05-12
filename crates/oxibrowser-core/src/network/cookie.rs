@@ -101,4 +101,50 @@ mod tests {
         assert!(jar.is_empty(), "jar should be empty after clear");
         assert!(jar.cookies_for_url(&url).is_empty(), "no cookies after clear");
     }
+
+    #[test]
+    fn test_cookie_jar_round_trip() {
+        // Simulate: server sends Set-Cookie, then client sends Cookie on next request
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/page1").unwrap();
+
+        // Server response includes Set-Cookie
+        jar.store(&url, "session=abc123; Path=/; HttpOnly");
+        jar.store(&url, "pref=dark; Path=/");
+
+        // Client makes another request to the same domain
+        let url2 = Url::parse("https://example.com/page2").unwrap();
+        let cookies = jar.cookies_for_url(&url2);
+
+        // Both cookies should be sent (stripped of attributes)
+        assert!(cookies.contains("session=abc123"), "should send session cookie");
+        assert!(cookies.contains("pref=dark"), "should send pref cookie");
+        assert!(!cookies.contains("Path="), "should strip Path attribute");
+        assert!(!cookies.contains("HttpOnly"), "should strip HttpOnly flag");
+    }
+
+    #[test]
+    fn test_cookie_jar_multiple_domains() {
+        let mut jar = CookieJar::new();
+
+        // Store cookies for 3 different domains
+        for (domain, cookie) in [
+            ("https://api.example.com", "token=api-token"),
+            ("https://cdn.example.com", "cache=v1"),
+            ("https://other.com", "session=xyz"),
+        ] {
+            let url = Url::parse(domain).unwrap();
+            jar.store(&url, cookie);
+        }
+
+        // Each domain gets only its own cookies
+        let api_url = Url::parse("https://api.example.com/data").unwrap();
+        let api_cookies = jar.cookies_for_url(&api_url);
+        assert!(api_cookies.contains("token=api-token"));
+        assert!(!api_cookies.contains("cache=v1"));
+
+        // Clear and verify all gone
+        jar.clear();
+        assert_eq!(jar.len(), 0);
+    }
 }

@@ -227,4 +227,81 @@ impl Session {
         self.local_storage.clear();
         Ok(())
     }
+
+    /// Fetch sub-resources (JS, CSS, images) referenced by the current page.
+    ///
+    /// Extracts resource URLs from the DOM, fetches them over HTTP,
+    /// and attaches them as `Resource` objects to the page.
+    ///
+    /// Returns the number of resources successfully loaded.
+    pub async fn load_sub_resources(&mut self) -> usize {
+        let resource_urls = match self.active_page.as_ref() {
+            Some(page) => page.root_frame().extract_resource_urls(),
+            None => return 0,
+        };
+
+        if resource_urls.is_empty() {
+            return 0;
+        }
+
+        let base_url = match self.current_url() {
+            Some(u) => u.clone(),
+            None => return 0,
+        };
+
+        let mut loaded = 0;
+        for res in &resource_urls {
+            // Resolve relative URLs against the page URL
+            let full_url = match base_url.join(&res.url) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            let resource_type = match res.kind {
+                oxibrowser_webapi::dom::ResourceKind::Script => {
+                    crate::network::resource::ResourceType::Script
+                }
+                oxibrowser_webapi::dom::ResourceKind::Stylesheet => {
+                    crate::network::resource::ResourceType::Stylesheet
+                }
+                oxibrowser_webapi::dom::ResourceKind::Image => {
+                    crate::network::resource::ResourceType::Image
+                }
+                oxibrowser_webapi::dom::ResourceKind::Iframe => {
+                    crate::network::resource::ResourceType::Document
+                }
+            };
+
+            match self.http_client.fetch_text(&full_url).await {
+                Ok(body) => {
+                    let resource = crate::network::resource::Resource {
+                        url: full_url.to_string(),
+                        resource_type,
+                        status: 200,
+                        mime_type: String::new(),
+                        body: bytes::Bytes::from(body),
+                        loaded_at: std::time::Instant::now(),
+                    };
+                    if let Some(page) = self.active_page.as_mut() {
+                        page.add_resource(resource);
+                    }
+                    loaded += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        url = %full_url,
+                        error = %e,
+                        "failed to load sub-resource"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            loaded = loaded,
+            total = resource_urls.len(),
+            "sub-resources loaded"
+        );
+        loaded
+    }
 }
