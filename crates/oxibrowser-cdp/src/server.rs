@@ -26,12 +26,19 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{error, info, warn};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Type alias for HTTP response body.
 type HttpBody = Full<Bytes>;
 
 /// WebSocket magic GUID for accept-key derivation (RFC 6455).
 const WS_MAGIC_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// Maximum number of concurrent CDP connections.
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+
+/// Maximum allowed CDP message size (1 MB).
+pub(crate) const MAX_CDP_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Derive the `Sec-WebSocket-Accept` value from the client's key.
 fn derive_accept_key(client_key: &[u8]) -> String {
@@ -50,6 +57,8 @@ pub struct CdpServer {
     browser: Arc<Browser>,
     /// Shutdown signal sender.
     shutdown_tx: broadcast::Sender<()>,
+    /// Active connection count.
+    connection_count: Arc<AtomicUsize>,
 }
 
 impl CdpServer {
@@ -60,6 +69,7 @@ impl CdpServer {
             addr,
             browser,
             shutdown_tx,
+            connection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -79,13 +89,27 @@ impl CdpServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
+                            let active = self.connection_count.load(Ordering::Relaxed);
+                            if active >= MAX_CONCURRENT_CONNECTIONS {
+                                warn!(
+                                    peer = %peer_addr,
+                                    active,
+                                    max = MAX_CONCURRENT_CONNECTIONS,
+                                    "rejecting connection: too many concurrent connections"
+                                );
+                                continue;
+                            }
+
                             info!(peer = %peer_addr, "new connection");
 
                             let server = self.clone();
+                            let connection_count = self.connection_count.clone();
+                            connection_count.fetch_add(1, Ordering::Relaxed);
                             tokio::spawn(async move {
                                 if let Err(e) = server.handle_connection(stream, peer_addr).await {
                                     warn!(peer = %peer_addr, error = %e, "connection error");
                                 }
+                                connection_count.fetch_sub(1, Ordering::Relaxed);
                             });
                         }
                         Err(e) => {

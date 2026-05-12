@@ -10,6 +10,7 @@ use crate::domains;
 use crate::domains::DispatchContext;
 use crate::event::{event_channel, EventReceiver, EventSender};
 use crate::protocol::{CdpEvent, CdpRequest, CdpResponse};
+use crate::server::MAX_CDP_MESSAGE_SIZE;
 use futures::{SinkExt, StreamExt};
 use oxibrowser_core::Browser;
 use std::sync::Arc;
@@ -143,6 +144,26 @@ impl CdpSession {
 
     /// Handle a single text message.
     async fn handle_text_message(&mut self, text: &str) -> anyhow::Result<()> {
+        // Validate message size
+        if text.len() > MAX_CDP_MESSAGE_SIZE {
+            warn!(
+                size = text.len(),
+                max = MAX_CDP_MESSAGE_SIZE,
+                "CDP message too large, dropping"
+            );
+            let response = CdpResponse {
+                id: 0,
+                result: None,
+                error: Some(crate::protocol::CdpError {
+                    code: -32600,
+                    message: format!("Message too large: {} bytes (max {} bytes)", text.len(), MAX_CDP_MESSAGE_SIZE),
+                }),
+                session_id: None,
+            };
+            self.send_response(response).await?;
+            return Ok(());
+        }
+
         // Parse the CDP request
         let request: CdpRequest = match serde_json::from_str(text) {
             Ok(r) => r,
