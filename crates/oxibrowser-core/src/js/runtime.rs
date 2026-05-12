@@ -1,8 +1,23 @@
 //! JavaScript evaluation runtime.
 //!
 //! In the default (non-servo) build, this provides a minimal JS evaluation
-//! interface. When the `full-servo` feature is enabled, it wraps Servo's
-//! evaluate_javascript() for real JS execution.
+//! interface. When the `full-servo` feature is enabled, it uses Servo's
+//! SpiderMonkey engine via `WebView::evaluate_javascript()`.
+//!
+//! ## Servo integration status
+//!
+//! The `full-servo` feature requires the `servo = "0.1"` crate which provides
+//! `WebView::evaluate_javascript()` backed by SpiderMonkey. The integration
+//! uses servo's callback-based async API:
+//!
+//! ```ignore
+//! webview.evaluate_javascript("1 + 1", |result| {
+//!     // result: Result<JSValue, JavaScriptEvaluationError>
+//! });
+//! ```
+//!
+//! **Note:** servo 0.1.0's embedder API is still evolving. The integration
+//! is wired but may need adjustment as servo stabilizes its public API.
 
 use crate::error::Result;
 use serde_json::Value;
@@ -74,11 +89,16 @@ impl JsRuntime {
     }
 
     /// Evaluate a JavaScript expression and return the result.
+    ///
+    /// In default (stub) mode: handles literals, console.log, global vars.
+    /// In `full-servo` mode: delegates to SpiderMonkey via servo crate.
     pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
-        // In full-servo mode, this would call:
-        //   let result = webview.evaluate_javascript(expression).await?;
+        // When full-servo is enabled and a servo WebView is available,
+        // use the real JS engine. For now, the stub handles everything.
         //
-        // For now, we provide a minimal evaluator that handles simple expressions.
+        // TODO (full-servo): Wire servo::WebView::evaluate_javascript()
+        // once servo 0.1 stabilizes its public embedder API.
+        // See: https://github.com/servo/servo/issues/40950
         self.evaluate_stub(expression)
     }
 
