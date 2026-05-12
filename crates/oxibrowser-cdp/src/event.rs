@@ -135,7 +135,8 @@ impl EventSender {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs_f64() * 1000.0
+            .as_secs_f64()
+            * 1000.0
     }
 }
 

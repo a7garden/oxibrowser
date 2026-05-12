@@ -30,8 +30,7 @@ impl Document {
     pub fn parse(html: &str) -> Self {
         let sink = DomSink::new();
         let tendril = StrTendril::from(html);
-        let result = parse_document(sink, html5ever::ParseOpts::default())
-            .one(tendril);
+        let result = parse_document(sink, html5ever::ParseOpts::default()).one(tendril);
         result.into_document()
     }
 
@@ -100,23 +99,17 @@ impl Document {
     }
 
     fn node_matches_selector(&self, node: &Node, selector: &str) -> bool {
-        if let NodeType::Element {
-            tag,
-            attributes,
-        } = &node.node_type
-        {
+        if let NodeType::Element { tag, attributes } = &node.node_type {
             // ID selector: #foo
             if let Some(id) = selector.strip_prefix('#') {
-                return attributes
-                    .iter()
-                    .any(|(k, v)| k == "id" && v == id);
+                return attributes.iter().any(|(k, v)| k == "id" && v == id);
             }
 
             // Class selector: .foo
             if let Some(class) = selector.strip_prefix('.') {
-                return attributes.iter().any(|(k, v)| {
-                    k == "class" && v.split_whitespace().any(|c| c == class)
-                });
+                return attributes
+                    .iter()
+                    .any(|(k, v)| k == "class" && v.split_whitespace().any(|c| c == class));
             }
 
             // Tag with class: tag.class
@@ -134,9 +127,7 @@ impl Document {
                 let tag_part = &selector[..hash_pos];
                 let id_part = &selector[hash_pos + 1..];
                 return tag.eq_ignore_ascii_case(tag_part)
-                    && attributes
-                        .iter()
-                        .any(|(k, v)| k == "id" && v == id_part);
+                    && attributes.iter().any(|(k, v)| k == "id" && v == id_part);
             }
 
             // Simple tag name
@@ -214,13 +205,17 @@ impl Document {
 
     fn extract_resources_recursive(&self, node_id: NodeId, urls: &mut Vec<ResourceUrl>) {
         if let Some(node) = self.nodes.get(&node_id) {
-            if let NodeType::Element { tag, attributes, .. } = &node.node_type {
+            if let NodeType::Element {
+                tag, attributes, ..
+            } = &node.node_type
+            {
                 let tag_lower = tag.to_lowercase();
                 match tag_lower.as_str() {
                     "script" => {
-                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
-                            (k == "src").then_some(v.as_str())
-                        }) {
+                        if let Some(src) = attributes
+                            .iter()
+                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                        {
                             urls.push(ResourceUrl {
                                 url: src.to_string(),
                                 kind: ResourceKind::Script,
@@ -228,12 +223,12 @@ impl Document {
                         }
                     }
                     "link" => {
-                        let rel = attributes.iter().find_map(|(k, v)| {
-                            (k == "rel").then_some(v.as_str())
-                        });
-                        let href = attributes.iter().find_map(|(k, v)| {
-                            (k == "href").then_some(v.as_str())
-                        });
+                        let rel = attributes
+                            .iter()
+                            .find_map(|(k, v)| (k == "rel").then_some(v.as_str()));
+                        let href = attributes
+                            .iter()
+                            .find_map(|(k, v)| (k == "href").then_some(v.as_str()));
                         if let (Some(rel), Some(href)) = (rel, href) {
                             if rel.contains("stylesheet") {
                                 urls.push(ResourceUrl {
@@ -249,9 +244,10 @@ impl Document {
                         }
                     }
                     "img" => {
-                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
-                            (k == "src").then_some(v.as_str())
-                        }) {
+                        if let Some(src) = attributes
+                            .iter()
+                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                        {
                             urls.push(ResourceUrl {
                                 url: src.to_string(),
                                 kind: ResourceKind::Image,
@@ -259,9 +255,10 @@ impl Document {
                         }
                     }
                     "iframe" => {
-                        if let Some(src) = attributes.iter().find_map(|(k, v)| {
-                            (k == "src").then_some(v.as_str())
-                        }) {
+                        if let Some(src) = attributes
+                            .iter()
+                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                        {
                             urls.push(ResourceUrl {
                                 url: src.to_string(),
                                 kind: ResourceKind::Iframe,
@@ -399,7 +396,7 @@ impl Document {
         }
     }
 
-/// Number of nodes in the document.
+    /// Number of nodes in the document.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -421,17 +418,17 @@ impl Document {
         results
     }
 
-    fn extract_iframe_srcs_recursive(
-        &self,
-        node_id: NodeId,
-        results: &mut Vec<(String, NodeId)>,
-    ) {
+    fn extract_iframe_srcs_recursive(&self, node_id: NodeId, results: &mut Vec<(String, NodeId)>) {
         if let Some(node) = self.nodes.get(&node_id) {
-            if let NodeType::Element { tag, attributes, .. } = &node.node_type {
+            if let NodeType::Element {
+                tag, attributes, ..
+            } = &node.node_type
+            {
                 if tag.eq_ignore_ascii_case("iframe") {
-                    if let Some(src) = attributes.iter().find_map(|(k, v)| {
-                        (k == "src").then_some(v.as_str())
-                    }) {
+                    if let Some(src) = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                    {
                         results.push((src.to_string(), node_id));
                     }
                 }
@@ -557,7 +554,10 @@ impl TreeSink for DomSink {
     }
 
     fn get_document(&self) -> Self::Handle {
-        self.tree.borrow().root().expect("tree must have a root node")
+        self.tree
+            .borrow()
+            .root()
+            .expect("tree must have a root node")
     }
 
     fn elem_name<'a>(&self, target: &'a Self::Handle) -> ExpandedName<'a> {
@@ -650,9 +650,15 @@ impl TreeSink for DomSink {
         _system: StrTendril,
     ) {
         let id = self.alloc_id();
-        self.nodes
-            .borrow_mut()
-            .insert(id, Node::new(id, NodeType::Doctype { name: name.to_string() }));
+        self.nodes.borrow_mut().insert(
+            id,
+            Node::new(
+                id,
+                NodeType::Doctype {
+                    name: name.to_string(),
+                },
+            ),
+        );
         // Extract root ID, dropping the Ref borrow before the mutable borrow
         let root_id = {
             let guard = self.tree.borrow();
@@ -745,7 +751,10 @@ mod tests {
         let html = "<div><span>unclosed";
         let doc = Document::parse(html);
         // Should not panic; html5ever is lenient
-        assert!(doc.node_count() > 0, "malformed HTML should still produce nodes");
+        assert!(
+            doc.node_count() > 0,
+            "malformed HTML should still produce nodes"
+        );
     }
 
     #[test]
@@ -845,30 +854,40 @@ mod tests {
         let doc = Document::parse(html);
         let resources = doc.extract_resource_urls();
 
-        let script_urls: Vec<_> = resources.iter()
+        let script_urls: Vec<_> = resources
+            .iter()
             .filter(|r| r.kind == ResourceKind::Script)
             .map(|r| r.url.as_str())
             .collect();
         assert!(script_urls.contains(&"/app.js"), "should find script src");
 
-        let css_urls: Vec<_> = resources.iter()
+        let css_urls: Vec<_> = resources
+            .iter()
             .filter(|r| r.kind == ResourceKind::Stylesheet)
             .map(|r| r.url.as_str())
             .collect();
-        assert!(css_urls.contains(&"/style.css"), "should find stylesheet href");
+        assert!(
+            css_urls.contains(&"/style.css"),
+            "should find stylesheet href"
+        );
 
-        let img_urls: Vec<_> = resources.iter()
+        let img_urls: Vec<_> = resources
+            .iter()
             .filter(|r| r.kind == ResourceKind::Image)
             .map(|r| r.url.as_str())
             .collect();
         assert!(img_urls.contains(&"/photo.jpg"), "should find img src");
         assert!(img_urls.contains(&"/favicon.ico"), "should find favicon");
 
-        let iframe_urls: Vec<_> = resources.iter()
+        let iframe_urls: Vec<_> = resources
+            .iter()
             .filter(|r| r.kind == ResourceKind::Iframe)
             .map(|r| r.url.as_str())
             .collect();
-        assert!(iframe_urls.contains(&"/embed.html"), "should find iframe src");
+        assert!(
+            iframe_urls.contains(&"/embed.html"),
+            "should find iframe src"
+        );
     }
 
     #[test]
@@ -885,7 +904,10 @@ mod tests {
         assert_eq!(iframes.len(), 2, "should find 2 iframes with src");
         let urls: Vec<&str> = iframes.iter().map(|(u, _)| u.as_str()).collect();
         assert!(urls.contains(&"/embed1.html"), "should find /embed1.html");
-        assert!(urls.contains(&"https://other.com/widget"), "should find absolute URL");
+        assert!(
+            urls.contains(&"https://other.com/widget"),
+            "should find absolute URL"
+        );
     }
 
     #[test]

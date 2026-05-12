@@ -161,8 +161,7 @@ async fn send_command(
         .unwrap();
 
     // Read response (skip events)
-    let deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -247,9 +246,7 @@ async fn test_http_json_version() {
 async fn test_http_json_list() {
     let (server, addr) = start_cdp_server().await;
 
-    let resp = reqwest::get(format!("http://{addr}/json"))
-        .await
-        .unwrap();
+    let resp = reqwest::get(format!("http://{addr}/json")).await.unwrap();
     assert!(resp.status().is_success());
 
     let body: Vec<Value> = resp.json().await.unwrap();
@@ -286,7 +283,10 @@ async fn test_page_enable_events() {
 
     // Collect Runtime.executionContextCreated event
     let events = collect_events(&mut ws, "Runtime.", 500).await;
-    assert!(!events.is_empty(), "should receive Runtime.executionContextCreated");
+    assert!(
+        !events.is_empty(),
+        "should receive Runtime.executionContextCreated"
+    );
     assert_eq!(
         events[0]["method"], "Runtime.executionContextCreated",
         "first event should be executionContextCreated"
@@ -304,7 +304,10 @@ async fn test_page_get_frame_tree() {
     let resp = send_command(&mut sink, &mut ws, 1, "Page.getFrameTree", None).await;
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["frameTree"]["frame"].is_object());
-    assert_eq!(resp["result"]["frameTree"]["frame"]["mimeType"], "text/html");
+    assert_eq!(
+        resp["result"]["frameTree"]["frame"]["mimeType"],
+        "text/html"
+    );
 
     server.shutdown();
 }
@@ -461,7 +464,9 @@ async fn test_navigate_to_local_server_and_inspect_dom() {
     // Verify Page.getFrameTree has the navigated URL
     let resp = send_command(&mut sink, &mut ws, 3, "Page.getFrameTree", None).await;
     assert_eq!(resp["id"], 3);
-    let frame_url = resp["result"]["frameTree"]["frame"]["url"].as_str().unwrap();
+    let frame_url = resp["result"]["frameTree"]["frame"]["url"]
+        .as_str()
+        .unwrap();
     assert!(
         frame_url.contains("127.0.0.1"),
         "frame URL should point to local server, got: {frame_url}"
@@ -741,9 +746,11 @@ async fn test_full_workflow_connect_navigate_inspect_close() {
     .await;
     // In stub mode, "1 + 1" returns as string "1 + 1"
     // (stub doesn't evaluate expressions, only literals)
-    assert!(resp["result"]["result"]["value"].is_string()
-         || resp["result"]["result"]["value"].is_number(),
-        "should return some value");
+    assert!(
+        resp["result"]["result"]["value"].is_string()
+            || resp["result"]["result"]["value"].is_number(),
+        "should return some value"
+    );
 
     cdp_server.shutdown();
 }

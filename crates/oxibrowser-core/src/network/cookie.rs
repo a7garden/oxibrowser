@@ -83,10 +83,7 @@ impl CookieJar {
     /// Parses the header into a CookieEntry and replaces any existing cookie
     /// with the same name for that domain.
     pub fn store(&mut self, url: &Url, cookie_header: &str) {
-        let domain = url
-            .host_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let domain = url.host_str().unwrap_or("unknown").to_string();
 
         let entry = match CookieEntry::parse(cookie_header) {
             Some(e) => e,
@@ -233,13 +230,13 @@ mod tests {
         let cookies = jar.cookies_for_url(&url2);
 
         // Both cookies should be sent (stripped of attributes)
-        assert!(cookies.contains("session=abc123"), "should send session cookie");
+        assert!(
+            cookies.contains("session=abc123"),
+            "should send session cookie"
+        );
         assert!(cookies.contains("pref=dark"), "should send pref cookie");
         assert!(!cookies.contains("Path="), "should strip Path attribute");
-        assert!(
-            !cookies.contains("HttpOnly"),
-            "should strip HttpOnly flag"
-        );
+        assert!(!cookies.contains("HttpOnly"), "should strip HttpOnly flag");
     }
 
     #[test]

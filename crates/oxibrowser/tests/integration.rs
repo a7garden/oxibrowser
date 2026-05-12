@@ -5,8 +5,8 @@
 //!
 //! Note: assertions are intentionally lenient since external sites may change.
 
-use oxibrowser_core::Browser;
 use oxibrowser_core::config::BrowserConfig;
+use oxibrowser_core::Browser;
 
 #[tokio::test]
 #[ignore]
@@ -17,10 +17,7 @@ async fn test_fetch_example_com() {
     let guard = session.read().await;
     let page = guard.page().expect("page should be loaded");
     let title = page.title().expect("should have title");
-    assert!(
-        title.to_lowercase().contains("example"),
-        "title: {title}"
-    );
+    assert!(title.to_lowercase().contains("example"), "title: {title}");
     drop(guard);
 
     browser.close().await.unwrap();
@@ -140,9 +137,8 @@ async fn test_korean_encoding_naver() {
     let content = page.content();
 
     // The page should contain readable Korean text
-    let has_korean = content.contains("네이버")
-        || content.contains("naver")
-        || content.contains("NAVER");
+    let has_korean =
+        content.contains("네이버") || content.contains("naver") || content.contains("NAVER");
     assert!(
         has_korean,
         "page should contain Korean text, got first 500 chars: {}",

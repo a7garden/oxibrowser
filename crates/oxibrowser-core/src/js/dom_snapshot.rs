@@ -26,19 +26,11 @@ pub enum DomMutation {
         value: String,
     },
     /// Set the text content of a node.
-    SetTextContent {
-        node_id: u32,
-        text: String,
-    },
+    SetTextContent { node_id: u32, text: String },
     /// Simulate a click on an element.
-    ClickElement {
-        node_id: u32,
-    },
+    ClickElement { node_id: u32 },
     /// Input text into a form element.
-    InputElement {
-        node_id: u32,
-        value: String,
-    },
+    InputElement { node_id: u32, value: String },
 }
 
 /// Serializable DOM node.
@@ -93,9 +85,7 @@ impl DomSnapshot {
 
         // Walk all nodes via DFS from root
         if let Some(root) = tree.root() {
-            collect_nodes(
-                root, doc, tree, &mut nodes, &mut body_id, &mut head_id,
-            );
+            collect_nodes(root, doc, tree, &mut nodes, &mut body_id, &mut head_id);
         }
 
         let root_id = tree.root().map(|id| id.0 as u32).unwrap_or(0);
@@ -157,10 +147,12 @@ impl DomSnapshot {
 
     /// Get an element by its ID attribute.
     pub fn get_element_by_id(&self, id: &str) -> Option<u32> {
-        self.nodes.values().find(|node| {
-            node.node_type == 1
-                && node.attributes.get("id").map(|s| s.as_str()) == Some(id)
-        }).map(|n| n.id)
+        self.nodes
+            .values()
+            .find(|node| {
+                node.node_type == 1 && node.attributes.get("id").map(|s| s.as_str()) == Some(id)
+            })
+            .map(|n| n.id)
     }
 
     /// Get all elements by tag name.
@@ -221,9 +213,7 @@ impl DomSnapshot {
                     let attr_part = &selector[bracket_start + 1..bracket_end];
 
                     // Check tag part matches (if any)
-                    if !tag_part.is_empty()
-                        && !node.tag.eq_ignore_ascii_case(tag_part)
-                    {
+                    if !tag_part.is_empty() && !node.tag.eq_ignore_ascii_case(tag_part) {
                         return false;
                     }
 
@@ -254,11 +244,7 @@ impl DomSnapshot {
 
         // ID selector: #foo
         if let Some(id) = selector.strip_prefix('#') {
-            return node
-                .attributes
-                .get("id")
-                .map(|s| s.as_str())
-                == Some(id);
+            return node.attributes.get("id").map(|s| s.as_str()) == Some(id);
         }
 
         // Class selector: .foo
@@ -287,11 +273,7 @@ impl DomSnapshot {
             let tag_part = &selector[..hash_pos];
             let id_part = &selector[hash_pos + 1..];
             return node.tag.eq_ignore_ascii_case(tag_part)
-                && node
-                    .attributes
-                    .get("id")
-                    .map(|s| s.as_str())
-                    == Some(id_part);
+                && node.attributes.get("id").map(|s| s.as_str()) == Some(id_part);
         }
 
         // Simple tag name
@@ -446,7 +428,8 @@ mod tests {
 
     #[test]
     fn test_query_selector_tag_class() {
-        let html = r#"<html><body><div class="main">main</div><p class="main">para</p></body></html>"#;
+        let html =
+            r#"<html><body><div class="main">main</div><p class="main">para</p></body></html>"#;
         let frame = make_frame(html);
         let snapshot = DomSnapshot::from_frame(&frame);
 
@@ -516,7 +499,8 @@ mod tests {
 
     #[test]
     fn test_get_elements_by_class_name() {
-        let html = r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
+        let html =
+            r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
         let frame = make_frame(html);
         let snapshot = DomSnapshot::from_frame(&frame);
 
@@ -562,10 +546,6 @@ mod tests {
             div_node.children.contains(&p_id),
             "div should have p as child"
         );
-        assert_eq!(
-            p_node.parent,
-            Some(div_id),
-            "p's parent should be div"
-        );
+        assert_eq!(p_node.parent, Some(div_id), "p's parent should be div");
     }
 }

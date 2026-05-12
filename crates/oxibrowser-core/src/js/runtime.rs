@@ -23,9 +23,9 @@
 //! This means JS state (variables, functions, closures) **persists across
 //! evaluate() calls** — exactly like a real browser.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
-use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
 use boa_engine::object::builtins::JsArray;
@@ -123,14 +123,9 @@ enum JsCommand {
         max_stack_size: Option<usize>,
     },
     /// Set a global variable in the persistent Context.
-    SetGlobal {
-        name: String,
-        value: Value,
-    },
+    SetGlobal { name: String, value: Value },
     /// Update the DOM snapshot available to `document` object.
-    SetDom {
-        snapshot: Option<DomSnapshot>,
-    },
+    SetDom { snapshot: Option<DomSnapshot> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -337,9 +332,7 @@ impl JsRuntime {
     /// Set a global variable — injected into the persistent JS Context.
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
-        self.globals
-            .write()
-            .insert(name.clone(), value.clone());
+        self.globals.write().insert(name.clone(), value.clone());
 
         // Also inject into the persistent JS Context
         self.cmd_tx
@@ -632,11 +625,8 @@ fn create_context(
         })
     };
 
-    let clear_timer_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
+    let clear_timer_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
 
     let _ = context.register_global_callable(js_string!("setTimeout"), 2, set_timeout_fn);
     let _ = context.register_global_callable(js_string!("setInterval"), 2, set_interval_fn);
@@ -654,14 +644,18 @@ fn create_context(
     // Each fetch() call will .clone() them into the Response object.
     let fetch_text_fn = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve('')")).expect("failed to set up Promise support");
+            let promise_val = ctx
+                .eval(Source::from_bytes("Promise.resolve('')"))
+                .expect("failed to set up Promise support");
             Ok(promise_val)
         })
     };
 
     let fetch_json_fn = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx.eval(Source::from_bytes("Promise.resolve({})")).expect("failed to set up Promise support");
+            let promise_val = ctx
+                .eval(Source::from_bytes("Promise.resolve({})"))
+                .expect("failed to set up Promise support");
             Ok(promise_val)
         })
     };
@@ -675,11 +669,7 @@ fn create_context(
                 .unwrap_or_default();
 
             let response = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(
-                    js_string!("status"),
-                    JsValue::from(200),
-                    Attribute::all(),
-                )
+                .property(js_string!("status"), JsValue::from(200), Attribute::all())
                 .property(js_string!("ok"), JsValue::from(true), Attribute::all())
                 .property(
                     js_string!("url"),
@@ -769,7 +759,12 @@ fn register_document_object(
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.query_selector(&selector) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(snapshot, node, ctx, &mutations_capture_qs));
+                        return Ok(create_element_object(
+                            snapshot,
+                            node,
+                            ctx,
+                            &mutations_capture_qs,
+                        ));
                     }
                 }
             }
@@ -794,7 +789,9 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_qsa))
+                        snapshot.nodes.get(&id).map(|node| {
+                            create_element_object(snapshot, node, ctx, &mutations_capture_qsa)
+                        })
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -820,7 +817,12 @@ fn register_document_object(
             if let Some(ref snapshot) = *dom {
                 if let Some(node_id) = snapshot.get_element_by_id(&id) {
                     if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(snapshot, node, ctx, &mutations_capture_gbi));
+                        return Ok(create_element_object(
+                            snapshot,
+                            node,
+                            ctx,
+                            &mutations_capture_gbi,
+                        ));
                     }
                 }
             }
@@ -845,7 +847,9 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_gtn))
+                        snapshot.nodes.get(&id).map(|node| {
+                            create_element_object(snapshot, node, ctx, &mutations_capture_gtn)
+                        })
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -873,7 +877,9 @@ fn register_document_object(
                 let js_values: Vec<JsValue> = ids
                     .iter()
                     .filter_map(|&id| {
-                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx, &mutations_capture_gcn))
+                        snapshot.nodes.get(&id).map(|node| {
+                            create_element_object(snapshot, node, ctx, &mutations_capture_gcn)
+                        })
                     })
                     .collect();
                 let arr = JsArray::from_iter(js_values, ctx);
@@ -885,41 +891,55 @@ fn register_document_object(
     };
 
     // EventTarget noop methods for document
-    let doc_add_event_listener_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
-    let doc_remove_event_listener_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
-    let doc_dispatch_event_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::from(true))
-        })
-    };
+    let doc_add_event_listener_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    let doc_remove_event_listener_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    let doc_dispatch_event_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(true))) };
 
     let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
-        .accessor(js_string!("title"), Some(title_getter_fn), None, Attribute::all())
-        .accessor(js_string!("URL"), Some(url_getter_fn), None, Attribute::all())
-        .accessor(js_string!("cookie"), Some(cookie_getter_fn), None, Attribute::all())
+        .accessor(
+            js_string!("title"),
+            Some(title_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("URL"),
+            Some(url_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("cookie"),
+            Some(cookie_getter_fn),
+            None,
+            Attribute::all(),
+        )
         .function(query_selector_fn, js_string!("querySelector"), 1)
         .function(query_selector_all_fn, js_string!("querySelectorAll"), 1)
         .function(get_element_by_id_fn, js_string!("getElementById"), 1)
-        .function(get_elements_by_tag_name_fn, js_string!("getElementsByTagName"), 1)
-        .function(get_elements_by_class_name_fn, js_string!("getElementsByClassName"), 1)
+        .function(
+            get_elements_by_tag_name_fn,
+            js_string!("getElementsByTagName"),
+            1,
+        )
+        .function(
+            get_elements_by_class_name_fn,
+            js_string!("getElementsByClassName"),
+            1,
+        )
         .function(doc_add_event_listener_fn, js_string!("addEventListener"), 2)
-        .function(doc_remove_event_listener_fn, js_string!("removeEventListener"), 2)
+        .function(
+            doc_remove_event_listener_fn,
+            js_string!("removeEventListener"),
+            2,
+        )
         .function(doc_dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .build();
 
-    let _ = ctx.register_global_property(
-        js_string!("document"),
-        document_obj,
-        Attribute::all(),
-    );
+    let _ = ctx.register_global_property(js_string!("document"), document_obj, Attribute::all());
 }
 
 /// Create a JS element object from a DomNode.
@@ -930,17 +950,17 @@ fn create_element_object(
     mutations: &Arc<RwLock<Vec<DomMutation>>>,
 ) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
-    let id_val = node
-        .attributes
-        .get("id")
-        .map(|s| s.as_str())
-        .unwrap_or("");
+    let id_val = node.attributes.get("id").map(|s| s.as_str()).unwrap_or("");
     let class_val = node
         .attributes
         .get("class")
         .map(|s| s.as_str())
         .unwrap_or("");
-    let href_val = node.attributes.get("href").map(|s| s.as_str()).unwrap_or("");
+    let href_val = node
+        .attributes
+        .get("href")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let src_val = node.attributes.get("src").map(|s| s.as_str()).unwrap_or("");
 
     // getAttribute(name)
@@ -973,34 +993,25 @@ fn create_element_object(
     };
 
     // addEventListener — noop (event system not yet implemented)
-    let add_event_listener_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
+    let add_event_listener_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
 
     // removeEventListener — noop
-    let remove_event_listener_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
+    let remove_event_listener_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
 
     // dispatchEvent — noop (returns true)
-    let dispatch_event_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::from(true))
-        })
-    };
+    let dispatch_event_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(true))) };
 
     // click() → records DomMutation::ClickElement
     let node_id_click = node.id;
     let mutations_click = mutations.clone();
     let click_fn = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            mutations_click
-                .write()
-                .push(DomMutation::ClickElement { node_id: node_id_click });
+            mutations_click.write().push(DomMutation::ClickElement {
+                node_id: node_id_click,
+            });
             Ok(JsValue::undefined())
         })
     };
@@ -1020,19 +1031,22 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            mutations_sa
-                .write()
-                .push(DomMutation::SetAttribute {
-                    node_id: node_id_sa,
-                    name,
-                    value,
-                });
+            mutations_sa.write().push(DomMutation::SetAttribute {
+                node_id: node_id_sa,
+                name,
+                value,
+            });
             Ok(JsValue::undefined())
         })
     };
 
     // value getter
-    let value_val = node.attributes.get("value").map(|s| s.as_str()).unwrap_or("").to_string();
+    let value_val = node
+        .attributes
+        .get("value")
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let value_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             Ok(JsValue::from(JsString::from(value_val.as_str())))
@@ -1052,12 +1066,10 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            mutations_vs
-                .write()
-                .push(DomMutation::InputElement {
-                    node_id: node_id_vs,
-                    value: val,
-                });
+            mutations_vs.write().push(DomMutation::InputElement {
+                node_id: node_id_vs,
+                value: val,
+            });
             Ok(JsValue::undefined())
         })
     };
@@ -1094,7 +1106,7 @@ fn create_element_object(
                     .property(
                         js_string!("id"),
                         JsValue::from(JsString::from(
-                            child.attributes.get("id").map(|s| s.as_str()).unwrap_or("")
+                            child.attributes.get("id").map(|s| s.as_str()).unwrap_or(""),
                         )),
                         Attribute::all(),
                     )
@@ -1118,7 +1130,7 @@ fn create_element_object(
                     .property(
                         js_string!("id"),
                         JsValue::from(JsString::from(
-                            pnode.attributes.get("id").map(|s| s.as_str()).unwrap_or("")
+                            pnode.attributes.get("id").map(|s| s.as_str()).unwrap_or(""),
                         )),
                         Attribute::all(),
                     )
@@ -1175,11 +1187,20 @@ fn create_element_object(
         .function(get_attribute_fn, js_string!("getAttribute"), 1)
         .function(has_attribute_fn, js_string!("hasAttribute"), 1)
         .function(add_event_listener_fn, js_string!("addEventListener"), 2)
-        .function(remove_event_listener_fn, js_string!("removeEventListener"), 2)
+        .function(
+            remove_event_listener_fn,
+            js_string!("removeEventListener"),
+            2,
+        )
         .function(dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .function(click_fn, js_string!("click"), 0)
         .function(set_attribute_fn, js_string!("setAttribute"), 2)
-        .accessor(js_string!("value"), Some(value_getter_fn), Some(value_setter_fn), Attribute::all())
+        .accessor(
+            js_string!("value"),
+            Some(value_getter_fn),
+            Some(value_setter_fn),
+            Attribute::all(),
+        )
         .build();
 
     obj.into()
@@ -1271,8 +1292,8 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
         if let Ok(stringify_fn) = json_obj.get(js_string!("stringify"), context) {
             if stringify_fn.is_callable() {
                 if let Some(obj_inner) = stringify_fn.as_object() {
-                    if let Ok(result) = obj_inner
-                        .call(&JsValue::undefined(), &[obj.clone().into()], context)
+                    if let Ok(result) =
+                        obj_inner.call(&JsValue::undefined(), &[obj.clone().into()], context)
                     {
                         if let Some(s) = result.as_string() {
                             let json_str = s.to_std_string_escaped();
@@ -1600,10 +1621,7 @@ mod tests {
     #[tokio::test]
     async fn test_arrow_function() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("const sq = x => x * x; sq(5)")
-            .await
-            .unwrap();
+        let result = rt.evaluate("const sq = x => x * x; sq(5)").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(25.into())));
     }
@@ -1644,10 +1662,7 @@ mod tests {
     #[tokio::test]
     async fn test_regex() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("/hello/.test('hello world')")
-            .await
-            .unwrap();
+        let result = rt.evaluate("/hello/.test('hello world')").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Bool(true)));
     }
@@ -1788,7 +1803,8 @@ mod tests {
     #[tokio::test]
     async fn test_document_query_selector() {
         let mut rt = JsRuntime::new();
-        let html = r#"<html><body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
+        let html =
+            r#"<html><body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
         let frame = make_frame(html);
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
@@ -1868,7 +1884,8 @@ mod tests {
     #[tokio::test]
     async fn test_document_get_elements_by_class_name() {
         let mut rt = JsRuntime::new();
-        let html = r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
+        let html =
+            r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
         let frame = make_frame(html);
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
@@ -1884,7 +1901,8 @@ mod tests {
     #[tokio::test]
     async fn test_element_href_attribute() {
         let mut rt = JsRuntime::new();
-        let html = r#"<html><body><a href="https://example.com" class="link">click</a></body></html>"#;
+        let html =
+            r#"<html><body><a href="https://example.com" class="link">click</a></body></html>"#;
         let frame = make_frame(html);
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
@@ -2034,10 +2052,7 @@ mod tests {
     async fn test_max_loop_iterations() {
         // Infinite loop should be caught by loop iteration limit
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("while(true) {}")
-            .await
-            .unwrap();
+        let result = rt.evaluate("while(true) {}").await.unwrap();
         assert!(!result.is_ok(), "infinite loop should fail");
         let msg = result.exception.unwrap();
         assert!(
@@ -2210,10 +2225,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_stub_ok() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("fetch('/api').ok")
-            .await
-            .unwrap();
+        let result = rt.evaluate("fetch('/api').ok").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Bool(true)));
     }

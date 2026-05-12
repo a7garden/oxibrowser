@@ -118,7 +118,10 @@ impl Browser {
         let session = Arc::new(tokio::sync::RwLock::new(session));
         self.sessions.write().push(session.clone());
 
-        info!(session_count = self.sessions.read().len(), "new session created");
+        info!(
+            session_count = self.sessions.read().len(),
+            "new session created"
+        );
         Ok(session)
     }
 

@@ -6,9 +6,9 @@
 use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
-use crate::js::JsRuntime;
 use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
 use crate::js::runtime::JsRuntimeConfig;
+use crate::js::JsRuntime;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::page::Page;
@@ -186,7 +186,7 @@ impl Session {
         if self.history_index > 0 {
             self.history_index -= 1;
             let url = self.history[self.history_index].clone();
-            
+
             // Re-fetch without adding to history
             let response = self.http_client.fetch(&url).await?;
             let ct_header = response
@@ -237,7 +237,6 @@ impl Session {
     /// Reload the current page.
     pub async fn reload(&mut self) -> Result<()> {
         if let Some(url) = self.current_url() {
-
             let response = self.http_client.fetch(url).await?;
             let ct_header = response
                 .headers()
@@ -250,9 +249,7 @@ impl Session {
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
-            self.active_page = Some(
-                Page::from_html(url.clone(), &html, 200, ct_header).await?,
-            );
+            self.active_page = Some(Page::from_html(url.clone(), &html, 200, ct_header).await?);
             self.inject_dom_snapshot();
             Ok(())
         } else {
@@ -334,7 +331,10 @@ impl Session {
     /// After evaluation, any DOM mutations recorded by JS (setAttribute,
     /// click, value setter) are applied to the actual DOM and the snapshot
     /// is re-injected into the JS runtime.
-    pub async fn evaluate_js(&mut self, expression: &str) -> Result<crate::js::runtime::JsEvalResult> {
+    pub async fn evaluate_js(
+        &mut self,
+        expression: &str,
+    ) -> Result<crate::js::runtime::JsEvalResult> {
         if self.closed {
             return Err(CoreError::SessionClosed);
         }
@@ -416,9 +416,10 @@ impl Session {
             }
 
             if start.elapsed() >= duration {
-                return Err(CoreError::NavigationFailed(
-                    format!("wait_for('{}') timed out after {}ms", selector, timeout_ms)
-                ));
+                return Err(CoreError::NavigationFailed(format!(
+                    "wait_for('{}') timed out after {}ms",
+                    selector, timeout_ms
+                )));
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -5,10 +5,10 @@
 //!
 //! Mirrors Lightpanda's `src/cdp/` module structure.
 
+pub mod event;
+pub mod protocol;
 pub mod server;
 pub mod session;
-pub mod protocol;
-pub mod event;
 
 pub mod domains;
 

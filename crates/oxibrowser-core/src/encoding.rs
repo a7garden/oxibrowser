@@ -171,9 +171,11 @@ fn find_meta_equiv_charset(scan: &[u8]) -> Option<&'static Encoding> {
         let content_search_start = he_start;
         let content_search_end = (he_start + 300).min(scan.len());
 
-        if let Some(c_start) =
-            find_subslice(&scan[content_search_start..content_search_end], content_pattern, 0)
-        {
+        if let Some(c_start) = find_subslice(
+            &scan[content_search_start..content_search_end],
+            content_pattern,
+            0,
+        ) {
             let abs_start = content_search_start + c_start + content_pattern.len();
 
             // Skip quote
@@ -358,7 +360,10 @@ mod tests {
         let padding = "x".repeat(1100);
         let html = format!("<html><head>{padding}<meta charset=\"euc-kr\"></head>");
         let enc = detect_meta_charset(html.as_bytes());
-        assert_eq!(enc, None, "charset beyond 1024 bytes should not be detected");
+        assert_eq!(
+            enc, None,
+            "charset beyond 1024 bytes should not be detected"
+        );
     }
 
     #[test]

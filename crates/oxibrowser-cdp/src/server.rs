@@ -11,22 +11,22 @@
 use crate::protocol::{JsonTarget, JsonVersion};
 use crate::session::CdpSession;
 use base64::Engine;
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use http_body_util::Full;
 use hyper_util::rt::TokioIo;
 use oxibrowser_core::Browser;
 use sha1::{Digest, Sha1};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{error, info, warn};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Type alias for HTTP response body.
 type HttpBody = Full<Bytes>;
@@ -146,9 +146,7 @@ impl CdpServer {
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let ws_url = ws_url.clone();
             let browser = browser.clone();
-            async move {
-                Self::handle_http_request(req, &ws_url, browser).await
-            }
+            async move { Self::handle_http_request(req, &ws_url, browser).await }
         });
 
         http1::Builder::new()
@@ -196,11 +194,11 @@ impl CdpServer {
                     .unwrap_or(false);
 
                 if !is_ws_upgrade {
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(Full::new(Bytes::from(
+                    return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                        Full::new(Bytes::from(
                             "WebSocket upgrade required. Use a WebSocket client.",
-                        )))?);
+                        )),
+                    )?);
                 }
 
                 // Extract the client's Sec-WebSocket-Key
@@ -221,12 +219,7 @@ impl CdpServer {
                             // Wrap hyper's Upgraded IO with TokioIo to get
                             // tokio AsyncRead/AsyncWrite traits.
                             let io = TokioIo::new(upgraded);
-                            let ws = WebSocketStream::from_raw_socket(
-                                io,
-                                Role::Server,
-                                None,
-                            )
-                            .await;
+                            let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
                             match CdpSession::new(ws, browser).await {
                                 Ok(session) => {

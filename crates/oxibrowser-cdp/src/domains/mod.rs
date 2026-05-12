@@ -18,8 +18,8 @@ use crate::event::EventSender;
 use crate::protocol::CdpError;
 use oxibrowser_core::session::Session;
 use serde_json::Value;
-use tokio::sync::RwLock;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Context passed to all domain handlers.
 ///
@@ -39,11 +39,7 @@ pub type DomainResult = std::result::Result<Option<Value>, CdpError>;
 ///
 /// Returns `Ok(Some(result))` on success, `Ok(None)` for empty results,
 /// or `Err(CdpError)` for unknown methods.
-pub async fn dispatch(
-    method: &str,
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let parts: Vec<&str> = method.splitn(2, '.').collect();
     if parts.len() != 2 {
         return Err(CdpError {

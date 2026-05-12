@@ -12,11 +12,7 @@ use crate::protocol::CdpError;
 use serde_json::{json, Value};
 
 /// Dispatch Runtime domain methods.
-pub async fn handle(
-    method: &str,
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
         "enable" => enable(ctx),
         "disable" => disable(ctx),

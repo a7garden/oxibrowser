@@ -25,9 +25,7 @@ pub enum NodeType {
     /// Comment node.
     Comment(String),
     /// DOCTYPE node.
-    Doctype {
-        name: String,
-    },
+    Doctype { name: String },
 }
 
 /// Data associated with a DOM node.
@@ -108,7 +106,10 @@ impl Node {
     /// If this is not an element node, this is a no-op.
     pub fn set_attribute(&mut self, name: &str, value: &str) {
         if let NodeType::Element { attributes, .. } = &mut self.node_type {
-            if let Some(entry) = attributes.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            if let Some(entry) = attributes
+                .iter_mut()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            {
                 entry.1 = value.to_string();
             } else {
                 attributes.push((name.to_string(), value.to_string()));

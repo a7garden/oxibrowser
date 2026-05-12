@@ -174,7 +174,15 @@ async fn main() -> Result<()> {
             timeout,
         } => {
             let op = run_extract(
-                &url, links, title, text, markdown, selector.as_deref(), all, json, timeout,
+                &url,
+                links,
+                title,
+                text,
+                markdown,
+                selector.as_deref(),
+                all,
+                json,
+                timeout,
             );
             tokio::select! {
                 result = op => result?,
@@ -228,11 +236,8 @@ async fn run_fetch(
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
 
-    let session_result = tokio::time::timeout(
-        Duration::from_secs(timeout),
-        browser.new_page(url),
-    )
-    .await;
+    let session_result =
+        tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
 
     let session = match session_result {
         Ok(Ok(s)) => s,
@@ -319,11 +324,8 @@ async fn run_eval(url: &str, expression: &str, json_output: bool, timeout: u64) 
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
 
-    let session_result = tokio::time::timeout(
-        Duration::from_secs(timeout),
-        browser.new_page(url),
-    )
-    .await;
+    let session_result =
+        tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
 
     let session = match session_result {
         Ok(Ok(s)) => s,
@@ -398,11 +400,8 @@ async fn run_extract(
     let config = oxibrowser_core::BrowserConfig::headless();
     let browser = oxibrowser_core::Browser::new(config).await?;
 
-    let session_result = tokio::time::timeout(
-        Duration::from_secs(timeout),
-        browser.new_page(url),
-    )
-    .await;
+    let session_result =
+        tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
 
     let session = match session_result {
         Ok(Ok(s)) => s,
@@ -445,7 +444,10 @@ async fn run_extract(
         let link_nodes = doc.query_selector_all("a");
         let hrefs: Vec<String> = link_nodes
             .iter()
-            .filter_map(|id| doc.get_node(*id).and_then(|n| n.href().map(|h| h.to_string())))
+            .filter_map(|id| {
+                doc.get_node(*id)
+                    .and_then(|n| n.href().map(|h| h.to_string()))
+            })
             .collect();
         if json_output {
             json_map.insert(
@@ -464,10 +466,7 @@ async fn run_extract(
     if text {
         let body_text = doc.query_text("body").unwrap_or_default();
         if json_output {
-            json_map.insert(
-                "text".into(),
-                serde_json::Value::String(body_text),
-            );
+            json_map.insert("text".into(), serde_json::Value::String(body_text));
         } else {
             print!("{body_text}");
         }

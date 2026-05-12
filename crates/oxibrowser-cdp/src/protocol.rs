@@ -143,7 +143,10 @@ mod tests {
 
     #[test]
     fn test_serialize_cdp_event() {
-        let event = CdpEvent::new("Page.loadEventFired", serde_json::json!({"timestamp": 1234}));
+        let event = CdpEvent::new(
+            "Page.loadEventFired",
+            serde_json::json!({"timestamp": 1234}),
+        );
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"method\":\"Page.loadEventFired\""));
         assert!(json.contains("\"timestamp\""));
@@ -156,8 +159,10 @@ mod tests {
         // Verify camelCase field names
         assert!(json.contains("\"protocolVersion\""));
         assert!(json.contains("\"userAgent\""));
-        assert!(json.contains("webSocketDebuggerUrl") || json.contains("webSocketUrl"),
-            "should contain web socket url field");
+        assert!(
+            json.contains("webSocketDebuggerUrl") || json.contains("webSocketUrl"),
+            "should contain web socket url field"
+        );
         // Verify round-trip
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["browser"], "OxiBrowser/0.1.0");

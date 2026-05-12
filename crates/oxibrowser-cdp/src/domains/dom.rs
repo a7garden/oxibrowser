@@ -9,11 +9,7 @@ use oxibrowser_webapi::dom::{NodeId, NodeType};
 use serde_json::{json, Value};
 
 /// Dispatch DOM domain methods.
-pub async fn handle(
-    method: &str,
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
         "getDocument" => get_document(ctx).await,
         "querySelector" => query_selector(params, ctx).await,
@@ -70,10 +66,7 @@ async fn get_document(ctx: &DispatchContext) -> DomainResult {
 }
 
 /// DOM.querySelector — finds a single node matching a CSS selector.
-async fn query_selector(
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+async fn query_selector(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let selector = params
         .get("selector")
@@ -100,10 +93,7 @@ async fn query_selector(
 }
 
 /// DOM.querySelectorAll — finds all nodes matching a CSS selector.
-async fn query_selector_all(
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+async fn query_selector_all(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let selector = params
         .get("selector")
@@ -166,10 +156,7 @@ fn describe_node(params: Option<Value>) -> DomainResult {
 /// DOM.resolveNode — resolves a DOM node to a JS remote object.
 fn resolve_node(params: Option<Value>) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _node_id = params
-        .get("nodeId")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let _node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
 
     Ok(Some(json!({
         "object": {
@@ -190,7 +177,11 @@ fn resolve_node(params: Option<Value>) -> DomainResult {
 const MAX_CDP_TREE_DEPTH: usize = 10;
 
 /// Build a CDP-compatible JSON node from the webapi DOM tree.
-fn build_cdp_node(document: &oxibrowser_webapi::dom::Document, node_id: NodeId, depth: usize) -> Value {
+fn build_cdp_node(
+    document: &oxibrowser_webapi::dom::Document,
+    node_id: NodeId,
+    depth: usize,
+) -> Value {
     let node = match document.get_node(node_id) {
         Some(n) => n,
         None => return json!({}),
@@ -198,9 +189,7 @@ fn build_cdp_node(document: &oxibrowser_webapi::dom::Document, node_id: NodeId, 
 
     let (node_type_num, node_name, local_name, node_value) = match &node.node_type {
         NodeType::Document => (9, "#document".to_string(), String::new(), String::new()),
-        NodeType::Element { tag, .. } => {
-            (1, tag.to_uppercase(), tag.to_lowercase(), String::new())
-        }
+        NodeType::Element { tag, .. } => (1, tag.to_uppercase(), tag.to_lowercase(), String::new()),
         NodeType::Text(text) => (3, "#text".to_string(), String::new(), text.clone()),
         NodeType::Comment(text) => (8, "#comment".to_string(), String::new(), text.clone()),
         NodeType::Doctype { name } => (10, "#doctype".to_string(), String::new(), name.clone()),

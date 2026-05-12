@@ -81,7 +81,10 @@ impl HttpClient {
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-        Ok(crate::encoding::decode_html(&bytes, content_type.as_deref()))
+        Ok(crate::encoding::decode_html(
+            &bytes,
+            content_type.as_deref(),
+        ))
     }
 
     /// Send a POST request with a raw body.
@@ -105,11 +108,7 @@ impl HttpClient {
     }
 
     /// Send a POST request with a JSON body.
-    pub async fn post_json(
-        &self,
-        url: &Url,
-        json: &serde_json::Value,
-    ) -> Result<Response> {
+    pub async fn post_json(&self, url: &Url, json: &serde_json::Value) -> Result<Response> {
         let response = self
             .client
             .post(url.as_str())
@@ -129,11 +128,7 @@ impl HttpClient {
     }
 
     /// Send a POST request with URL-encoded form data.
-    pub async fn post_form(
-        &self,
-        url: &Url,
-        form: &[(&str, &str)],
-    ) -> Result<Response> {
+    pub async fn post_form(&self, url: &Url, form: &[(&str, &str)]) -> Result<Response> {
         let response = self
             .client
             .post(url.as_str())

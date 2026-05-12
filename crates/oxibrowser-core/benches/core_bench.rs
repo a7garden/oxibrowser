@@ -2,20 +2,17 @@
 //!
 //! Run with: cargo bench
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use oxibrowser_webapi::Document;
 
 fn bench_html_parsing(c: &mut Criterion) {
-    let simple_html = r#"<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>"#;
+    let simple_html =
+        r#"<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>"#;
     let complex_html = include_str!("../benches/fixtures/complex.html");
 
     let mut group = c.benchmark_group("html_parsing");
-    group.bench_function("simple", |b| {
-        b.iter(|| Document::parse(simple_html))
-    });
-    group.bench_function("complex", |b| {
-        b.iter(|| Document::parse(complex_html))
-    });
+    group.bench_function("simple", |b| b.iter(|| Document::parse(simple_html)));
+    group.bench_function("complex", |b| b.iter(|| Document::parse(complex_html)));
     group.finish();
 }
 
@@ -46,9 +43,7 @@ fn bench_dom_queries(c: &mut Criterion) {
     group.bench_function("query_selector_all_p", |b| {
         b.iter(|| doc.query_selector_all("p"))
     });
-    group.bench_function("query_text", |b| {
-        b.iter(|| doc.query_text("h1"))
-    });
+    group.bench_function("query_text", |b| b.iter(|| doc.query_text("h1")));
     group.finish();
 }
 
@@ -72,10 +67,13 @@ fn bench_to_markdown(c: &mut Criterion) {
 
     let doc = Document::parse(html);
 
-    c.bench_function("to_markdown", |b| {
-        b.iter(|| doc.to_markdown())
-    });
+    c.bench_function("to_markdown", |b| b.iter(|| doc.to_markdown()));
 }
 
-criterion_group!(benches, bench_html_parsing, bench_dom_queries, bench_to_markdown);
+criterion_group!(
+    benches,
+    bench_html_parsing,
+    bench_dom_queries,
+    bench_to_markdown
+);
 criterion_main!(benches);

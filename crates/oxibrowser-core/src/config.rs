@@ -60,7 +60,8 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            user_agent: "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)".to_string(),
+            user_agent: "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)"
+                .to_string(),
             default_timeout: Duration::from_secs(30),
             obey_robots: true,
             max_sessions: 10,
@@ -121,22 +122,38 @@ mod tests {
         assert_eq!(config.js_max_loop_iterations, 100_000);
         assert_eq!(config.js_max_stack_size, 1024);
         assert_eq!(config.navigation_timeout_ms, 30_000);
-        assert!(config.cookie_file.is_none(), "default should have no cookie file");
+        assert!(
+            config.cookie_file.is_none(),
+            "default should have no cookie file"
+        );
     }
 
     #[test]
     fn test_headless_config() {
         let config = BrowserConfig::headless();
-        assert!(!config.enable_rendering, "headless should disable rendering");
-        assert_eq!(config.viewport_width, 0, "headless should have zero viewport width");
-        assert_eq!(config.viewport_height, 0, "headless should have zero viewport height");
+        assert!(
+            !config.enable_rendering,
+            "headless should disable rendering"
+        );
+        assert_eq!(
+            config.viewport_width, 0,
+            "headless should have zero viewport width"
+        );
+        assert_eq!(
+            config.viewport_height, 0,
+            "headless should have zero viewport height"
+        );
     }
 
     #[test]
     fn test_automation_config() {
         let config = BrowserConfig::automation();
         assert!(!config.obey_robots, "automation should ignore robots.txt");
-        assert_eq!(config.default_timeout, Duration::from_secs(60), "automation should have longer timeout");
+        assert_eq!(
+            config.default_timeout,
+            Duration::from_secs(60),
+            "automation should have longer timeout"
+        );
         assert_eq!(config.connection_pool_size, 20);
     }
 }

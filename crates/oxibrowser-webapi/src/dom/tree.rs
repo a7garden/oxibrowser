@@ -162,7 +162,11 @@ mod tests {
 
         // traverse_bfs uses a stack-based approach (pop from end + reversed children)
         // which produces the same order as DFS pre-order: 0, 1, 3, 4, 2
-        assert_eq!(order, vec![0, 1, 3, 4, 2], "BFS implementation visits in pre-order (stack-based)");
+        assert_eq!(
+            order,
+            vec![0, 1, 3, 4, 2],
+            "BFS implementation visits in pre-order (stack-based)"
+        );
     }
 
     #[test]

@@ -25,8 +25,10 @@ use tracing::{debug, error, info, warn};
 /// forwards CDP events to the WebSocket client.
 pub struct CdpSession {
     /// The WebSocket sink (for sending responses).
-    sink:
-        futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>, tungstenite::Message>,
+    sink: futures::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+        tungstenite::Message,
+    >,
     /// The WebSocket stream (for receiving commands).
     ws: futures::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
@@ -89,7 +91,10 @@ impl CdpSession {
         info!(session_id = %self.session_id, "CDP session started");
 
         // Take the event receiver out — the forwarding task owns it.
-        let mut event_rx = self.event_receiver.take().expect("event_receiver must be present at session start");
+        let mut event_rx = self
+            .event_receiver
+            .take()
+            .expect("event_receiver must be present at session start");
 
         loop {
             tokio::select! {
@@ -156,7 +161,11 @@ impl CdpSession {
                 result: None,
                 error: Some(crate::protocol::CdpError {
                     code: -32600,
-                    message: format!("Message too large: {} bytes (max {} bytes)", text.len(), MAX_CDP_MESSAGE_SIZE),
+                    message: format!(
+                        "Message too large: {} bytes (max {} bytes)",
+                        text.len(),
+                        MAX_CDP_MESSAGE_SIZE
+                    ),
                 }),
                 session_id: None,
             };

@@ -18,10 +18,7 @@ pub enum CoreError {
     ConnectionTimeout(String),
 
     #[error("HTTP {status}: {message}")]
-    HttpError {
-        status: u16,
-        message: String,
-    },
+    HttpError { status: u16, message: String },
 
     #[error("JavaScript evaluation error: {0}")]
     JsError(String),

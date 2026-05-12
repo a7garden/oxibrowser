@@ -9,18 +9,14 @@
 //! - Page.domContentLoadedEventFired
 //! - Page.loadEventFired
 
+use crate::domains::network;
 use crate::domains::{DispatchContext, DomainResult};
 use crate::event::EventSender;
 use crate::protocol::CdpError;
 use serde_json::{json, Value};
-use crate::domains::network;
 
 /// Dispatch Page domain methods.
-pub async fn handle(
-    method: &str,
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
         "enable" => enable(ctx),
         "disable" => disable(ctx),
@@ -54,7 +50,10 @@ fn disable(ctx: &DispatchContext) -> DomainResult {
 /// Page.setLifecycleEventsEnabled — controls lifecycle event emission.
 fn set_lifecycle_events_enabled(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
-    let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = params
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     ctx.events.set_page_enabled(enabled);
     Ok(Some(json!({})))
 }
@@ -65,10 +64,7 @@ fn set_lifecycle_events_enabled(params: Option<Value>, ctx: &DispatchContext) ->
 /// - Page.frameNavigated
 /// - Page.domContentLoadedEventFired
 /// - Page.loadEventFired
-async fn navigate(
-    params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let url = params
         .get("url")
@@ -116,10 +112,8 @@ async fn navigate(
                 json!({ "timestamp": timestamp }),
             );
 
-            ctx.events.send_page_event(
-                "Page.loadEventFired",
-                json!({ "timestamp": timestamp }),
-            );
+            ctx.events
+                .send_page_event("Page.loadEventFired", json!({ "timestamp": timestamp }));
 
             // Emit network lifecycle events if Network domain is enabled
             let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
@@ -156,10 +150,7 @@ async fn navigate(
 }
 
 /// Page.reload — reloads the current page and emits lifecycle events.
-async fn reload(
-    _params: Option<Value>,
-    ctx: &DispatchContext,
-) -> DomainResult {
+async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
 
     let mut guard = ctx.session.write().await;
@@ -195,10 +186,8 @@ async fn reload(
                 json!({ "timestamp": timestamp }),
             );
 
-            ctx.events.send_page_event(
-                "Page.loadEventFired",
-                json!({ "timestamp": timestamp }),
-            );
+            ctx.events
+                .send_page_event("Page.loadEventFired", json!({ "timestamp": timestamp }));
 
             Ok(Some(json!({
                 "frameId": frame_id,

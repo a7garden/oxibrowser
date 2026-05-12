@@ -9,8 +9,8 @@ pub mod frame;
 pub mod page;
 pub mod session;
 
-pub mod network;
 pub mod js;
+pub mod network;
 
 pub mod encoding;
 
