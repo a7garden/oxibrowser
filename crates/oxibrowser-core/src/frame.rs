@@ -60,6 +60,18 @@ impl Frame {
         })
     }
 
+    /// Create a Frame from an already-parsed Document (sync, for testing).
+    pub fn from_doc(url: Url, document: Document, html: &str) -> Self {
+        Self {
+            id: FrameId::next(),
+            url,
+            html: html.to_string(),
+            document,
+            children: Vec::new(),
+            dom_version: 0,
+        }
+    }
+
     /// Get the frame ID.
     pub fn id(&self) -> FrameId {
         self.id

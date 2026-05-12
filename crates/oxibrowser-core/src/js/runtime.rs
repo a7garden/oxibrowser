@@ -15,6 +15,7 @@
 //! │ JsRuntime        │──send──→│ Context (영구)    │
 //! │  evaluate()     │          │  console.log 등록 │
 //! │  set_global()   │          │  eval(script)     │
+//! │  set_dom()      │          │  document 객체    │
 //! │  console_output  │←─recv──│  json_value 반환  │
 //! └─────────────────┘          └──────────────────┘
 //! ```
@@ -27,11 +28,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 
 use boa_engine::object::builtins::JsArray;
+use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::js::dom_snapshot::{DomNode, DomSnapshot};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -89,9 +92,18 @@ impl JsEvalResult {
 /// Commands sent from the async main thread to the JS thread.
 enum JsCommand {
     /// Evaluate a JS expression.
-    Eval { expression: String },
+    Eval {
+        expression: String,
+    },
     /// Set a global variable in the persistent Context.
-    SetGlobal { name: String, value: Value },
+    SetGlobal {
+        name: String,
+        value: Value,
+    },
+    /// Update the DOM snapshot available to `document` object.
+    SetDom {
+        snapshot: Option<DomSnapshot>,
+    },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -104,7 +116,7 @@ enum JsResponse {
         exception: Option<String>,
         console_output: Vec<String>,
     },
-    /// Ack for SetGlobal / Shutdown.
+    /// Ack for SetGlobal / SetDom / Shutdown.
     Done,
 }
 
@@ -238,6 +250,24 @@ impl JsRuntime {
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals.read().unwrap().get(name).cloned()
     }
+
+    /// Set the DOM snapshot (called after navigate).
+    ///
+    /// Sends the snapshot to the JS thread so that `document.querySelector`
+    /// and friends operate on real DOM data.
+    pub fn set_dom_snapshot(&mut self, snapshot: Option<DomSnapshot>) {
+        self.cmd_tx
+            .send(JsCommand::SetDom { snapshot })
+            .expect("JS thread has died");
+        // Wait for ack
+        let resp = self
+            .resp_rx
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("JS thread has died");
+        let _ = resp;
+    }
 }
 
 impl Default for JsRuntime {
@@ -267,7 +297,8 @@ fn js_thread_loop(
     resp_tx: Sender<JsResponse>,
     console_output: Arc<RwLock<Vec<String>>>,
 ) {
-    let mut ctx = create_context(&console_output);
+    let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
+    let mut ctx = create_context(&console_output, &dom_snapshot);
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -308,6 +339,24 @@ fn js_thread_loop(
                 );
                 let _ = resp_tx.send(JsResponse::Done);
             }
+            JsCommand::SetDom { snapshot } => {
+                *dom_snapshot.write().unwrap() = snapshot;
+                // Update document title/URL in the JS context
+                let snap = dom_snapshot.read().unwrap();
+                if let Some(ref s) = *snap {
+                    let _ = ctx.register_global_property(
+                        js_string!("__domTitle"),
+                        JsValue::from(JsString::from(s.title.as_str())),
+                        Attribute::all(),
+                    );
+                    let _ = ctx.register_global_property(
+                        js_string!("__domUrl"),
+                        JsValue::from(JsString::from(s.url.as_str())),
+                        Attribute::all(),
+                    );
+                }
+                let _ = resp_tx.send(JsResponse::Done);
+            }
             JsCommand::Shutdown => {
                 let _ = resp_tx.send(JsResponse::Done);
                 break;
@@ -316,9 +365,15 @@ fn js_thread_loop(
     }
 }
 
-/// Create a fresh boa_engine Context with console.log/warn/error/info registered.
-fn create_context(output: &Arc<RwLock<Vec<String>>>) -> Context {
+/// Create a fresh boa_engine Context with console.log/warn/error/info
+/// and `document` object registered.
+fn create_context(
+    output: &Arc<RwLock<Vec<String>>>,
+    dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+) -> Context {
     let mut context = Context::default();
+
+    // --- Console functions ---
 
     macro_rules! console_fn {
         ($out:expr) => {
@@ -366,7 +421,368 @@ fn create_context(output: &Arc<RwLock<Vec<String>>>) -> Context {
 
     let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
 
+    // --- Document object ---
+
+    register_document_object(&mut context, dom_snapshot);
+
     context
+}
+
+// ---------------------------------------------------------------------------
+// Document object registration
+// ---------------------------------------------------------------------------
+
+/// Register the `document` global object with DOM query methods.
+fn register_document_object(
+    ctx: &mut Context,
+    dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+) {
+    let dom_capture_title = dom_snapshot.clone();
+    let title_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = dom_capture_title.read().unwrap();
+            if let Some(ref s) = *dom {
+                Ok(JsValue::from(JsString::from(s.title.as_str())))
+            } else {
+                Ok(JsValue::from(JsString::from("")))
+            }
+        })
+    };
+    let title_getter_fn = FunctionObjectBuilder::new(ctx.realm(), title_getter)
+        .name(js_string!("get title"))
+        .build();
+
+    let dom_capture_url = dom_snapshot.clone();
+    let url_getter: NativeFunction = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = dom_capture_url.read().unwrap();
+            if let Some(ref s) = *dom {
+                Ok(JsValue::from(JsString::from(s.url.as_str())))
+            } else {
+                Ok(JsValue::from(JsString::from("")))
+            }
+        })
+    };
+    let url_getter_fn = FunctionObjectBuilder::new(ctx.realm(), url_getter)
+        .name(js_string!("get URL"))
+        .build();
+
+    let dom_capture_cookie = dom_snapshot.clone();
+    let cookie_getter: NativeFunction = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let _unused = dom_capture_cookie.read().unwrap();
+            // Simplified: no cookie jar integration yet
+            Ok(JsValue::from(JsString::from("")))
+        })
+    };
+    let cookie_getter_fn = FunctionObjectBuilder::new(ctx.realm(), cookie_getter)
+        .name(js_string!("get cookie"))
+        .build();
+
+    // querySelector(selector)
+    let dom_capture_qs = dom_snapshot.clone();
+    let query_selector_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = dom_capture_qs.read().unwrap();
+            if let Some(ref snapshot) = *dom {
+                if let Some(node_id) = snapshot.query_selector(&selector) {
+                    if let Some(node) = snapshot.nodes.get(&node_id) {
+                        return Ok(create_element_object(snapshot, node, ctx));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    // querySelectorAll(selector)
+    let dom_capture_qsa = dom_snapshot.clone();
+    let query_selector_all_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = dom_capture_qsa.read().unwrap();
+            if let Some(ref snapshot) = *dom {
+                let ids = snapshot.query_selector_all(&selector);
+                let js_values: Vec<JsValue> = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                    })
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
+            let arr = JsArray::from_iter(Vec::<JsValue>::new(), ctx);
+            Ok(arr.into())
+        })
+    };
+
+    // getElementById(id)
+    let dom_capture_gbi = dom_snapshot.clone();
+    let get_element_by_id_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = dom_capture_gbi.read().unwrap();
+            if let Some(ref snapshot) = *dom {
+                if let Some(node_id) = snapshot.get_element_by_id(&id) {
+                    if let Some(node) = snapshot.nodes.get(&node_id) {
+                        return Ok(create_element_object(snapshot, node, ctx));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    // getElementsByTagName(tag)
+    let dom_capture_gtn = dom_snapshot.clone();
+    let get_elements_by_tag_name_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let tag = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = dom_capture_gtn.read().unwrap();
+            if let Some(ref snapshot) = *dom {
+                let ids = snapshot.get_elements_by_tag_name(&tag);
+                let js_values: Vec<JsValue> = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                    })
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
+            let arr = JsArray::from_iter(Vec::<JsValue>::new(), ctx);
+            Ok(arr.into())
+        })
+    };
+
+    // getElementsByClassName(class)
+    let dom_capture_gcn = dom_snapshot.clone();
+    let get_elements_by_class_name_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let class = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = dom_capture_gcn.read().unwrap();
+            if let Some(ref snapshot) = *dom {
+                let ids = snapshot.get_elements_by_class_name(&class);
+                let js_values: Vec<JsValue> = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        snapshot.nodes.get(&id).map(|node| create_element_object(snapshot, node, ctx))
+                    })
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
+            let arr = JsArray::from_iter(Vec::<JsValue>::new(), ctx);
+            Ok(arr.into())
+        })
+    };
+
+    let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .accessor(js_string!("title"), Some(title_getter_fn), None, Attribute::all())
+        .accessor(js_string!("URL"), Some(url_getter_fn), None, Attribute::all())
+        .accessor(js_string!("cookie"), Some(cookie_getter_fn), None, Attribute::all())
+        .function(query_selector_fn, js_string!("querySelector"), 1)
+        .function(query_selector_all_fn, js_string!("querySelectorAll"), 1)
+        .function(get_element_by_id_fn, js_string!("getElementById"), 1)
+        .function(get_elements_by_tag_name_fn, js_string!("getElementsByTagName"), 1)
+        .function(get_elements_by_class_name_fn, js_string!("getElementsByClassName"), 1)
+        .build();
+
+    let _ = ctx.register_global_property(
+        js_string!("document"),
+        document_obj,
+        Attribute::all(),
+    );
+}
+
+/// Create a JS element object from a DomNode.
+fn create_element_object(
+    snapshot: &DomSnapshot,
+    node: &DomNode,
+    ctx: &mut Context,
+) -> JsValue {
+    let tag_upper = node.tag.to_uppercase();
+    let id_val = node
+        .attributes
+        .get("id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let class_val = node
+        .attributes
+        .get("class")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let href_val = node.attributes.get("href").map(|s| s.as_str()).unwrap_or("");
+    let src_val = node.attributes.get("src").map(|s| s.as_str()).unwrap_or("");
+
+    // getAttribute(name)
+    let attrs_clone: HashMap<String, String> = node.attributes.clone();
+    let get_attribute_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            match attrs_clone.get(&name) {
+                Some(val) => Ok(JsValue::from(JsString::from(val.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+
+    // hasAttribute(name)
+    let attrs_clone2: HashMap<String, String> = node.attributes.clone();
+    let has_attribute_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            Ok(JsValue::from(attrs_clone2.contains_key(&name)))
+        })
+    };
+
+    // children → [element children IDs as lightweight objects]
+    // Note: we avoid recursively calling create_element_object for children/parentNode
+    // to prevent stack overflow on deeply nested DOMs. Instead, children get a
+    // minimal stub with tagName and id.
+    let child_ids = node
+        .children
+        .iter()
+        .filter(|&&c| {
+            snapshot
+                .nodes
+                .get(&c)
+                .map(|n| n.node_type == 1)
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect::<Vec<u32>>();
+    let children_js: Vec<JsValue> = child_ids
+        .iter()
+        .filter_map(|&cid| {
+            snapshot.nodes.get(&cid).map(|child| {
+                let child_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(
+                        js_string!("tagName"),
+                        JsValue::from(JsString::from(child.tag.to_uppercase().as_str())),
+                        Attribute::all(),
+                    )
+                    .property(
+                        js_string!("id"),
+                        JsValue::from(JsString::from(
+                            child.attributes.get("id").map(|s| s.as_str()).unwrap_or("")
+                        )),
+                        Attribute::all(),
+                    )
+                    .build();
+                child_obj.into()
+            })
+        })
+        .collect();
+    let children_arr = JsArray::from_iter(children_js, ctx);
+
+    // parentNode — stub (avoid recursion)
+    let parent_val: JsValue = match node.parent {
+        Some(pid) => match snapshot.nodes.get(&pid) {
+            Some(pnode) if pnode.node_type == 1 => {
+                let parent_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(
+                        js_string!("tagName"),
+                        JsValue::from(JsString::from(pnode.tag.to_uppercase().as_str())),
+                        Attribute::all(),
+                    )
+                    .property(
+                        js_string!("id"),
+                        JsValue::from(JsString::from(
+                            pnode.attributes.get("id").map(|s| s.as_str()).unwrap_or("")
+                        )),
+                        Attribute::all(),
+                    )
+                    .build();
+                parent_obj.into()
+            }
+            _ => JsValue::null(),
+        },
+        None => JsValue::null(),
+    };
+
+    let obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("tagName"),
+            JsValue::from(JsString::from(tag_upper.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("textContent"),
+            JsValue::from(JsString::from(node.text_content.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("innerHTML"),
+            JsValue::from(JsString::from(node.text_content.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("id"),
+            JsValue::from(JsString::from(id_val)),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("className"),
+            JsValue::from(JsString::from(class_val)),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("href"),
+            JsValue::from(JsString::from(href_val)),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("src"),
+            JsValue::from(JsString::from(src_val)),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("children"),
+            JsValue::from(children_arr),
+            Attribute::all(),
+        )
+        .property(js_string!("parentNode"), parent_val, Attribute::all())
+        .function(get_attribute_fn, js_string!("getAttribute"), 1)
+        .function(has_attribute_fn, js_string!("hasAttribute"), 1)
+        .build();
+
+    obj.into()
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +946,8 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::Frame;
+    use url::Url;
 
     // --- Basic types ---
 
@@ -691,7 +1109,7 @@ mod tests {
         let result = rt.evaluate("Math.PI").await.unwrap();
         assert!(result.is_ok());
         let pi = result.value.unwrap().as_f64().unwrap();
-        assert!((pi - 3.14159).abs() < 0.0001);
+        assert!((pi - std::f64::consts::PI).abs() < 0.0001);
     }
 
     #[tokio::test]
@@ -857,7 +1275,7 @@ mod tests {
     }
 
     // ========================================
-    // NEW: State persistence tests
+    // State persistence tests
     // ========================================
 
     #[tokio::test]
@@ -917,5 +1335,276 @@ mod tests {
             result.value,
             Some(Value::String("https://example.com/api".into()))
         );
+    }
+
+    // ========================================
+    // DOM snapshot + document object tests
+    // ========================================
+
+    fn make_frame(html: &str) -> Frame {
+        let url = Url::parse("https://example.com").unwrap();
+        let doc = oxibrowser_webapi::dom::Document::parse(html);
+        // Recreate what Frame::from_html does, but synchronously
+        Frame::from_doc(url, doc, html)
+    }
+
+    #[tokio::test]
+    async fn test_document_title_no_snapshot() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("document.title").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String(String::new())));
+    }
+
+    #[tokio::test]
+    async fn test_document_title_with_snapshot() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><head><title>My Page</title></head><body><p>Hello</p></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt.evaluate("document.title").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("My Page".into())));
+    }
+
+    #[tokio::test]
+    async fn test_document_url() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt.evaluate("document.URL").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.value,
+            Some(Value::String("https://example.com/".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_document_query_selector() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('a').tagName")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("A".into())));
+    }
+
+    #[tokio::test]
+    async fn test_document_query_selector_not_found() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><p>Hello</p></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('video')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn test_document_query_selector_all() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelectorAll('li').length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 3.0);
+    }
+
+    #[tokio::test]
+    async fn test_document_get_element_by_id() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div id="main">content</div></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.getElementById('main').id")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("main".into())));
+    }
+
+    #[tokio::test]
+    async fn test_document_get_elements_by_tag_name() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><p>a</p><p>b</p></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.getElementsByTagName('p').length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_document_get_elements_by_class_name() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.getElementsByClassName('item').length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_element_href_attribute() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><a href="https://example.com" class="link">click</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('a').href")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.value,
+            Some(Value::String("https://example.com".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_element_get_attribute() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('a').getAttribute('href')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("/page".into())));
+    }
+
+    #[tokio::test]
+    async fn test_element_has_attribute() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><a href="/page">go</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('a').hasAttribute('href')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_element_class_name() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div class="foo bar">content</div></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('div').className")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("foo bar".into())));
+    }
+
+    #[tokio::test]
+    async fn test_element_text_content() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><p>Hello World</p></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('p').textContent")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        let text = result.value.unwrap().as_str().unwrap().to_string();
+        assert!(
+            text.contains("Hello World"),
+            "textContent should contain 'Hello World', got: {:?}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_element_children() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><div><p>a</p><p>b</p></div></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('div').children.length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_document_snapshot_update() {
+        let mut rt = JsRuntime::new();
+
+        // First snapshot
+        let html1 = "<html><head><title>Page 1</title></head><body></body></html>";
+        let frame1 = make_frame(html1);
+        let snapshot1 = DomSnapshot::from_frame(&frame1);
+        rt.set_dom_snapshot(Some(snapshot1));
+
+        let r1 = rt.evaluate("document.title").await.unwrap();
+        assert_eq!(r1.value, Some(Value::String("Page 1".into())));
+
+        // Second snapshot replaces
+        let html2 = "<html><head><title>Page 2</title></head><body></body></html>";
+        let frame2 = make_frame(html2);
+        let snapshot2 = DomSnapshot::from_frame(&frame2);
+        rt.set_dom_snapshot(Some(snapshot2));
+
+        let r2 = rt.evaluate("document.title").await.unwrap();
+        assert_eq!(r2.value, Some(Value::String("Page 2".into())));
     }
 }

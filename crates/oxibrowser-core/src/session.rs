@@ -7,6 +7,7 @@ use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
+use crate::js::dom_snapshot::DomSnapshot;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::page::Page;
@@ -116,10 +117,12 @@ impl Session {
         self.history_index = self.history.len() - 1;
 
         self.active_page = Some(page);
+
+        // Inject DOM snapshot into JS runtime
+        self.inject_dom_snapshot();
+
         Ok(())
     }
-
-    /// Navigate back in history.
     pub async fn go_back(&mut self) -> Result<()> {
         if self.history_index > 0 {
             self.history_index -= 1;
@@ -132,6 +135,7 @@ impl Session {
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
             self.active_page = Some(Page::from_html(url, &html, 200, "text/html".into()).await?);
+            self.inject_dom_snapshot();
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no previous page".into()))
@@ -150,6 +154,7 @@ impl Session {
                 .await
                 .map_err(|e| CoreError::NetworkError(e.to_string()))?;
             self.active_page = Some(Page::from_html(url, &html, 200, "text/html".into()).await?);
+            self.inject_dom_snapshot();
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no next page".into()))
@@ -168,6 +173,7 @@ impl Session {
             self.active_page = Some(
                 Page::from_html(url.clone(), &html, 200, "text/html".into()).await?,
             );
+            self.inject_dom_snapshot();
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no current page".into()))
@@ -177,6 +183,39 @@ impl Session {
     /// Evaluate JavaScript in the current page context.
     pub async fn evaluate_js(&mut self, expression: &str) -> Result<crate::js::runtime::JsEvalResult> {
         self.js_runtime.evaluate(expression).await
+    }
+
+    /// Inject the current page's DOM snapshot into the JS runtime.
+    fn inject_dom_snapshot(&mut self) {
+        if let Some(page) = &self.active_page {
+            let snapshot = DomSnapshot::from_frame(page.root_frame());
+            self.js_runtime.set_dom_snapshot(Some(snapshot));
+        }
+    }
+
+    /// Wait for a CSS selector to match an element in the current page.
+    ///
+    /// Polls the active page's DOM every 50ms until the selector matches
+    /// or the timeout is exceeded.
+    pub async fn wait_for(&mut self, selector: &str, timeout_ms: u64) -> Result<()> {
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            if let Some(page) = &self.active_page {
+                if page.root_frame().query_selector(selector).is_some() {
+                    return Ok(());
+                }
+            }
+
+            if start.elapsed() >= duration {
+                return Err(CoreError::NavigationFailed(
+                    format!("wait_for('{}') timed out after {}ms", selector, timeout_ms)
+                ));
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// Get the current page (if any).
