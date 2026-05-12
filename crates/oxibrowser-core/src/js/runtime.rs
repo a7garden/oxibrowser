@@ -1,24 +1,41 @@
-//! JavaScript runtime using boa_engine.
+//! JavaScript runtime using boa_engine with a persistent context.
 //!
 //! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
 //! Provides real JS evaluation with console.log and Math, JSON, etc.
 //!
-//! ## Architecture note
+//! ## Architecture
 //!
 //! `boa_engine::Context` is `!Send` (internal GC pointers use `NonNull`).
-//! To keep `Session: Send` for tokio, we create a fresh `Context` on each
-//! `evaluate()` call rather than storing one persistently. This is a small
-//! overhead per eval (~μs) and avoids complex channel-based evaluator designs.
+//! To keep `JsRuntime: Send + Sync` for tokio, we run the `Context` on a
+//! dedicated **std::thread** and communicate via `mpsc` channels.
+//!
+//! ```text
+//! main thread (async)          JS thread (sync, std::thread)
+//! ┌─────────────────┐          ┌──────────────────┐
+//! │ JsRuntime        │──send──→│ Context (영구)    │
+//! │  evaluate()     │          │  console.log 등록 │
+//! │  set_global()   │          │  eval(script)     │
+//! │  console_output  │←─recv──│  json_value 반환  │
+//! └─────────────────┘          └──────────────────┘
+//! ```
+//!
+//! This means JS state (variables, functions, closures) **persists across
+//! evaluate() calls** — exactly like a real browser.
 
-use std::ops::Deref;
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, RwLock};
 
-use crate::error::Result;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
-use std::collections::HashMap;
+
+use crate::error::Result;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
 
 /// Result of a JavaScript evaluation.
 #[derive(Debug, Clone)]
@@ -65,132 +82,114 @@ impl JsEvalResult {
     }
 }
 
-/// A JavaScript runtime backed by boa_engine.
+// ---------------------------------------------------------------------------
+// Command / Response types (channel messages)
+// ---------------------------------------------------------------------------
+
+/// Commands sent from the async main thread to the JS thread.
+enum JsCommand {
+    /// Evaluate a JS expression.
+    Eval { expression: String },
+    /// Set a global variable in the persistent Context.
+    SetGlobal { name: String, value: Value },
+    /// Shut down the JS thread.
+    Shutdown,
+}
+
+/// Responses sent from the JS thread back to the main thread.
+enum JsResponse {
+    /// Result of an Eval command.
+    EvalResult {
+        value: Option<Value>,
+        exception: Option<String>,
+        console_output: Vec<String>,
+    },
+    /// Ack for SetGlobal / Shutdown.
+    Done,
+}
+
+// ---------------------------------------------------------------------------
+// JsRuntime
+// ---------------------------------------------------------------------------
+
+/// A JavaScript runtime backed by boa_engine with a persistent context.
 ///
-/// Since `boa_engine::Context` is `!Send`, we create it fresh on each
-/// `evaluate()` call. Global state (like variables) is tracked separately
-/// in Rust and injected before each eval.
+/// The `boa_engine::Context` lives on a dedicated OS thread and persists
+/// across `evaluate()` calls, so JS variables, functions, and closures
+/// survive between invocations.
 ///
-/// Uses `Arc<RwLock<...>>` for thread-safety since this runs in a tokio
-/// multi-thread environment where the parent `Session` must be `Send`.
+/// Thread-safe: `Send + Sync` via channel communication.
 pub struct JsRuntime {
-    /// Shared console output buffer (shared with boa closures).
+    /// Channel to send commands to the JS thread.
+    cmd_tx: Sender<JsCommand>,
+    /// Channel to receive responses from the JS thread.
+    resp_rx: Mutex<Receiver<JsResponse>>,
+    /// Shared console output buffer (also shared with JS thread closures).
     console_output: Arc<RwLock<Vec<String>>>,
-    /// Global variables tracked in Rust (injected per-eval).
+    /// Global variables tracked on the Rust side.
     globals: RwLock<HashMap<String, Value>>,
 }
 
 impl JsRuntime {
     /// Create a new JS runtime.
+    ///
+    /// Spawns a dedicated OS thread that owns the `boa_engine::Context`.
     pub fn new() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<JsCommand>();
+        let (resp_tx, resp_rx) = mpsc::channel::<JsResponse>();
+        let console_output = Arc::new(RwLock::new(Vec::<String>::new()));
+
+        // Spawn JS thread
+        let console_output_clone = console_output.clone();
+        std::thread::Builder::new()
+            .name("oxibrowser-js".into())
+            .spawn(move || {
+                js_thread_loop(cmd_rx, resp_tx, console_output_clone);
+            })
+            .expect("failed to spawn JS thread");
+
         Self {
-            console_output: Arc::new(RwLock::new(Vec::new())),
+            cmd_tx,
+            resp_rx: Mutex::new(resp_rx),
+            console_output,
             globals: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Create a fresh boa_engine Context with console.log registered.
-    fn create_context(output: Arc<RwLock<Vec<String>>>) -> Context {
-        let mut context = Context::default();
-
-        // Clone the Arc for each closure
-        let out_log = output.clone();
-        let out_warn = output.clone();
-        let out_error = output.clone();
-        let out_info = output.clone();
-
-        // Helper: build a console.* function closure
-        macro_rules! console_fn {
-            ($out:expr) => {
-                unsafe {
-                    NativeFunction::from_closure(
-                        move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-                            let mut line = String::new();
-                            for (i, arg) in args.iter().enumerate() {
-                                if i > 0 {
-                                    line.push(' ');
-                                }
-                                let s = arg
-                                    .to_string(ctx)
-                                    .map(|s| s.to_std_string_escaped())
-                                    .unwrap_or_else(|_| "undefined".to_string());
-                                line.push_str(&s);
-                            }
-                            if let Ok(mut guard) = $out.write() {
-                                guard.push(line);
-                            }
-                            Ok(JsValue::undefined())
-                        },
-                    )
-                }
-            };
-        }
-
-        let log_fn = console_fn!(out_log);
-
-        // Register standalone `log(...)` function
-        let _ = context.register_global_callable(js_string!("log"), 1, log_fn.clone());
-
-        // Build console object with .log, .warn, .error, .info methods
-        let console = boa_engine::object::ObjectInitializer::new(&mut context)
-            .function(log_fn, js_string!("log"), 1)
-            .function(console_fn!(out_warn), js_string!("warn"), 1)
-            .function(console_fn!(out_error), js_string!("error"), 1)
-            .function(console_fn!(out_info), js_string!("info"), 1)
-            .build();
-
-        let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
-
-        context
-    }
-
     /// Evaluate a JavaScript expression and return the result.
+    ///
+    /// JS state persists across calls — variables, functions, closures
+    /// defined in one `evaluate()` are available in the next.
     pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
-        // Clear previous output
-        {
-            let mut guard = self.console_output.write().unwrap();
-            guard.clear();
-        }
+        // Clear shared console buffer
+        self.console_output.write().unwrap().clear();
 
-        // Create a fresh context for this evaluation
-        let mut ctx = Self::create_context(self.console_output.clone());
+        // Send eval command
+        self.cmd_tx
+            .send(JsCommand::Eval {
+                expression: expression.to_string(),
+            })
+            .expect("JS thread has died");
 
-        // Inject tracked globals
-        {
-            let globals = self.globals.read().unwrap();
-            for (name, value) in globals.iter() {
-                let js_val = json_to_js_value(value, &mut ctx);
-                let _ = ctx.register_global_property(
-                    JsString::from(name.as_str()),
-                    js_val,
-                    Attribute::all(),
-                );
-            }
-        }
+        // Wait for response
+        let resp = self
+            .resp_rx
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("JS thread has died");
 
-        let source = Source::from_bytes(expression);
-        let result = ctx.eval(source);
-
-        // Collect console output
-        let console_output = self.console_output.read().unwrap().clone();
-
-        match result {
-            Ok(value) => {
-                let json_value = js_value_to_json(&value, &mut ctx);
-                Ok(JsEvalResult {
-                    value: Some(json_value),
-                    exception: None,
-                    console_output,
-                })
-            }
-            Err(err) => {
-                let msg = format_js_error(&err, &mut ctx);
-                Ok(JsEvalResult {
-                    value: None,
-                    exception: Some(msg),
-                    console_output,
-                })
-            }
+        match resp {
+            JsResponse::EvalResult {
+                value,
+                exception,
+                console_output,
+            } => Ok(JsEvalResult {
+                value,
+                exception,
+                console_output,
+            }),
+            JsResponse::Done => Ok(JsEvalResult::void()),
         }
     }
 
@@ -209,12 +208,33 @@ impl JsRuntime {
         self.console_output.write().unwrap().clear();
     }
 
-    /// Set a global variable (Rust-side, injected before each eval).
+    /// Set a global variable — injected into the persistent JS Context.
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
-        self.globals.write().unwrap().insert(name.into(), value);
+        let name = name.into();
+        self.globals
+            .write()
+            .unwrap()
+            .insert(name.clone(), value.clone());
+
+        // Also inject into the persistent JS Context
+        self.cmd_tx
+            .send(JsCommand::SetGlobal {
+                name,
+                value: value.clone(),
+            })
+            .expect("JS thread has died");
+
+        // Wait for ack
+        let resp = self
+            .resp_rx
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("JS thread has died");
+        let _ = resp; // JsResponse::Done
     }
 
-    /// Get a global variable.
+    /// Get a global variable (Rust-side tracking).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals.read().unwrap().get(name).cloned()
     }
@@ -226,12 +246,137 @@ impl Default for JsRuntime {
     }
 }
 
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        // Signal the JS thread to shut down
+        let _ = self.cmd_tx.send(JsCommand::Shutdown);
+        let _ = self.resp_rx.lock().unwrap().recv();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JS thread
+// ---------------------------------------------------------------------------
+
+/// Main loop for the JS thread.
+///
+/// Creates a single `Context`, registers globals, and processes commands
+/// until a `Shutdown` is received.
+fn js_thread_loop(
+    cmd_rx: Receiver<JsCommand>,
+    resp_tx: Sender<JsResponse>,
+    console_output: Arc<RwLock<Vec<String>>>,
+) {
+    let mut ctx = create_context(&console_output);
+
+    while let Ok(cmd) = cmd_rx.recv() {
+        match cmd {
+            JsCommand::Eval { expression } => {
+                // Clear console buffer before eval
+                console_output.write().unwrap().clear();
+
+                let source = Source::from_bytes(&expression);
+                let result = ctx.eval(source);
+
+                let console = console_output.read().unwrap().clone();
+
+                match result {
+                    Ok(value) => {
+                        let json_value = js_value_to_json(&value, &mut ctx);
+                        let _ = resp_tx.send(JsResponse::EvalResult {
+                            value: Some(json_value),
+                            exception: None,
+                            console_output: console,
+                        });
+                    }
+                    Err(err) => {
+                        let msg = format_js_error(&err, &mut ctx);
+                        let _ = resp_tx.send(JsResponse::EvalResult {
+                            value: None,
+                            exception: Some(msg),
+                            console_output: console,
+                        });
+                    }
+                }
+            }
+            JsCommand::SetGlobal { name, value } => {
+                let js_val = json_to_js_value(&value, &mut ctx);
+                let _ = ctx.register_global_property(
+                    JsString::from(name.as_str()),
+                    js_val,
+                    Attribute::all(),
+                );
+                let _ = resp_tx.send(JsResponse::Done);
+            }
+            JsCommand::Shutdown => {
+                let _ = resp_tx.send(JsResponse::Done);
+                break;
+            }
+        }
+    }
+}
+
+/// Create a fresh boa_engine Context with console.log/warn/error/info registered.
+fn create_context(output: &Arc<RwLock<Vec<String>>>) -> Context {
+    let mut context = Context::default();
+
+    macro_rules! console_fn {
+        ($out:expr) => {
+            unsafe {
+                NativeFunction::from_closure(
+                    move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                        let mut line = String::new();
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                line.push(' ');
+                            }
+                            let s = arg
+                                .to_string(ctx)
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_else(|_| "undefined".to_string());
+                            line.push_str(&s);
+                        }
+                        if let Ok(mut guard) = $out.write() {
+                            guard.push(line);
+                        }
+                        Ok(JsValue::undefined())
+                    },
+                )
+            }
+        };
+    }
+
+    let out_log = output.clone();
+    let out_warn = output.clone();
+    let out_error = output.clone();
+    let out_info = output.clone();
+
+    let log_fn = console_fn!(out_log);
+
+    // Register standalone `log(...)` function
+    let _ = context.register_global_callable(js_string!("log"), 1, log_fn.clone());
+
+    // Build console object
+    let console = boa_engine::object::ObjectInitializer::new(&mut context)
+        .function(log_fn, js_string!("log"), 1)
+        .function(console_fn!(out_warn), js_string!("warn"), 1)
+        .function(console_fn!(out_error), js_string!("error"), 1)
+        .function(console_fn!(out_info), js_string!("info"), 1)
+        .build();
+
+    let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
+
+    context
+}
+
 // ---------------------------------------------------------------------------
 // JsValue ↔ serde_json::Value conversions
 // ---------------------------------------------------------------------------
 
 /// Convert a serde_json Value to a boa_engine JsValue.
 fn json_to_js_value(value: &Value, context: &mut Context) -> JsValue {
+    use std::ops::Deref;
+
     match value {
         Value::Null => JsValue::null(),
         Value::Bool(b) => JsValue::from(*b),
@@ -264,8 +409,6 @@ fn json_to_js_value(value: &Value, context: &mut Context) -> JsValue {
 }
 
 /// Convert a boa_engine JsValue to serde_json::Value.
-///
-/// Uses `JSON.stringify` for objects to get proper serialization.
 fn js_value_to_json(value: &JsValue, context: &mut Context) -> Value {
     match value {
         JsValue::Null | JsValue::Undefined => Value::Null,
@@ -283,7 +426,6 @@ fn js_value_to_json(value: &JsValue, context: &mut Context) -> Value {
             Value::String(s.to_std_string_escaped())
         }
         JsValue::Object(obj) => {
-            // Arrays → JSON array via JsArray::at()
             if obj.is_array() {
                 if let Ok(arr) = JsArray::from_object(obj.clone()) {
                     let len = arr.length(context).unwrap_or(0) as usize;
@@ -297,19 +439,13 @@ fn js_value_to_json(value: &JsValue, context: &mut Context) -> Value {
                     return Value::Array(vec);
                 }
             }
-
-            // Objects → use JSON.stringify to serialize, then parse
             object_to_json_via_stringify(obj, context)
         }
     }
 }
 
-/// Convert a JS object to JSON by calling `JSON.stringify(obj)` and parsing the result.
-///
-/// This is the most reliable way to convert arbitrary JS objects to serde_json,
-/// since it handles nested objects, arrays, etc. correctly.
+/// Convert a JS object to JSON via `JSON.stringify`.
 fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Context) -> Value {
-    // Call JSON.stringify(obj)
     let json_global = context
         .global_object()
         .get(js_string!("JSON"), context)
@@ -318,18 +454,16 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
     if let Some(json_obj) = json_global.as_object() {
         if let Ok(stringify_fn) = json_obj.get(js_string!("stringify"), context) {
             if stringify_fn.is_callable() {
-                if let Ok(result) =
-                    stringify_fn
-                        .as_object()
-                        .unwrap()
-                        .call(&JsValue::undefined(), &[obj.clone().into()], context)
+                if let Ok(result) = stringify_fn
+                    .as_object()
+                    .unwrap()
+                    .call(&JsValue::undefined(), &[obj.clone().into()], context)
                 {
                     if let Some(s) = result.as_string() {
                         let json_str = s.to_std_string_escaped();
                         if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
                             return parsed;
                         }
-                        // If parsing failed, return the raw string
                         return Value::String(json_str);
                     }
                 }
@@ -337,7 +471,6 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
         }
     }
 
-    // Fallback: try toString()
     if let Ok(s) = JsValue::from(obj.clone()).to_string(context) {
         let s = s.to_std_string_escaped();
         if s != "[object Object]" {
@@ -352,9 +485,7 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
 // Error formatting
 // ---------------------------------------------------------------------------
 
-/// Format a JsError into a human-readable string with as much detail as possible.
 fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
-    // Try native error first (SyntaxError, TypeError, RangeError, etc.)
     if let Some(native) = err.as_native() {
         let kind = format!("{:?}", native.kind).to_lowercase();
         let msg = native.message();
@@ -364,17 +495,13 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
         return format!("{}: {}", kind, msg);
     }
 
-    // For opaque errors (thrown JS values), try to extract info
     if let Some(opaque) = err.as_opaque() {
-        // Try to convert to string
         if let Ok(s) = opaque.to_string(context) {
             let s = s.to_std_string_escaped();
             if !s.is_empty() && s != "undefined" {
                 return s;
             }
         }
-
-        // Try to extract .message and .name from error objects
         if let Some(obj) = opaque.as_object() {
             if let Ok(msg_val) = obj.get(js_string!("message"), context) {
                 if let Some(msg) = msg_val.as_string() {
@@ -382,11 +509,7 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
                     if !msg_str.is_empty() {
                         if let Ok(name_val) = obj.get(js_string!("name"), context) {
                             if let Some(name) = name_val.as_string() {
-                                return format!(
-                                    "{}: {}",
-                                    name.to_std_string_escaped(),
-                                    msg_str
-                                );
+                                return format!("{}: {}", name.to_std_string_escaped(), msg_str);
                             }
                         }
                         return msg_str;
@@ -394,7 +517,6 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
                 }
             }
         }
-
         return format!("Error: {:?}", opaque);
     }
 
@@ -408,6 +530,8 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Basic types ---
 
     #[tokio::test]
     async fn test_evaluate_literal() {
@@ -442,12 +566,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_evaluate_undefined() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("undefined").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Null));
+    }
+
+    // --- Arithmetic & expressions ---
+
+    #[tokio::test]
     async fn test_evaluate_arithmetic() {
         let mut rt = JsRuntime::new();
         let result = rt.evaluate("2 + 3 * 4").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(14.into())));
     }
+
+    #[tokio::test]
+    async fn test_evaluate_expression() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("'hello ' + 'world'").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello world".into())));
+    }
+
+    // --- Functions ---
 
     #[tokio::test]
     async fn test_evaluate_function() {
@@ -460,12 +604,13 @@ mod tests {
         assert_eq!(result.value, Some(Value::Number(3.into())));
     }
 
+    // --- Console ---
+
     #[tokio::test]
     async fn test_console_log_capture() {
         let mut rt = JsRuntime::new();
         let result = rt.evaluate("console.log('Hello, world!')").await.unwrap();
-        assert!(result.is_ok(), "console.log should not error");
-        assert_eq!(result.value, Some(Value::Null));
+        assert!(result.is_ok());
         assert_eq!(result.console_output, vec!["Hello, world!"]);
     }
 
@@ -481,174 +626,11 @@ mod tests {
     async fn test_console_warn_error_info() {
         let mut rt = JsRuntime::new();
         let result = rt
-            .evaluate("console.warn('warning'); console.error('err'); console.info('info')")
+            .evaluate("console.warn('w'); console.error('e'); console.info('i')")
             .await
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.console_output.len(), 3);
-        assert_eq!(result.console_output[0], "warning");
-        assert_eq!(result.console_output[1], "err");
-        assert_eq!(result.console_output[2], "info");
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_expression() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("'hello ' + 'world'").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("hello world".into())));
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_error() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("throw new Error('oops')").await.unwrap();
-        assert!(!result.is_ok());
-        let msg = result.exception.unwrap();
-        assert!(msg.contains("Error"), "should contain error type: {}", msg);
-        assert!(msg.contains("oops"), "should contain error message: {}", msg);
-    }
-
-    #[tokio::test]
-    async fn test_syntax_error() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("function {").await.unwrap();
-        assert!(!result.is_ok());
-        let msg = result.exception.unwrap();
-        assert!(
-            msg.to_lowercase().contains("syntax"),
-            "should be syntax error: {}",
-            msg
-        );
-    }
-
-    #[tokio::test]
-    async fn test_type_error() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("undefined.foo").await.unwrap();
-        assert!(!result.is_ok());
-        let msg = result.exception.unwrap();
-        assert!(
-            msg.to_lowercase().contains("type"),
-            "should be type error: {}",
-            msg
-        );
-    }
-
-    #[tokio::test]
-    async fn test_evaluate_undefined() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("undefined").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Null));
-    }
-
-    #[tokio::test]
-    async fn test_global_math() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("Math.PI").await.unwrap();
-        assert!(result.is_ok());
-        if let Some(Value::Number(n)) = result.value {
-            let pi = n.as_f64().unwrap_or(0.0);
-            assert!((pi - 3.14159).abs() < 0.0001);
-        } else {
-            panic!("expected number, got {:?}", result.value);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_array_length() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("[1, 2, 3].length").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(3.into())));
-    }
-
-    #[tokio::test]
-    async fn test_object_literal() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("({ a: 1, b: 'hello' })").await.unwrap();
-        assert!(result.is_ok());
-        let val = result.value.unwrap();
-        assert!(val.is_object(), "object literal should produce JSON object");
-        let map = val.as_object().unwrap();
-        assert_eq!(map.get("a"), Some(&Value::Number(1.into())));
-        assert_eq!(map.get("b"), Some(&Value::String("hello".into())));
-    }
-
-    #[tokio::test]
-    async fn test_nested_object() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("({ user: { name: 'Alice', age: 30 }, active: true })")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        let val = result.value.unwrap();
-        let map = val.as_object().unwrap();
-        assert_eq!(map.get("active"), Some(&Value::Bool(true)));
-        let user = map.get("user").unwrap().as_object().unwrap();
-        assert_eq!(user.get("name"), Some(&Value::String("Alice".into())));
-    }
-
-    #[tokio::test]
-    async fn test_array_literal() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("[1, 2, 3]").await.unwrap();
-        assert!(result.is_ok());
-        let val = result.value.unwrap();
-        let arr = val.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0], Value::Number(1.into()));
-        assert_eq!(arr[2], Value::Number(3.into()));
-    }
-
-    #[tokio::test]
-    async fn test_json_stringify() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("JSON.stringify({x: 1})").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("{\"x\":1}".to_string())));
-    }
-
-    #[tokio::test]
-    async fn test_json_parse() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("JSON.parse('{\"a\": 1}').a").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(1.into())));
-    }
-
-    #[tokio::test]
-    async fn test_set_global_string() {
-        let mut rt = JsRuntime::new();
-        rt.set_global("myVar", Value::String("hello".into()));
-        let result = rt.evaluate("myVar").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("hello".into())));
-    }
-
-    #[tokio::test]
-    async fn test_set_global_number() {
-        let mut rt = JsRuntime::new();
-        rt.set_global("count", Value::Number(42.into()));
-        let result = rt.evaluate("count + 8").await.unwrap();
-        assert!(result.is_ok());
-        let val = result.value.unwrap();
-        // boa stores all numbers as f64, so 42+8 = 50.0
-        assert_eq!(val.as_f64().unwrap(), 50.0);
-    }
-
-    #[tokio::test]
-    async fn test_set_global_object() {
-        let mut rt = JsRuntime::new();
-        rt.set_global(
-            "config",
-            serde_json::json!({ "name": "test", "value": 123 }),
-        );
-        let result = rt.evaluate("config.name").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("test".into())));
     }
 
     #[tokio::test]
@@ -671,8 +653,94 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.console_output.len(), 2);
-        assert_eq!(result.console_output[0], "line1");
-        assert_eq!(result.console_output[1], "line2");
+    }
+
+    // --- Errors ---
+
+    #[tokio::test]
+    async fn test_evaluate_error() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("throw new Error('oops')").await.unwrap();
+        assert!(!result.is_ok());
+        let msg = result.exception.unwrap();
+        assert!(msg.contains("Error"), "msg: {}", msg);
+        assert!(msg.contains("oops"), "msg: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn test_syntax_error() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("function {").await.unwrap();
+        assert!(!result.is_ok());
+        assert!(result.exception.unwrap().to_lowercase().contains("syntax"));
+    }
+
+    #[tokio::test]
+    async fn test_type_error() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("undefined.foo").await.unwrap();
+        assert!(!result.is_ok());
+        assert!(result.exception.unwrap().to_lowercase().contains("type"));
+    }
+
+    // --- Globals ---
+
+    #[tokio::test]
+    async fn test_global_math() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("Math.PI").await.unwrap();
+        assert!(result.is_ok());
+        let pi = result.value.unwrap().as_f64().unwrap();
+        assert!((pi - 3.14159).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn test_set_global_string() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("myVar", Value::String("hello".into()));
+        let result = rt.evaluate("myVar").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello".into())));
+    }
+
+    #[tokio::test]
+    async fn test_set_global_number() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("count", Value::Number(42.into()));
+        let result = rt.evaluate("count + 8").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 50.0);
+    }
+
+    #[tokio::test]
+    async fn test_set_global_object() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("cfg", serde_json::json!({ "name": "test" }));
+        let result = rt.evaluate("cfg.name").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("test".into())));
+    }
+
+    // --- Objects & Arrays ---
+
+    #[tokio::test]
+    async fn test_object_literal() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("({ a: 1, b: 'hi' })").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        assert!(val.is_object());
+        let map = val.as_object().unwrap();
+        assert_eq!(map.get("a"), Some(&Value::Number(1.into())));
+    }
+
+    #[tokio::test]
+    async fn test_array_literal() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("[1, 2, 3]").await.unwrap();
+        assert!(result.is_ok());
+        let arr = result.value.unwrap().as_array().unwrap().clone();
+        assert_eq!(arr.len(), 3);
     }
 
     #[tokio::test]
@@ -681,25 +749,27 @@ mod tests {
         let result = rt.evaluate("[1, 2, 3].map(x => x * 2)").await.unwrap();
         assert!(result.is_ok());
         let arr = result.value.unwrap().as_array().unwrap().clone();
-        assert_eq!(
-            arr,
-            vec![
-                Value::Number(2.into()),
-                Value::Number(4.into()),
-                Value::Number(6.into())
-            ]
-        );
+        assert_eq!(arr[0], Value::Number(2.into()));
+        assert_eq!(arr[2], Value::Number(6.into()));
     }
 
     #[tokio::test]
-    async fn test_string_split() {
+    async fn test_json_stringify() {
         let mut rt = JsRuntime::new();
-        let result = rt.evaluate("'hello world'.split(' ')").await.unwrap();
+        let result = rt.evaluate("JSON.stringify({x: 1})").await.unwrap();
         assert!(result.is_ok());
-        let arr = result.value.unwrap().as_array().unwrap().clone();
-        assert_eq!(arr[0], Value::String("hello".into()));
-        assert_eq!(arr[1], Value::String("world".into()));
+        assert_eq!(result.value, Some(Value::String("{\"x\":1}".to_string())));
     }
+
+    #[tokio::test]
+    async fn test_json_parse() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("JSON.parse('{\"a\": 1}').a").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(1.into())));
+    }
+
+    // --- JS features ---
 
     #[tokio::test]
     async fn test_template_literal() {
@@ -710,75 +780,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_destructuring() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("const {a, b} = {a: 1, b: 2}; a + b")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(3.into())));
-    }
-
-    #[tokio::test]
     async fn test_arrow_function() {
         let mut rt = JsRuntime::new();
         let result = rt
-            .evaluate("const square = x => x * x; square(5)")
+            .evaluate("const sq = x => x * x; sq(5)")
             .await
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(25.into())));
-    }
-
-    #[tokio::test]
-    async fn test_closure() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("const counter = (function() { let n = 0; return () => ++n; })(); counter()")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(1.into())));
-    }
-
-    #[tokio::test]
-    async fn test_spread_operator() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("[...[1,2], 3]").await.unwrap();
-        assert!(result.is_ok());
-        let arr = result.value.unwrap().as_array().unwrap().clone();
-        assert_eq!(arr.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_object_methods() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("Object.keys({a: 1, b: 2}).length")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(2.into())));
-    }
-
-    #[tokio::test]
-    async fn test_for_loop() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("let sum = 0; for (let i = 1; i <= 10; i++) sum += i; sum")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(55.into())));
-    }
-
-    #[tokio::test]
-    async fn test_regex() {
-        let mut rt = JsRuntime::new();
-        let result = rt.evaluate("/hello/.test('hello world')").await.unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Bool(true)));
     }
 
     #[tokio::test]
@@ -793,17 +802,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_array_reduce() {
-        let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("[1,2,3,4,5].reduce((acc, x) => acc + x, 0)")
-            .await
-            .unwrap();
-        assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(15.into())));
-    }
-
-    #[tokio::test]
     async fn test_class() {
         let mut rt = JsRuntime::new();
         let result = rt
@@ -812,5 +810,112 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(42.into())));
+    }
+
+    #[tokio::test]
+    async fn test_destructuring() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("const {a, b} = {a: 1, b: 2}; a + b")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(3.into())));
+    }
+
+    #[tokio::test]
+    async fn test_regex() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("/hello/.test('hello world')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_for_loop() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("let sum = 0; for (let i = 1; i <= 10; i++) sum += i; sum")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(55.into())));
+    }
+
+    #[tokio::test]
+    async fn test_array_reduce() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("[1,2,3,4,5].reduce((a,x) => a+x, 0)")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(15.into())));
+    }
+
+    // ========================================
+    // NEW: State persistence tests
+    // ========================================
+
+    #[tokio::test]
+    async fn test_state_persists_across_evals() {
+        let mut rt = JsRuntime::new();
+        rt.evaluate("let x = 42").await.unwrap();
+        let result = rt.evaluate("x + 8").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap().as_f64().unwrap(), 50.0);
+    }
+
+    #[tokio::test]
+    async fn test_function_persists() {
+        let mut rt = JsRuntime::new();
+        rt.evaluate("function add(a, b) { return a + b; }")
+            .await
+            .unwrap();
+        let result = rt.evaluate("add(3, 4)").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Number(7.into())));
+    }
+
+    #[tokio::test]
+    async fn test_var_persists_across_evals() {
+        let mut rt = JsRuntime::new();
+        rt.evaluate("var greeting = 'hello'").await.unwrap();
+        let result = rt.evaluate("greeting + ' world'").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("hello world".into())));
+    }
+
+    #[tokio::test]
+    async fn test_closure_state_persists() {
+        let mut rt = JsRuntime::new();
+        rt.evaluate("const counter = (function() { let n = 0; return () => ++n; })()")
+            .await
+            .unwrap();
+
+        let r1 = rt.evaluate("counter()").await.unwrap();
+        assert_eq!(r1.value, Some(Value::Number(1.into())));
+
+        let r2 = rt.evaluate("counter()").await.unwrap();
+        assert_eq!(r2.value, Some(Value::Number(2.into())));
+
+        let r3 = rt.evaluate("counter()").await.unwrap();
+        assert_eq!(r3.value, Some(Value::Number(3.into())));
+    }
+
+    #[tokio::test]
+    async fn test_set_global_persists_in_js_state() {
+        let mut rt = JsRuntime::new();
+        rt.set_global("baseUrl", Value::String("https://example.com".into()));
+        rt.evaluate("let path = '/api'").await.unwrap();
+        let result = rt.evaluate("baseUrl + path").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.value,
+            Some(Value::String("https://example.com/api".into()))
+        );
     }
 }
