@@ -580,6 +580,7 @@ fn js_thread_loop(
                 register_window_globals(
                     &mut ctx,
                     &dom_snapshot_ref,
+                    &mutations,
                     viewport,
                     &url,
                     "OxiBrowser/0.2",
@@ -759,7 +760,14 @@ fn create_context(
 
     // --- Window global ---
 
-    register_window_globals(&mut context, dom_snapshot, viewport, page_url, user_agent);
+    register_window_globals(
+        &mut context,
+        dom_snapshot,
+        mutations,
+        viewport,
+        page_url,
+        user_agent,
+    );
 
     context
 }
@@ -970,6 +978,81 @@ fn register_document_object(
     let doc_dispatch_event_fn =
         unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(true))) };
 
+    // document.body / document.head / document.documentElement getters
+    let dom_snap_body = dom_snapshot.clone();
+    let body_getter_fn = {
+        let mutations_clone = mutations.clone();
+        let getter: NativeFunction = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                let snap = dom_snap_body.read();
+                if let Some(ref s) = *snap {
+                    if let Some(bid) = s.body_id {
+                        if let Some(node) = s.nodes.get(&bid) {
+                            return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                        }
+                    }
+                }
+                Ok(JsValue::null())
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get body"))
+            .build()
+    };
+
+    let dom_snap_head = dom_snapshot.clone();
+    let head_getter_fn = {
+        let mutations_clone = mutations.clone();
+        let getter: NativeFunction = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                let snap = dom_snap_head.read();
+                if let Some(ref s) = *snap {
+                    if let Some(hid) = s.head_id {
+                        if let Some(node) = s.nodes.get(&hid) {
+                            return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                        }
+                    }
+                }
+                Ok(JsValue::null())
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get head"))
+            .build()
+    };
+
+    let dom_snap_de = dom_snapshot.clone();
+    let document_element_getter_fn = {
+        let mutations_clone = mutations.clone();
+        let getter: NativeFunction = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                let snap = dom_snap_de.read();
+                if let Some(ref s) = *snap {
+                    // document.documentElement should be the <html> element,
+                    // which is a child of the root Document node.
+                    let html_node = s.nodes.get(&s.root_id).and_then(|root| {
+                        root.children.iter().find_map(|&child_id| {
+                            s.nodes.get(&child_id).and_then(|n| {
+                                if n.tag == "html" {
+                                    Some((child_id, n))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    });
+                    if let Some((_, node)) = html_node {
+                        return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                    }
+                }
+                Ok(JsValue::null())
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get documentElement"))
+            .build()
+    };
+
     let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .accessor(
             js_string!("title"),
@@ -1009,6 +1092,25 @@ fn register_document_object(
             2,
         )
         .function(doc_dispatch_event_fn, js_string!("dispatchEvent"), 1)
+        // DOM tree accessors
+        .accessor(
+            js_string!("body"),
+            Some(body_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("head"),
+            Some(head_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("documentElement"),
+            Some(document_element_getter_fn),
+            None,
+            Attribute::all(),
+        )
         .build();
 
     let _ = ctx.register_global_property(js_string!("document"), document_obj, Attribute::all());
@@ -1443,6 +1545,7 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
 fn register_window_globals(
     ctx: &mut Context,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+    mutations: &Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
@@ -1455,13 +1558,14 @@ fn register_window_globals(
     // We re-register `document` as a getter-based object that resolves these
     // from the DomSnapshot dynamically.
     let snap_body = dom_snapshot.clone();
+    let mutations_body = mutations.clone();
     let body_getter = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
             let snap = snap_body.read();
             if let Some(ref s) = *snap {
                 if let Some(bid) = s.body_id {
                     if let Some(node) = s.nodes.get(&bid) {
-                        return Ok(body_head_element_value(s, node));
+                        return Ok(create_element_object(s, node, ctx, &mutations_body));
                     }
                 }
             }
@@ -1470,13 +1574,14 @@ fn register_window_globals(
     };
 
     let snap_head = dom_snapshot.clone();
+    let mutations_head = mutations.clone();
     let head_getter = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
             let snap = snap_head.read();
             if let Some(ref s) = *snap {
                 if let Some(hid) = s.head_id {
                     if let Some(node) = s.nodes.get(&hid) {
-                        return Ok(body_head_element_value(s, node));
+                        return Ok(create_element_object(s, node, ctx, &mutations_head));
                     }
                 }
             }
@@ -1485,12 +1590,24 @@ fn register_window_globals(
     };
 
     let snap_de = dom_snapshot.clone();
+    let mutations_de = mutations.clone();
     let document_element_getter = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
             let snap = snap_de.read();
             if let Some(ref s) = *snap {
-                if let Some(root) = s.nodes.get(&s.root_id) {
-                    return Ok(body_head_element_value(s, root));
+                let html_node = s.nodes.get(&s.root_id).and_then(|root| {
+                    root.children.iter().find_map(|&child_id| {
+                        s.nodes.get(&child_id).and_then(|n| {
+                            if n.tag == "html" {
+                                Some((child_id, n))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                });
+                if let Some((_, node)) = html_node {
+                    return Ok(create_element_object(s, node, ctx, &mutations_de));
                 }
             }
             Ok(JsValue::null())
@@ -1721,16 +1838,6 @@ mod js_sys_helpers {
             .unwrap_or_default();
         duration.as_millis() as f64
     }
-}
-
-/// Create a minimal JS element value for body/head/documentElement.
-/// Returns a string representation since we can't use ObjectInitializer
-/// without a `&mut Context` inside closures.
-fn body_head_element_value(_snapshot: &DomSnapshot, node: &DomNode) -> JsValue {
-    let tag_upper = node.tag.to_uppercase();
-    JsValue::from(js_string!(
-        format!("[object HTML{}Element]", tag_upper).as_str()
-    ))
 }
 
 // ---------------------------------------------------------------------------
