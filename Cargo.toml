@@ -12,6 +12,12 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["Oxios Team"]
+repository = "https://github.com/a7garden/oxibrowser"
+homepage = "https://github.com/a7garden/oxibrowser"
+readme = "README.md"
+keywords = ["browser", "headless", "cdp", "automation", "dom"]
+categories = ["web-programming", "parser-implementations"]
+rust-version = "1.82"
 
 [workspace.dependencies]
 # Async
@@ -69,6 +75,6 @@ sha1 = "0.10"
 base64 = "0.22"
 
 # Internal crates
-oxibrowser-core = { path = "crates/oxibrowser-core" }
-oxibrowser-cdp = { path = "crates/oxibrowser-cdp" }
-oxibrowser-webapi = { path = "crates/oxibrowser-webapi" }
+oxibrowser-core = { version = "0.2.0", path = "crates/oxibrowser-core" }
+oxibrowser-cdp = { version = "0.2.0", path = "crates/oxibrowser-cdp" }
+oxibrowser-webapi = { version = "0.2.0", path = "crates/oxibrowser-webapi" }

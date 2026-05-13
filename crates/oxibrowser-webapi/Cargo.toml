@@ -3,6 +3,13 @@ name = "oxibrowser-webapi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
 description = "DOM and WebAPI implementations backed by html5ever"
 
 [dependencies]
