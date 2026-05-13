@@ -4,50 +4,43 @@
 In Progress
 
 ## Tasks
-
 - [x] Lightpanda Core Architecture Analysis
-  - Analyzed 12 source files from /tmp/lightpanda/src/
-  - Output: /tmp/analysis/core-architecture.md (41KB comprehensive analysis)
-  - Files analyzed: lightpanda.zig, App.zig, Session.zig, ScriptManager.zig, HttpClient.zig, Config.zig, Server.zig, main.zig, cli.zig, crash_handler.zig, cookies.zig, Notification.zig
+- [x] Lightpanda Network & Storage Layer Analysis
 
 ## Files Changed
-
-- /tmp/analysis/core-architecture.md (created - comprehensive architecture analysis)
+- `/tmp/analysis/network-storage.md` — Comprehensive analysis of Lightpanda network stack and storage system
 
 ## Notes
 
-- Lightpanda uses V8 (C++ bindings) vs OxiBrowser's boa_engine (pure Rust)
-- Lightpanda uses libcurl vs OxiBrowser's reqwest
-- Key patterns to consider for OxiBrowser:
-  - Active/Pending page state machine for cross-navigation state
-  - Arena pool allocation with handover pattern
-  - HTTP middleware layer chain (interception → auth → cache → robots)
-  - Transfer lifecycle with detach-or-deinit safety pattern
-  - Per-CDP-connection notification scoping
-  - Comptime-generated CLI builder (Rust equivalent: clap derive)
+### 2026-05-14: Network & Storage Analysis Completed
 
----
+Analyzed 23 Lightpanda source files covering:
 
-- [x] Lightpanda CDP Implementation Analysis
-  - Analyzed 24 source files from /tmp/lightpanda/src/cdp/
-  - Output: /tmp/analysis/cdp-implementation.md (39KB comprehensive analysis)
-  - Files analyzed: CDP.zig, Node.zig, id.zig, AXNode.zig, testing.zig, and all 20 domain handlers
-  - Domains analyzed: Browser (7 methods), Page (16), DOM (15), Runtime (8), Network (11), Fetch (6), Target (13), CSS (1), Console (3), Inspector (2), Input (3), Log (2), Emulation (5), Security (3), Storage (3), Audits (2), Performance (2), Accessibility (3), LP (12 vendor-specific)
-  - Total: ~100 CDP methods, ~25 events, ~15 notification types
-  - Key findings:
-    - Compile-time domain routing via byte-pattern matching (zero-cost dispatch)
-    - 4-tier arena allocator (message, notification, frame, browser_context)
-    - Notification-based domain enable/disable (register/unregister handlers)
-    - Full V8 inspector delegation for Runtime domain
-    - Single BrowserContext model (max 1 at a time)
-    - STARTUP pseudo-session for Puppeteer pre-context commands
-    - InterceptState stores transfer IDs (not pointers) to prevent UAF
-    - XPath heuristic detection in DOM.performSearch
-    - Full accessibility tree with ARIA role mapping (~80 roles)
-    - LP domain for AI-agent-specific features (markdown, semantic tree, actions)
-  - Priority recommendations for OxiBrowser:
-    1. Target domain expansion (createTarget, attachToTarget, setAutoAttach)
-    2. Page lifecycle events (frameNavigated, loadEventFired, networkIdle)
-    3. Network response body capture (getResponseBody)
-    4. Cookie CRUD via Network/Storage domains
-    5. Extra HTTP headers and user agent override
+**Network Stack:**
+- `Network.zig`: Custom poll-based event loop, curl multi integration, ZigToCurlAllocator (custom memory allocator for libcurl), connection pooling, TCP listener with keepalive
+- `http.zig`: libcurl easy handle wrapper, method support (GET/POST/PUT/DELETE/HEAD/OPTIONS/PATCH/PROPFIND), header management with slist, opensocket callback for IP filtering
+- `WsConnection.zig`: Zero-dependency WebSocket implementation with SIMD-optimized XOR masking, frame fragmentation, CDP discovery endpoints (/json/version, /json/list)
+- `Robots.zig`: RFC 9309 compliant robots.txt parser with wildcard/exact/prefix matching, thread-safe RobotStore
+- `WebBotAuth.zig`: Ed25519 request signing via BoringSSL FFI
+- `IpFilter.zig`: CIDR-based IP filtering with comptime-generated private range tables
+- Layer middleware: InterceptionLayer (CDP Fetch), RobotsLayer, WebBotAuthLayer, CacheLayer
+- Cache: FsCache with SHA256 keying, striped locking, zero-copy file-backed serving
+
+**Storage:**
+- Storage abstraction with Blackhole (null) and SQLite backends
+- Type-safe SQLite wrapper with comptime bind/get analysis
+- Connection pool with condition variable signaling
+- WAL mode migrations
+
+**Supporting:**
+- datetime.zig: Microsecond-precision Date/Time/DateTime with ISO 8601, RFC 822, RFC 3339 parsing
+- Telemetry: Comptime-generic provider pattern
+- sys/: libcurl, BoringSSL (libcrypto), libidn2 (IDNA) FFI wrappers
+- MCP server: JSON-RPC 2.0 based protocol
+- Public suffix list: 10K+ entries in StaticStringMap
+
+**Key findings for OxBrowser:**
+- Lightpanda's custom poll loop vs OxBrowser's tokio runtime (fundamentally different approach)
+- Identified 4 missing features in OxBrowser: IP filtering, robots.txt, HTTP caching, bot auth
+- Lightpanda uses comptime generics extensively; OxBrowser uses Rust traits and generics
+- Layer middleware pattern is portable to OxBrowser for CDP interception

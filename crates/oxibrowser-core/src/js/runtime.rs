@@ -1495,10 +1495,6 @@ fn register_window_globals(
         .property(js_string!("length"), JsValue::from(0), Attribute::all())
         .property(js_string!("closed"), JsValue::from(false), Attribute::all())
         .property(js_string!("origin"), JsValue::from(js_string!(url_owned.as_str())), Attribute::all())
-        // Getters for body/head/documentElement (callable, returns element)
-        .function(body_getter, js_string!("getBody"), 0)
-        .function(head_getter, js_string!("getHead"), 0)
-        .function(document_element_getter, js_string!("getDocumentElement"), 0)
         .build();
 
     // window.navigator
