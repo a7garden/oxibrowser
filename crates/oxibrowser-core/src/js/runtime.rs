@@ -158,6 +158,10 @@ pub struct JsRuntimeConfig {
     pub max_loop_iterations: u64,
     /// Max operand stack size.
     pub max_stack_size: usize,
+    /// Viewport width (pixels, 0 = headless).
+    pub viewport_width: u32,
+    /// Viewport height (pixels, 0 = headless).
+    pub viewport_height: u32,
 }
 
 impl Default for JsRuntimeConfig {
@@ -167,6 +171,8 @@ impl Default for JsRuntimeConfig {
             max_recursion: 100,
             max_loop_iterations: 100_000,
             max_stack_size: 1024,
+            viewport_width: 1280,
+            viewport_height: 720,
         }
     }
 }
@@ -178,6 +184,8 @@ impl From<&crate::config::BrowserConfig> for JsRuntimeConfig {
             max_recursion: config.js_max_recursion,
             max_loop_iterations: config.js_max_loop_iterations,
             max_stack_size: config.js_max_stack_size,
+            viewport_width: config.viewport_width,
+            viewport_height: config.viewport_height,
         }
     }
 }
@@ -222,10 +230,11 @@ impl JsRuntime {
         // Spawn JS thread
         let console_output_clone = console_output.clone();
         let mutations_clone = mutations.clone();
+        let viewport = (config.viewport_width, config.viewport_height);
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
             .spawn(move || {
-                js_thread_loop(cmd_rx, resp_tx, console_output_clone, mutations_clone);
+                js_thread_loop(cmd_rx, resp_tx, console_output_clone, mutations_clone, viewport);
             })
             .expect("failed to spawn JS thread");
 
@@ -409,9 +418,17 @@ fn js_thread_loop(
     resp_tx: Sender<JsResponse>,
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
+    viewport: (u32, u32),
 ) {
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
-    let mut ctx = create_context(&console_output, &dom_snapshot, &mutations);
+    let mut ctx = create_context(
+        &console_output,
+        &dom_snapshot,
+        &mutations,
+        viewport,
+        "",
+        "OxiBrowser/0.2",
+    );
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -451,7 +468,14 @@ fn js_thread_loop(
                 // Check if we timed out
                 if elapsed.as_millis() > timeout as u128 {
                     // Context may be in a bad state — recreate it
-                    ctx = create_context(&console_output, &dom_snapshot, &mutations);
+                    ctx = create_context(
+                        &console_output,
+                        &dom_snapshot,
+                        &mutations,
+                        viewport,
+                        "",
+                        "OxiBrowser/0.2",
+                    );
                     let _ = resp_tx.send(JsResponse::EvalResult {
                         value: None,
                         exception: Some(format!(
@@ -538,6 +562,9 @@ fn create_context(
     output: &Arc<RwLock<Vec<String>>>,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
     mutations: &Arc<RwLock<Vec<DomMutation>>>,
+    viewport: (u32, u32),
+    page_url: &str,
+    user_agent: &str,
 ) -> Context {
     let mut context = Context::default();
 
@@ -691,6 +718,10 @@ fn create_context(
     // --- Document object ---
 
     register_document_object(&mut context, dom_snapshot, mutations);
+
+    // --- Window global ---
+
+    register_window_globals(&mut context, dom_snapshot, viewport, page_url, user_agent);
 
     context
 }
@@ -1361,6 +1392,217 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
     }
 
     "Unknown JavaScript error".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// `window` global object
+// ---------------------------------------------------------------------------
+
+/// Register `window` global object with browser property stubs.
+///
+/// This makes `typeof window === 'object'` true and provides common
+/// properties that most JS libraries expect.
+fn register_window_globals(
+    ctx: &mut Context,
+    dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+    viewport: (u32, u32),
+    page_url: &str,
+    user_agent: &str,
+) {
+    let url_owned = page_url.to_string();
+    let ua_owned = user_agent.to_string();
+    let (vp_w, vp_h) = viewport;
+
+    // --- document.body / head / documentElement getters ---
+    // We re-register `document` as a getter-based object that resolves these
+    // from the DomSnapshot dynamically.
+    let snap_body = dom_snapshot.clone();
+    let body_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let snap = snap_body.read();
+            if let Some(ref s) = *snap {
+                if let Some(bid) = s.body_id {
+                    if let Some(node) = s.nodes.get(&bid) {
+                        return Ok(body_head_element_value(s, node));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    let snap_head = dom_snapshot.clone();
+    let head_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let snap = snap_head.read();
+            if let Some(ref s) = *snap {
+                if let Some(hid) = s.head_id {
+                    if let Some(node) = s.nodes.get(&hid) {
+                        return Ok(body_head_element_value(s, node));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    let snap_de = dom_snapshot.clone();
+    let document_element_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let snap = snap_de.read();
+            if let Some(ref s) = *snap {
+                if let Some(root) = s.nodes.get(&s.root_id) {
+                    return Ok(body_head_element_value(s, root));
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    // Register document.body, document.head, document.documentElement as
+    // callable getters (not accessors, since boa 0.20 ObjectInitializer
+    // doesn't support adding accessors to existing objects easily).
+    // These appear as methods but act like properties: document.body()
+    // We also register proper property-like access via a wrapper.
+    //
+    // Simpler approach: register them as methods on the global document
+    // and also register a $body / $head / $documentElement that return
+    // the element directly.
+    //
+    // Actually, the simplest working approach for boa 0.20: register them
+    // as regular functions called body(), head(), documentElement().
+    // Most JS code does document.body (property), not document.body().
+    //
+    // To make document.body work as a property, we need to build the
+    // document object with accessors from the start. Let's modify
+    // the existing document construction.
+
+    // We'll add these functions to the global document object by
+    // registering global getters that the JS code can use.
+    // For now, register as document_get_body() etc. and also
+    // as window.document properties via a wrapper.
+
+    // --- window object ---
+    let window_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        // Viewport
+        .property(js_string!("innerWidth"), JsValue::from(vp_w as f64), Attribute::all())
+        .property(js_string!("innerHeight"), JsValue::from(vp_h as f64), Attribute::all())
+        .property(js_string!("outerWidth"), JsValue::from(vp_w as f64), Attribute::all())
+        .property(js_string!("outerHeight"), JsValue::from(vp_h as f64), Attribute::all())
+        .property(js_string!("devicePixelRatio"), JsValue::from(1.0), Attribute::all())
+        // Self-references
+        .property(js_string!("name"), JsValue::from(js_string!("")), Attribute::all())
+        .property(js_string!("length"), JsValue::from(0), Attribute::all())
+        .property(js_string!("closed"), JsValue::from(false), Attribute::all())
+        .property(js_string!("origin"), JsValue::from(js_string!(url_owned.as_str())), Attribute::all())
+        // Getters for body/head/documentElement (callable, returns element)
+        .function(body_getter, js_string!("getBody"), 0)
+        .function(head_getter, js_string!("getHead"), 0)
+        .function(document_element_getter, js_string!("getDocumentElement"), 0)
+        .build();
+
+    // window.navigator
+    let nav_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(js_string!("userAgent"), JsValue::from(js_string!(ua_owned.as_str())), Attribute::all())
+        .property(js_string!("language"), JsValue::from(js_string!("en-US")), Attribute::all())
+        .property(
+            js_string!("languages"),
+            {
+                let arr: JsValue = JsArray::from_iter(
+                    [JsValue::from(js_string!("en-US")), JsValue::from(js_string!("en"))],
+                    ctx,
+                )
+                .into();
+                arr
+            },
+            Attribute::all(),
+        )
+        .property(js_string!("platform"), JsValue::from(js_string!("MacIntel")), Attribute::all())
+        .property(js_string!("vendor"), JsValue::from(js_string!("Google Inc.")), Attribute::all())
+        .property(js_string!("appName"), JsValue::from(js_string!("Netscape")), Attribute::all())
+        .property(js_string!("appVersion"), JsValue::from(js_string!(ua_owned.as_str())), Attribute::all())
+        .build();
+
+    // window.location
+    let parsed_url = url::Url::parse(&url_owned);
+    let loc_href = url_owned.clone();
+    let loc_origin = parsed_url.as_ref().map(|u| u.origin().ascii_serialization()).unwrap_or_default();
+    let loc_protocol = parsed_url.as_ref().map(|u| u.scheme().to_string() + ":").unwrap_or_default();
+    let loc_hostname = parsed_url.as_ref().ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_default();
+    let loc_pathname = parsed_url.as_ref().ok().map(|u| u.path().to_string()).unwrap_or_default();
+
+    let location_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(js_string!("href"), JsValue::from(js_string!(loc_href.as_str())), Attribute::all())
+        .property(js_string!("origin"), JsValue::from(js_string!(loc_origin.as_str())), Attribute::all())
+        .property(js_string!("protocol"), JsValue::from(js_string!(loc_protocol.as_str())), Attribute::all())
+        .property(js_string!("hostname"), JsValue::from(js_string!(loc_hostname.as_str())), Attribute::all())
+        .property(js_string!("pathname"), JsValue::from(js_string!(loc_pathname.as_str())), Attribute::all())
+        .build();
+
+    // window.performance
+    let perf_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .function(
+            unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let ms = js_sys_helpers::now_ms();
+                    Ok(JsValue::from(ms))
+                })
+            },
+            js_string!("now"),
+            0,
+        )
+        .build();
+
+    // Build final window by combining all sub-objects
+    // Since boa 0.20 doesn't have with_object, we register properties
+    // on a fresh object that includes everything.
+    let global_doc = ctx.global_object().get(js_string!("document"), ctx).unwrap_or(JsValue::undefined());
+    let global_console = ctx.global_object().get(js_string!("console"), ctx).unwrap_or(JsValue::undefined());
+
+    let window_final = boa_engine::object::ObjectInitializer::new(ctx)
+        // Copy viewport props
+        .property(js_string!("innerWidth"), JsValue::from(vp_w as f64), Attribute::all())
+        .property(js_string!("innerHeight"), JsValue::from(vp_h as f64), Attribute::all())
+        .property(js_string!("outerWidth"), JsValue::from(vp_w as f64), Attribute::all())
+        .property(js_string!("outerHeight"), JsValue::from(vp_h as f64), Attribute::all())
+        .property(js_string!("devicePixelRatio"), JsValue::from(1.0), Attribute::all())
+        .property(js_string!("name"), JsValue::from(js_string!("")), Attribute::all())
+        .property(js_string!("length"), JsValue::from(0), Attribute::all())
+        .property(js_string!("closed"), JsValue::from(false), Attribute::all())
+        // Sub-objects
+        .property(js_string!("document"), global_doc, Attribute::all())
+        .property(js_string!("console"), global_console, Attribute::all())
+        .property(js_string!("navigator"), JsValue::from(nav_obj), Attribute::all())
+        .property(js_string!("location"), JsValue::from(location_obj), Attribute::all())
+        .property(js_string!("performance"), JsValue::from(perf_obj), Attribute::all())
+        // DOM shortcuts (as functions since boa 0.20 doesn't support
+        // adding accessors to pre-existing objects)
+        .function(body_getter, js_string!("getBody"), 0)
+        .function(head_getter, js_string!("getHead"), 0)
+        .function(document_element_getter, js_string!("getDocumentElement"), 0)
+        .build();
+
+    let _ = ctx.register_global_property(js_string!("window"), JsValue::from(window_final.clone()), Attribute::all());
+    let _ = ctx.register_global_property(js_string!("self"), JsValue::from(window_final), Attribute::all());
+}
+
+/// Simple time helper for performance.now().
+mod js_sys_helpers {
+    pub fn now_ms() -> f64 {
+        use std::time::SystemTime;
+        let duration = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        duration.as_millis() as f64
+    }
+}
+
+/// Create a minimal JS element value for body/head/documentElement.
+/// Returns a string representation since we can't use ObjectInitializer
+/// without a `&mut Context` inside closures.
+fn body_head_element_value(snapshot: &DomSnapshot, node: &DomNode) -> JsValue {
+    let tag_upper = node.tag.to_uppercase();
+    JsValue::from(js_string!(format!("[object HTML{}Element]", tag_upper).as_str()))
 }
 
 // ---------------------------------------------------------------------------
