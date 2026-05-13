@@ -44,3 +44,29 @@ Analyzed 23 Lightpanda source files covering:
 - Identified 4 missing features in OxBrowser: IP filtering, robots.txt, HTTP caching, bot auth
 - Lightpanda uses comptime generics extensively; OxBrowser uses Rust traits and generics
 - Layer middleware pattern is portable to OxBrowser for CDP interception
+
+### 2026-05-14: JS Engine & WebAPI Analysis Completed
+
+- Output: `/tmp/analysis/js-webapi.md` — 37KB comprehensive analysis
+- Analyzed 170+ source files from /tmp/lightpanda/src/browser/js/ and /tmp/lightpanda/src/browser/webapi/
+- JS Engine: 15 core files (js.zig, Platform.zig, Inspector.zig, HandleScope.zig, Origin.zig, Value.zig, Context.zig, Isolate.zig, bridge.zig, Env.zig, Caller.zig, Local.zig, TaggedOpaque.zig, Identity.zig, Snapshot.zig)
+- WebAPI: 160+ types across 84 files + subdirs (67 HTML elements, 20 event types, 10 CSS types, 7 streams, 8 crypto, XPath, CSS parser, HTML parser)
+- Supporting: interactive.zig, structured_data.zig
+
+**Key findings:**
+- V8 via custom C binding with comptime Bridge(T) generic for zero-boilerplate WebAPI registration
+- TaggedOpaque system for type-safe Zig↔V8 pointer casting with prototype chain traversal
+- Identity map ensures same DOM node always maps to same JS object (=== semantics)
+- V8 snapshot system pre-compiles FunctionTemplates for fast startup
+- Per-context MicrotaskQueue isolates microtasks between frames
+- Full ES Module system (static + dynamic imports, module cache, dependency preloading)
+- 160+ WebAPI types including full XPath 1.0, CSS tokenizer/parser, WebSocket (RFC 6455), Web Crypto
+- Interactive element scanning (5 interactivity types) and structured data extraction (JSON-LD, OpenGraph, Twitter Card) for AI agents
+- Worker support with separate JSAPI set (subset of Page APIs)
+
+**Priority for OxiBrowser:**
+1. Adopt arena-per-call pattern for nested JS callback safety
+2. Implement object identity map for DOM↔JS === consistency
+3. Build Rust bridge macro system for reduced WebAPI boilerplate
+4. Add interactive element scanning for AI-agent workflows
+5. Implement structured data extraction (JSON-LD, OpenGraph)

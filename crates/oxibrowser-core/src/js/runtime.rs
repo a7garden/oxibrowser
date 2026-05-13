@@ -1482,6 +1482,13 @@ fn register_window_globals(
     // For now, register as document_get_body() etc. and also
     // as window.document properties via a wrapper.
 
+    // --- Pre-build values that need ctx (to avoid double borrow) ---
+    let languages_arr: JsValue = JsArray::from_iter(
+        [JsValue::from(js_string!("en-US")), JsValue::from(js_string!("en"))],
+        ctx,
+    )
+    .into();
+
     // --- window object ---
     let window_obj = boa_engine::object::ObjectInitializer::new(ctx)
         // Viewport
@@ -1503,14 +1510,7 @@ fn register_window_globals(
         .property(js_string!("language"), JsValue::from(js_string!("en-US")), Attribute::all())
         .property(
             js_string!("languages"),
-            {
-                let arr: JsValue = JsArray::from_iter(
-                    [JsValue::from(js_string!("en-US")), JsValue::from(js_string!("en"))],
-                    ctx,
-                )
-                .into();
-                arr
-            },
+            languages_arr,
             Attribute::all(),
         )
         .property(js_string!("platform"), JsValue::from(js_string!("MacIntel")), Attribute::all())
