@@ -389,7 +389,10 @@ impl Drop for JsRuntime {
     fn drop(&mut self) {
         // Signal the JS thread to shut down
         let _ = self.cmd_tx.send(JsCommand::Shutdown);
-        let _ = self.resp_rx.lock().expect("resp_rx lock poisoned").recv();
+        // Best-effort: don't panic in drop if mutex is poisoned or thread is dead
+        if let Ok(guard) = self.resp_rx.lock() {
+            let _ = guard.recv();
+        }
     }
 }
 

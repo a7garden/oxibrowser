@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.82-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /usr/src/oxibrowser
 
