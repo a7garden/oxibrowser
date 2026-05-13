@@ -1596,7 +1596,7 @@ mod js_sys_helpers {
 /// Create a minimal JS element value for body/head/documentElement.
 /// Returns a string representation since we can't use ObjectInitializer
 /// without a `&mut Context` inside closures.
-fn body_head_element_value(snapshot: &DomSnapshot, node: &DomNode) -> JsValue {
+fn body_head_element_value(_snapshot: &DomSnapshot, node: &DomNode) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
     JsValue::from(js_string!(format!("[object HTML{}Element]", tag_upper).as_str()))
 }
@@ -2367,6 +2367,8 @@ mod tests {
             max_recursion: 10,
             max_loop_iterations: 50,
             max_stack_size: 256,
+            viewport_width: 1280,
+            viewport_height: 720,
         };
         let mut rt = JsRuntime::with_config(config);
 
