@@ -85,8 +85,6 @@ impl BrowserConfig {
     pub fn headless() -> Self {
         Self {
             enable_rendering: false,
-            viewport_width: 0,
-            viewport_height: 0,
             ..Self::default()
         }
     }
@@ -135,13 +133,14 @@ mod tests {
             !config.enable_rendering,
             "headless should disable rendering"
         );
+        // Headless still uses default viewport for JS globals
         assert_eq!(
-            config.viewport_width, 0,
-            "headless should have zero viewport width"
+            config.viewport_width, 1280,
+            "headless should have default viewport width"
         );
         assert_eq!(
-            config.viewport_height, 0,
-            "headless should have zero viewport height"
+            config.viewport_height, 720,
+            "headless should have default viewport height"
         );
     }
 

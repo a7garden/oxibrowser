@@ -396,7 +396,14 @@ impl Session {
     fn inject_dom_snapshot(&mut self) {
         if let Some(page) = &self.active_page {
             let snapshot = DomSnapshot::from_frame(page.root_frame());
+            let url = self
+                .current_url()
+                .map(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
             self.js_runtime.set_dom_snapshot(Some(snapshot));
+            // Update page URL for window.location
+            self.js_runtime.set_page_url(&url);
         }
     }
 

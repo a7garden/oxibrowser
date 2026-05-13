@@ -126,6 +126,8 @@ enum JsCommand {
     SetGlobal { name: String, value: Value },
     /// Update the DOM snapshot available to `document` object.
     SetDom { snapshot: Option<DomSnapshot> },
+    /// Update the page URL (for window.location).
+    SetPageUrl { url: String },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -234,7 +236,13 @@ impl JsRuntime {
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
             .spawn(move || {
-                js_thread_loop(cmd_rx, resp_tx, console_output_clone, mutations_clone, viewport);
+                js_thread_loop(
+                    cmd_rx,
+                    resp_tx,
+                    console_output_clone,
+                    mutations_clone,
+                    viewport,
+                );
             })
             .expect("failed to spawn JS thread");
 
@@ -378,6 +386,22 @@ impl JsRuntime {
             .send(JsCommand::SetDom { snapshot })
             .expect("JS thread has died");
         // Wait for ack
+        let resp = self
+            .resp_rx
+            .lock()
+            .expect("resp_rx lock poisoned")
+            .recv()
+            .expect("JS thread has died");
+        let _ = resp;
+    }
+
+    /// Update the page URL (used for window.location).
+    pub fn set_page_url(&mut self, url: &str) {
+        self.cmd_tx
+            .send(JsCommand::SetPageUrl {
+                url: url.to_string(),
+            })
+            .expect("JS thread has died");
         let resp = self
             .resp_rx
             .lock()
@@ -546,6 +570,20 @@ fn js_thread_loop(
                         Attribute::all(),
                     );
                 }
+                let _ = resp_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetPageUrl { url } => {
+                // Re-register window.location with the new URL
+                let snap = dom_snapshot.read();
+                let dom_snapshot_ref = dom_snapshot.clone();
+                drop(snap);
+                register_window_globals(
+                    &mut ctx,
+                    &dom_snapshot_ref,
+                    viewport,
+                    &url,
+                    "OxiBrowser/0.2",
+                );
                 let _ = resp_tx.send(JsResponse::Done);
             }
             JsCommand::Shutdown => {
@@ -1484,55 +1522,97 @@ fn register_window_globals(
 
     // --- Pre-build values that need ctx (to avoid double borrow) ---
     let languages_arr: JsValue = JsArray::from_iter(
-        [JsValue::from(js_string!("en-US")), JsValue::from(js_string!("en"))],
+        [
+            JsValue::from(js_string!("en-US")),
+            JsValue::from(js_string!("en")),
+        ],
         ctx,
     )
     .into();
 
-    // --- window object ---
-    let window_obj = boa_engine::object::ObjectInitializer::new(ctx)
-        // Viewport
-        .property(js_string!("innerWidth"), JsValue::from(vp_w as f64), Attribute::all())
-        .property(js_string!("innerHeight"), JsValue::from(vp_h as f64), Attribute::all())
-        .property(js_string!("outerWidth"), JsValue::from(vp_w as f64), Attribute::all())
-        .property(js_string!("outerHeight"), JsValue::from(vp_h as f64), Attribute::all())
-        .property(js_string!("devicePixelRatio"), JsValue::from(1.0), Attribute::all())
-        // Self-references
-        .property(js_string!("name"), JsValue::from(js_string!("")), Attribute::all())
-        .property(js_string!("length"), JsValue::from(0), Attribute::all())
-        .property(js_string!("closed"), JsValue::from(false), Attribute::all())
-        .property(js_string!("origin"), JsValue::from(js_string!(url_owned.as_str())), Attribute::all())
-        .build();
-
     // window.navigator
     let nav_obj = boa_engine::object::ObjectInitializer::new(ctx)
-        .property(js_string!("userAgent"), JsValue::from(js_string!(ua_owned.as_str())), Attribute::all())
-        .property(js_string!("language"), JsValue::from(js_string!("en-US")), Attribute::all())
         .property(
-            js_string!("languages"),
-            languages_arr,
+            js_string!("userAgent"),
+            JsValue::from(js_string!(ua_owned.as_str())),
             Attribute::all(),
         )
-        .property(js_string!("platform"), JsValue::from(js_string!("MacIntel")), Attribute::all())
-        .property(js_string!("vendor"), JsValue::from(js_string!("Google Inc.")), Attribute::all())
-        .property(js_string!("appName"), JsValue::from(js_string!("Netscape")), Attribute::all())
-        .property(js_string!("appVersion"), JsValue::from(js_string!(ua_owned.as_str())), Attribute::all())
+        .property(
+            js_string!("language"),
+            JsValue::from(js_string!("en-US")),
+            Attribute::all(),
+        )
+        .property(js_string!("languages"), languages_arr, Attribute::all())
+        .property(
+            js_string!("platform"),
+            JsValue::from(js_string!("MacIntel")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("vendor"),
+            JsValue::from(js_string!("Google Inc.")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("appName"),
+            JsValue::from(js_string!("Netscape")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("appVersion"),
+            JsValue::from(js_string!(ua_owned.as_str())),
+            Attribute::all(),
+        )
         .build();
 
     // window.location
     let parsed_url = url::Url::parse(&url_owned);
     let loc_href = url_owned.clone();
-    let loc_origin = parsed_url.as_ref().map(|u| u.origin().ascii_serialization()).unwrap_or_default();
-    let loc_protocol = parsed_url.as_ref().map(|u| u.scheme().to_string() + ":").unwrap_or_default();
-    let loc_hostname = parsed_url.as_ref().ok().and_then(|u| u.host_str().map(|h| h.to_string())).unwrap_or_default();
-    let loc_pathname = parsed_url.as_ref().ok().map(|u| u.path().to_string()).unwrap_or_default();
+    let loc_origin = parsed_url
+        .as_ref()
+        .map(|u| u.origin().ascii_serialization())
+        .unwrap_or_default();
+    let loc_protocol = parsed_url
+        .as_ref()
+        .map(|u| u.scheme().to_string() + ":")
+        .unwrap_or_default();
+    let loc_hostname = parsed_url
+        .as_ref()
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default();
+    let loc_pathname = parsed_url
+        .as_ref()
+        .ok()
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
 
     let location_obj = boa_engine::object::ObjectInitializer::new(ctx)
-        .property(js_string!("href"), JsValue::from(js_string!(loc_href.as_str())), Attribute::all())
-        .property(js_string!("origin"), JsValue::from(js_string!(loc_origin.as_str())), Attribute::all())
-        .property(js_string!("protocol"), JsValue::from(js_string!(loc_protocol.as_str())), Attribute::all())
-        .property(js_string!("hostname"), JsValue::from(js_string!(loc_hostname.as_str())), Attribute::all())
-        .property(js_string!("pathname"), JsValue::from(js_string!(loc_pathname.as_str())), Attribute::all())
+        .property(
+            js_string!("href"),
+            JsValue::from(js_string!(loc_href.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("origin"),
+            JsValue::from(js_string!(loc_origin.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("protocol"),
+            JsValue::from(js_string!(loc_protocol.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("hostname"),
+            JsValue::from(js_string!(loc_hostname.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("pathname"),
+            JsValue::from(js_string!(loc_pathname.as_str())),
+            Attribute::all(),
+        )
         .build();
 
     // window.performance
@@ -1552,25 +1632,67 @@ fn register_window_globals(
     // Build final window by combining all sub-objects
     // Since boa 0.20 doesn't have with_object, we register properties
     // on a fresh object that includes everything.
-    let global_doc = ctx.global_object().get(js_string!("document"), ctx).unwrap_or(JsValue::undefined());
-    let global_console = ctx.global_object().get(js_string!("console"), ctx).unwrap_or(JsValue::undefined());
+    let global_doc = ctx
+        .global_object()
+        .get(js_string!("document"), ctx)
+        .unwrap_or(JsValue::undefined());
+    let global_console = ctx
+        .global_object()
+        .get(js_string!("console"), ctx)
+        .unwrap_or(JsValue::undefined());
 
     let window_final = boa_engine::object::ObjectInitializer::new(ctx)
         // Copy viewport props
-        .property(js_string!("innerWidth"), JsValue::from(vp_w as f64), Attribute::all())
-        .property(js_string!("innerHeight"), JsValue::from(vp_h as f64), Attribute::all())
-        .property(js_string!("outerWidth"), JsValue::from(vp_w as f64), Attribute::all())
-        .property(js_string!("outerHeight"), JsValue::from(vp_h as f64), Attribute::all())
-        .property(js_string!("devicePixelRatio"), JsValue::from(1.0), Attribute::all())
-        .property(js_string!("name"), JsValue::from(js_string!("")), Attribute::all())
+        .property(
+            js_string!("innerWidth"),
+            JsValue::from(vp_w as f64),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("innerHeight"),
+            JsValue::from(vp_h as f64),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("outerWidth"),
+            JsValue::from(vp_w as f64),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("outerHeight"),
+            JsValue::from(vp_h as f64),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("devicePixelRatio"),
+            JsValue::from(1.0),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("name"),
+            JsValue::from(js_string!("")),
+            Attribute::all(),
+        )
         .property(js_string!("length"), JsValue::from(0), Attribute::all())
         .property(js_string!("closed"), JsValue::from(false), Attribute::all())
         // Sub-objects
         .property(js_string!("document"), global_doc, Attribute::all())
         .property(js_string!("console"), global_console, Attribute::all())
-        .property(js_string!("navigator"), JsValue::from(nav_obj), Attribute::all())
-        .property(js_string!("location"), JsValue::from(location_obj), Attribute::all())
-        .property(js_string!("performance"), JsValue::from(perf_obj), Attribute::all())
+        .property(
+            js_string!("navigator"),
+            JsValue::from(nav_obj),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("location"),
+            JsValue::from(location_obj),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("performance"),
+            JsValue::from(perf_obj),
+            Attribute::all(),
+        )
         // DOM shortcuts (as functions since boa 0.20 doesn't support
         // adding accessors to pre-existing objects)
         .function(body_getter, js_string!("getBody"), 0)
@@ -1578,8 +1700,16 @@ fn register_window_globals(
         .function(document_element_getter, js_string!("getDocumentElement"), 0)
         .build();
 
-    let _ = ctx.register_global_property(js_string!("window"), JsValue::from(window_final.clone()), Attribute::all());
-    let _ = ctx.register_global_property(js_string!("self"), JsValue::from(window_final), Attribute::all());
+    let _ = ctx.register_global_property(
+        js_string!("window"),
+        JsValue::from(window_final.clone()),
+        Attribute::all(),
+    );
+    let _ = ctx.register_global_property(
+        js_string!("self"),
+        JsValue::from(window_final),
+        Attribute::all(),
+    );
 }
 
 /// Simple time helper for performance.now().
@@ -1598,7 +1728,9 @@ mod js_sys_helpers {
 /// without a `&mut Context` inside closures.
 fn body_head_element_value(_snapshot: &DomSnapshot, node: &DomNode) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
-    JsValue::from(js_string!(format!("[object HTML{}Element]", tag_upper).as_str()))
+    JsValue::from(js_string!(
+        format!("[object HTML{}Element]", tag_upper).as_str()
+    ))
 }
 
 // ---------------------------------------------------------------------------
