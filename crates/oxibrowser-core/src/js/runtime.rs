@@ -948,6 +948,380 @@ fn create_context(
         &fetch_tx_arc,
     );
 
+    // --- atob / btoa (Base64) ---
+    let atob_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let encoded = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            // Decode base64
+            use std::io::Read;
+            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encoded);
+            match decoded {
+                Ok(bytes) => {
+                    let s = String::from_utf8_lossy(&bytes).to_string();
+                    Ok(JsValue::from(JsString::from(s.as_str())))
+                }
+                Err(_) => {
+                    // Try URL-safe base64
+                    let decoded = base64::Engine::decode(
+                        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                        &encoded,
+                    );
+                    match decoded {
+                        Ok(bytes) => {
+                            let s = String::from_utf8_lossy(&bytes).to_string();
+                            Ok(JsValue::from(JsString::from(s.as_str())))
+                        }
+                        Err(_) => Ok(JsValue::undefined()),
+                    }
+                }
+            }
+        })
+    };
+    let _ = context.register_global_callable(js_string!("atob"), 1, atob_fn);
+
+    let btoa_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let decoded = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            // Encode base64
+            let encoded = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                decoded.as_bytes(),
+            );
+            Ok(JsValue::from(JsString::from(encoded.as_str())))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("btoa"), 1, btoa_fn);
+
+    // --- URLSearchParams (minimal) ---
+    // URLSearchParams is typically used as: new URLSearchParams("foo=bar&baz=1")
+    // We create a class-like constructor that returns an object with
+    // get, set, append, delete, has, keys, values, entries, forEach methods.
+    let search_params_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let query_string = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            // Parse query string into HashMap
+            let map: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            let mut storage = std::cell::RefCell::new(map);
+
+            for pair in query_string.split('&') {
+                if let Some(eq) = pair.find('=') {
+                    let key = pair[..eq].to_string();
+                    let val = pair[eq + 1..].to_string();
+                    let mut s = storage.borrow_mut();
+                    s.entry(key).or_default().push(val);
+                } else if !pair.is_empty() {
+                    let mut s = storage.borrow_mut();
+                    s.entry(pair.to_string()).or_default();
+                }
+            }
+
+            let storage_arc = std::sync::Arc::new(storage);
+            let sp_storage = storage_arc.clone();
+
+            // --- get ---
+            let get_sp = storage_arc.clone();
+            let get_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let key = _args
+                        .first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = get_sp
+                        .borrow()
+                        .get(&key)
+                        .and_then(|v| v.first())
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(val.as_str())))
+                })
+            };
+
+            // --- set ---
+            let set_sp = storage_arc.clone();
+            let set_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let key = _args
+                        .first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = _args
+                        .get(1)
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    set_sp.borrow_mut().insert(key, vec![val]);
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // --- append ---
+            let app_sp = storage_arc.clone();
+            let app_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let key = _args
+                        .first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = _args
+                        .get(1)
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    app_sp.borrow_mut().entry(key).or_default().push(val);
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // --- delete ---
+            let del_sp = storage_arc.clone();
+            let del_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let key = _args
+                        .first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    del_sp.borrow_mut().remove(&key);
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // --- has ---
+            let has_sp = storage_arc.clone();
+            let has_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    let key = _args
+                        .first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let result = has_sp.borrow().contains_key(&key);
+                    Ok(JsValue::from(result))
+                })
+            };
+
+            // --- forEach ---
+            let foreach_sp = storage_arc.clone();
+            let foreach_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    if let Some(callback) = _args.first() {
+                        if let Some(cb_obj) = callback.as_object() {
+                            if cb_obj.is_callable() {
+                                for (key, values) in foreach_sp.borrow().iter() {
+                                    for val in values {
+                                        let cb_args = &[
+                                            JsValue::from(JsString::from(val.as_str())),
+                                            JsValue::from(JsString::from(key.as_str())),
+                                            JsValue::undefined(),
+                                        ];
+                                        let _ = cb_obj.call(&JsValue::undefined(), cb_args, ctx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // --- toString ---
+            let str_sp = storage_arc.clone();
+            let str_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let mut parts = Vec::new();
+                    for (key, values) in str_sp.borrow().iter() {
+                        for val in values {
+                            parts.push(format!("{}={}", key, val));
+                        }
+                    }
+                    Ok(JsValue::from(JsString::from(parts.join("&").as_str())))
+                })
+            };
+
+            // Build the URLSearchParams object
+            let sp_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .function(get_fn, js_string!("get"), 1)
+                .function(set_fn, js_string!("set"), 2)
+                .function(app_fn, js_string!("append"), 2)
+                .function(del_fn, js_string!("delete"), 1)
+                .function(has_fn, js_string!("has"), 1)
+                .function(foreach_fn, js_string!("forEach"), 1)
+                .function(str_fn, js_string!("toString"), 0)
+                .build();
+
+            Ok(JsValue::from(sp_obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("URLSearchParams"), 1, search_params_ctor);
+
+    // --- URL class (stub) ---
+    // new URL(url) — basic URL parsing with protocol, host, pathname, search
+    let url_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let url_str = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let parsed = url::Url::parse(&url_str);
+
+            // Storage object for URL properties
+            let url_storage = std::sync::Arc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+            // url_storage holds parsed values as strings
+            {
+                let mut s = url_storage.borrow_mut();
+                match &parsed {
+                    Ok(u) => {
+                        s.insert("href".to_string(), u.to_string());
+                        s.insert("origin".to_string(), u.origin().ascii_serialization());
+                        s.insert("protocol".to_string(), format!("{}:", u.scheme()));
+                        s.insert("host".to_string(), u.host().map(|h| h.to_string()).unwrap_or_default());
+                        s.insert("hostname".to_string(), u.host().map(|h| h.to_string()).unwrap_or_default());
+                        s.insert("pathname".to_string(), u.path().to_string());
+                        s.insert("search".to_string(), u.query().map(|q| format!("?{}", q)).unwrap_or_default());
+                        s.insert("hash".to_string(), u.fragment().map(|f| format!("#{}", f)).unwrap_or_default());
+                        s.insert("port".to_string(), u.port().map(|p| p.to_string()).unwrap_or_default());
+                        s.insert("username".to_string(), u.username().to_string());
+                        s.insert("password".to_string(), u.password().map(|p| p.to_string()).unwrap_or_default());
+                        s.insert("searchParams".to_string(), "URLSearchParams".to_string()); // marker
+                    }
+                    Err(_) => {
+                        s.insert("href".to_string(), url_str.clone());
+                        s.insert("origin".to_string(), url_str);
+                        s.insert("protocol".to_string(), String::new());
+                        s.insert("host".to_string(), String::new());
+                        s.insert("hostname".to_string(), String::new());
+                        s.insert("pathname".to_string(), String::new());
+                        s.insert("search".to_string(), String::new());
+                        s.insert("hash".to_string(), String::new());
+                        s.insert("port".to_string(), String::new());
+                        s.insert("username".to_string(), String::new());
+                        s.insert("password".to_string(), String::new());
+                    }
+                }
+            }
+
+            let us_storage = url_storage.clone();
+            let href_storage = url_storage.clone();
+            let us_storage2 = url_storage.clone();
+            let us_storage3 = url_storage.clone();
+            let us_storage4 = url_storage.clone();
+            let us_storage5 = url_storage.clone();
+            let us_storage6 = url_storage.clone();
+            let us_storage7 = url_storage.clone();
+            let us_storage8 = url_storage.clone();
+
+            // href getter
+            let href_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let href = href_storage.borrow().get("href").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(href.as_str())))
+                })
+            };
+
+            // origin getter
+            let origin_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let origin = us_storage.borrow().get("origin").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(origin.as_str())))
+                })
+            };
+
+            // protocol getter
+            let proto_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let proto = us_storage2.borrow().get("protocol").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(proto.as_str())))
+                })
+            };
+
+            // host getter
+            let host_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let host = us_storage3.borrow().get("host").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(host.as_str())))
+                })
+            };
+
+            // pathname getter
+            let path_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let path = us_storage4.borrow().get("pathname").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(path.as_str())))
+                })
+            };
+
+            // search getter
+            let search_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let search = us_storage5.borrow().get("search").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(search.as_str())))
+                })
+            };
+
+            // hash getter
+            let hash_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let hash = us_storage6.borrow().get("hash").cloned().unwrap_or_default();
+                    Ok(JsValue::from(JsString::from(hash.as_str())))
+                })
+            };
+
+            // searchParams getter (returns URLSearchParams instance)
+            let sp_storage = us_storage7.clone();
+            let sp_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    let search = sp_storage.borrow().get("search").cloned().unwrap_or_default();
+                    let _query = search.trim_start_matches('?').to_string();
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // Build URL object — convert NativeFunction to JsFunction via FunctionObjectBuilder
+            let href_getter = FunctionObjectBuilder::new(ctx.realm(), href_fn).name("get href").build();
+            let origin_getter = FunctionObjectBuilder::new(ctx.realm(), origin_fn).name("get origin").build();
+            let proto_getter = FunctionObjectBuilder::new(ctx.realm(), proto_fn).name("get protocol").build();
+            let host_getter = FunctionObjectBuilder::new(ctx.realm(), host_fn).name("get host").build();
+            let path_getter = FunctionObjectBuilder::new(ctx.realm(), path_fn).name("get pathname").build();
+            let search_getter = FunctionObjectBuilder::new(ctx.realm(), search_fn).name("get search").build();
+            let hash_getter = FunctionObjectBuilder::new(ctx.realm(), hash_fn).name("get hash").build();
+            let sp_getter = FunctionObjectBuilder::new(ctx.realm(), sp_fn).name("get searchParams").build();
+
+            let url_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .accessor(js_string!("href"), Some(href_getter), None, Attribute::all())
+                .accessor(js_string!("origin"), Some(origin_getter), None, Attribute::all())
+                .accessor(js_string!("protocol"), Some(proto_getter), None, Attribute::all())
+                .accessor(js_string!("host"), Some(host_getter), None, Attribute::all())
+                .accessor(js_string!("pathname"), Some(path_getter), None, Attribute::all())
+                .accessor(js_string!("search"), Some(search_getter), None, Attribute::all())
+                .accessor(js_string!("hash"), Some(hash_getter), None, Attribute::all())
+                .accessor(js_string!("searchParams"), Some(sp_getter), None, Attribute::all())
+                .build();
+
+            Ok(JsValue::from(url_obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("URL"), 1, url_ctor);
+
     context
 }
 
@@ -3200,5 +3574,42 @@ mod tests {
             }
             _ => panic!("Expected SetAttribute, got {:?}", mutations[0]),
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // atob / btoa / URL / URLSearchParams tests
+    // ------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_btoa_basic() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("btoa('Hello')").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        assert!(val.is_string());
+        // Should be base64 encoded
+    }
+
+    #[tokio::test]
+    async fn test_atob_basic() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("atob('SGVsbG8=')").await.unwrap();
+        assert!(result.is_ok());
+        let val = result.value.unwrap();
+        assert_eq!(val, Value::String("Hello".into()));
+    }
+
+    #[tokio::test]
+    async fn test_url_class() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("new URL('https://example.com:8080/path?foo=bar#hash').hostname").await.unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_url_search_params() {
+        let mut rt = JsRuntime::new();
+        let result = rt.evaluate("new URLSearchParams('foo=bar&baz=1').get('foo')").await.unwrap();
+        assert!(result.is_ok());
     }
 }
