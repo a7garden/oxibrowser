@@ -754,3 +754,146 @@ async fn test_full_workflow_connect_navigate_inspect_close() {
 
     cdp_server.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Input domain tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_input_dispatch_key_event() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let _ = send_command(&mut sink, &mut ws, 1, "Page.enable", None).await;
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Input.dispatchKeyEvent", Some(json!({
+        "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 0
+    }))).await;
+    assert_eq!(resp["id"], 2);
+
+    let resp = send_command(&mut sink, &mut ws, 3, "Input.dispatchKeyEvent", Some(json!({
+        "type": "keyUp", "key": "a", "code": "KeyA"
+    }))).await;
+    assert_eq!(resp["id"], 3);
+
+    let resp = send_command(&mut sink, &mut ws, 4, "Input.insertText", Some(json!({"text": "hello"}))).await;
+    assert_eq!(resp["id"], 4);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_input_dispatch_mouse_event() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let resp = send_command(&mut sink, &mut ws, 1, "Input.dispatchMouseEvent", Some(json!({
+        "type": "mouseMoved", "x": 100.0, "y": 200.0, "button": "none", "clickCount": 0
+    }))).await;
+    assert_eq!(resp["id"], 1);
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Input.dispatchMouseEvent", Some(json!({
+        "type": "mousePressed", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
+    }))).await;
+    assert_eq!(resp["id"], 2);
+
+    let resp = send_command(&mut sink, &mut ws, 3, "Input.dispatchMouseEvent", Some(json!({
+        "type": "mouseReleased", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
+    }))).await;
+    assert_eq!(resp["id"], 3);
+
+    server.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Network cookie tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_network_get_all_cookies() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let resp = send_command(&mut sink, &mut ws, 1, "Network.getAllCookies", None).await;
+    assert_eq!(resp["id"], 1);
+    assert!(resp["result"]["cookies"].is_array());
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_network_set_cookie() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let resp = send_command(&mut sink, &mut ws, 1, "Network.setCookie", Some(json!({
+        "name": "session_id", "value": "abc123", "url": "http://example.com/", "path": "/", "secure": false
+    }))).await;
+    assert_eq!(resp["id"], 1);
+    assert_eq!(resp["result"]["success"], true);
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Network.getAllCookies", None).await;
+    let cookies = resp["result"]["cookies"].as_array().unwrap();
+    assert!(!cookies.is_empty());
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_network_delete_cookies() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let _ = send_command(&mut sink, &mut ws, 1, "Network.setCookie", Some(json!({
+        "name": "temp_key", "value": "temp_val", "url": "http://example.com/"
+    }))).await;
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Network.deleteCookies", Some(json!({
+        "name": "temp_key", "url": "http://example.com/"
+    }))).await;
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"]["success"], true);
+
+    server.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Fetch domain tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_fetch_fulfill_request() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let resp = send_command(&mut sink, &mut ws, 1, "Fetch.enable", Some(json!({
+        "patterns": [{"urlPattern": "*"}]
+    }))).await;
+    assert_eq!(resp["id"], 1);
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.fulfillRequest", Some(json!({
+        "requestId": "test-123", "statusCode": 200, "statusText": "OK",
+        "body": "<html><body>Mocked!</body></html>",
+        "responseHeaders": [{"name": "Content-Type", "value": "text/html"}]
+    }))).await;
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"]["responseCode"], 200);
+
+    let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_fetch_continue_request() {
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let _ = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.continueRequest", Some(json!({
+        "requestId": "req-1", "url": "http://example.com/"
+    }))).await;
+    assert_eq!(resp["id"], 2);
+
+    server.shutdown();
+}
