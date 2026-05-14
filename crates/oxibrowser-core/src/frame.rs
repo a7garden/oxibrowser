@@ -134,6 +134,11 @@ impl Frame {
         self.document.to_markdown()
     }
 
+    /// Convert the frame to a DomSnapshot for JS rendering and CSS text output.
+    pub fn to_dom_snapshot(&self) -> crate::js::dom_snapshot::DomSnapshot {
+        crate::js::dom_snapshot::DomSnapshot::from_frame(self)
+    }
+
     /// Query the DOM using a CSS selector (basic).
     pub fn query_selector(&self, selector: &str) -> Option<NodeId> {
         self.document.query_selector(selector)

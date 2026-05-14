@@ -122,6 +122,12 @@ impl Page {
         self.root_frame.to_markdown()
     }
 
+    /// Render the page as text/ASCII art for terminal output.
+    pub fn to_text_screenshot(&self) -> String {
+        let snapshot = self.root_frame.to_dom_snapshot();
+        crate::css::render_to_text(&snapshot)
+    }
+
     /// Get the page ID.
     pub fn id(&self) -> PageId {
         self.id
