@@ -1523,13 +1523,115 @@ fn register_document_object(
         })
     };
 
-    // EventTarget noop methods for document
-    let doc_add_event_listener_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
-    let doc_remove_event_listener_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
-    let doc_dispatch_event_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(true))) };
+    // EventTarget methods for document — uses __listeners property on the document object
+    let doc_add_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let callback = args.get(1).cloned().unwrap_or(JsValue::undefined());
+
+            if callback.is_undefined() || callback.is_null() {
+                return Ok(JsValue::undefined());
+            }
+
+            let this_obj = match _this.as_object() {
+                Some(o) => o,
+                None => return Ok(JsValue::undefined()),
+            };
+
+            // Get or create __listeners object
+            let listeners_val = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            // Create __listeners if missing
+            if listeners_val.as_object().is_none() {
+                let obj = boa_engine::object::ObjectInitializer::new(ctx).build();
+                let _ = this_obj.set(js_string!("__listeners"), JsValue::from(obj), true, ctx);
+            }
+            let lv2 = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let listeners_obj = match lv2.as_object() {
+                Some(o) => o,
+                None => return Ok(JsValue::undefined()),
+            };
+
+            // Ensure array for this event type
+            let arr_key = JsString::from(event_type.as_str());
+            let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
+            if ev.as_object().is_none() {
+                let a: JsValue = JsArray::new(ctx).into();
+                let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
+            }
+            let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
+            if let Some(arr_obj) = arr_val.as_object() {
+                if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
+                    let _ = arr.push(callback, ctx);
+                }
+            }
+
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let doc_remove_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            if let Some(this_obj) = _this.as_object() {
+                if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
+                    if let Some(l_obj) = l_val.as_object() {
+                        let _ = l_obj.set(JsString::from(event_type.as_str()), JsValue::Null, true, ctx);
+                    }
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let doc_dispatch_event_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event = args.first().cloned().unwrap_or(JsValue::undefined());
+
+            let event_type = if let Some(evt_obj) = event.as_object() {
+                evt_obj.get(js_string!("type"), ctx).ok()
+                    .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                    .unwrap_or_default()
+            } else if let Some(s) = event.as_string() {
+                s.to_std_string_escaped()
+            } else {
+                return Ok(JsValue::from(true));
+            };
+
+            if let Some(this_obj) = _this.as_object() {
+                if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
+                    if let Some(l_obj) = l_val.as_object() {
+                        let arr_val = l_obj.get(JsString::from(event_type.as_str()), ctx).unwrap_or(JsValue::Null);
+                        if let Some(arr_obj) = arr_val.as_object() {
+                            if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
+                                if let Ok(len) = arr.length(ctx) {
+                                    for i in 0..len {
+                                        if let Ok(cb) = arr.at(i as i64, ctx) {
+                                            if let Some(cb_obj) = cb.as_object() {
+                                                if cb_obj.is_callable() {
+                                                    let _ = cb_obj.call(_this, &[event.clone()], ctx);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(JsValue::from(true))
+        })
+    };
 
     // document.body / document.head / document.documentElement getters
     let dom_snap_body = dom_snapshot.clone();
@@ -1719,17 +1821,125 @@ fn create_element_object(
         })
     };
 
-    // addEventListener — noop (event system not yet implemented)
-    let add_event_listener_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    // addEventListener — stores callback by event type on the JS object itself.
+    // We use a hidden `__listeners` property: { "click": [fn1, fn2], "DOMContentLoaded": [fn3] }
+    let add_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let callback = args.get(1).cloned().unwrap_or(JsValue::undefined());
 
-    // removeEventListener — noop
-    let remove_event_listener_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+            if callback.is_undefined() || callback.is_null() {
+                return Ok(JsValue::undefined());
+            }
 
-    // dispatchEvent — noop (returns true)
-    let dispatch_event_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(true))) };
+            let this_obj = match _this.as_object() {
+                Some(o) => o,
+                None => return Ok(JsValue::undefined()),
+            };
+            // Ensure __listeners exists
+            let lv = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            if lv.as_object().is_none() {
+                let obj = boa_engine::object::ObjectInitializer::new(ctx).build();
+                let _ = this_obj.set(js_string!("__listeners"), JsValue::from(obj), true, ctx);
+            }
+            let listeners_val2 = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let listeners_obj = match listeners_val2.as_object() {
+                Some(o) => o,
+                None => return Ok(JsValue::undefined()),
+            };
+            // Ensure array for this event type
+            let arr_key = JsString::from(event_type.as_str());
+            let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
+            if ev.as_object().is_none() {
+                let a: JsValue = JsArray::new(ctx).into();
+                let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
+            }
+            let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
+            if let Some(arr_obj) = arr_val.as_object() {
+                if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
+                    let _ = arr.push(callback, ctx);
+                }
+            }
+
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // removeEventListener — removes callback from __listeners
+    let remove_event_listener_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let _callback = args.get(1);
+
+            let this_obj = _this.as_object().unwrap();
+            let listeners = this_obj.get(js_string!("__listeners"), ctx);
+            if let Ok(l_val) = listeners {
+                if let Some(l_obj) = l_val.as_object() {
+                    let _ = l_obj.set(JsString::from(event_type.as_str()), JsValue::Null, true, ctx);
+                }
+            }
+
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // dispatchEvent — calls all registered callbacks for the event type
+    let dispatch_event_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event = args.first().cloned().unwrap_or(JsValue::undefined());
+
+            // Get event type from the event object or use empty string
+            let event_type = if let Some(evt_obj) = event.as_object() {
+                evt_obj
+                    .get(js_string!("type"), ctx)
+                    .ok()
+                    .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                    .unwrap_or_default()
+            } else if let Some(s) = event.as_string() {
+                s.to_std_string_escaped()
+            } else {
+                return Ok(JsValue::from(true));
+            };
+
+            let this_obj = _this.as_object().unwrap();
+            let listeners = this_obj.get(js_string!("__listeners"), ctx);
+            if let Ok(l_val) = listeners {
+                if let Some(l_obj) = l_val.as_object() {
+                    let arr_val = l_obj.get(JsString::from(event_type.as_str()), ctx).unwrap_or(JsValue::Null);
+                    if let Some(arr_obj) = arr_val.as_object() {
+                        if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
+                            if let Ok(len) = arr.length(ctx) {
+                                for i in 0..len {
+                                    if let Ok(cb) = arr.at(i as i64, ctx) {
+                                        if let Some(cb_obj) = cb.as_object() {
+                                            if cb_obj.is_callable() {
+                                                let evt_arg = event.clone();
+                                                let _ = cb_obj.call(
+                                                    _this,
+                                                    &[evt_arg],
+                                                    ctx,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(JsValue::from(true))
+        })
+    };
 
     // click() → records DomMutation::ClickElement
     let node_id_click = node.id;
@@ -2164,6 +2374,108 @@ fn register_local_storage(
         local_storage_obj,
         Attribute::all(),
     );
+
+    // --- sessionStorage object ---
+    //
+    // Identical to localStorage but separate storage (same origin, different storage area).
+    // In a real browser, localStorage persists and sessionStorage is per-tab.
+    // For our implementation, both use an empty HashMap (synced from Session).
+    let empty_session = std::collections::HashMap::new();
+    register_storage_obj(ctx, js_string!("sessionStorage"), empty_session);
+}
+
+/// Register a Storage interface object (localStorage / sessionStorage pattern).
+///
+/// Creates a JS object with getItem/setItem/removeItem/clear/key/length methods,
+/// backed by a RefCell<HashMap<String, String>>.
+fn register_storage_obj(
+    ctx: &mut Context,
+    name: boa_engine::JsString,
+    storage: std::collections::HashMap<String, String>,
+) {
+    use std::cell::RefCell;
+    let storage_arc = Arc::new(RefCell::new(storage));
+
+    // getItem
+    let get_s = storage_arc.clone();
+    let get_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            let key = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            match get_s.borrow().get(&key).cloned() {
+                Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+
+    // setItem
+    let set_s = storage_arc.clone();
+    let set_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if args.len() >= 2 {
+                let key = args[0].to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                let val = args[1].to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                set_s.borrow_mut().insert(key, val);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // removeItem
+    let rem_s = storage_arc.clone();
+    let remove_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if let Some(k) = args.first() {
+                let key = k.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                rem_s.borrow_mut().remove(&key);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // clear
+    let clr_s = storage_arc.clone();
+    let clear_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+            clr_s.borrow_mut().clear();
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // key
+    let key_s = storage_arc.clone();
+    let key_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if let Some(idx_arg) = args.first() {
+                let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
+                let keys: Vec<_> = key_s.borrow().keys().cloned().collect();
+                match keys.get(idx) {
+                    Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
+                    None => Ok(JsValue::null()),
+                }
+            } else {
+                Ok(JsValue::null())
+            }
+        })
+    };
+
+    // length (computed via getter property)
+    let len_s = storage_arc.clone();
+    // Use a data property instead of a getter for length (avoids move conflict)
+    let storage_len = storage_arc.borrow().len() as i32;
+    let storage_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .function(get_item_fn, js_string!("getItem"), 1)
+        .function(set_item_fn, js_string!("setItem"), 2)
+        .function(remove_item_fn, js_string!("removeItem"), 1)
+        .function(clear_fn, js_string!("clear"), 0)
+        .function(key_fn, js_string!("key"), 1)
+        .property(js_string!("length"), JsValue::from(storage_len), Attribute::all())
+        .build();
+
+    let _ = ctx.register_global_property(name, storage_obj, Attribute::all());
 }
 
 // ---------------------------------------------------------------------------
