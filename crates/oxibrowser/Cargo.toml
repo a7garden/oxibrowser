@@ -23,3 +23,9 @@ clap = { version = "4", features = ["derive"] }
 
 oxibrowser-core = { workspace = true }
 oxibrowser-cdp = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }

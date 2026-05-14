@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-05-13
+
+### Added
+- **CSS text screenshot**: `page.to_text_screenshot()` — ASCII/Unicode DOM rendering with block element tags, indentation, BR/HR/IMG handling
+- **document.write()**: Appends HTML content as text node to body
+- **MutationObserver**: Constructor with `observe()`, `disconnect()`, `takeRecords()` stubs
+- **Puppeteer smoke tests**: 3 E2E tests verifying Puppeteer/Playwright CDP compatibility (built-in HTTP server, WebSocket client, process spawning)
+
+### Tests
+- 205 tests pass (152 core + 3 smoke + 22 E2E + 18 webapi + 10 event)
+- 9 integration tests (real websites, `--ignored` flag)
+
+
 ## [0.4.0] - 2025-05-13
 
 ### Added
