@@ -37,6 +37,7 @@ use serde_json::Value;
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -515,7 +516,7 @@ fn js_thread_loop(
         viewport,
         "",
         "OxiBrowser/0.2",
-        &&fetch_tx_arc,
+        &fetch_tx_arc,
     );
 
     while let Ok(cmd) = cmd_rx.recv() {
@@ -680,7 +681,10 @@ fn create_context(
     user_agent: &str,
     fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
 ) -> Context {
-    let mut context = Context::default();
+    let mut context = Context::builder()
+        .job_queue(Rc::new(TokioJobQueue::new()))
+        .build()
+        .expect("failed to build boa Engine context");
 
     // --- Console functions ---
 
@@ -842,7 +846,7 @@ fn create_context(
         viewport,
         page_url,
         user_agent,
-        &&fetch_tx_arc,
+        &fetch_tx_arc,
     );
 
     context
