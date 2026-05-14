@@ -1,11 +1,33 @@
 # Session B: CDP + Performance (P0.4 + P1.1 + P3 전체)
 
-> **브랜치**: `feat/cdp-perf`
-> **기준 커밋**: `b94dd2c` (main)
+# Session B: CDP + Performance (P0.4 + P1.1 + P3 전체)
+
+> **워크트리**: `session-b-cdp-perf` (절대 경로: `/Volumes/MERCURY/PROJECTS/session-b-cdp-perf`)
+> **기준 커밋**: `4f5f303` (main)
 > **수정 파일**: `fetch.rs`, `page.rs`, `event.rs` (CDP crate), `Cargo.toml`, `core_bench.rs`
 > **금지 파일**: `crates/oxibrowser-core/src/js/runtime.rs`, `crates/oxibrowser-core/src/session.rs`, `crates/oxibrowser-core/src/frame.rs`
 
 ---
+
+## 워크트리 설정
+
+이 세션은 별도 워크트리에서 실행됩니다:
+
+```bash
+# (메인 디렉토리에서 실행)
+cd /Volumes/MERCURY/PROJECTS/oxibrowser
+git worktree add ../session-b-cdp-perf -b feat/cdp-perf 4f5f303
+cd /Volumes/MERCURY/PROJECTS/session-b-cdp-perf
+
+# 작업 완료 후 메인으로 병합
+cd /Volumes/MERCURY/PROJECTS/oxibrowser
+git merge feat/cdp-perf --no-ff -m "feat: v0.5 CDP + performance (P0.4 + P1.1 + P3)"
+git worktree remove ../session-b-cdp-perf
+git branch -d feat/cdp-perf
+```
+
+**워크트리隔绝**: 두 세션의 파일 수정 범위가 완전히 분리되어 있으므로
+동시 편집 시 충돌 불가. 모든 빌드/테스트는 워크트리 내에서 독립적으로 실행.
 
 ## 컨텍스트
 
