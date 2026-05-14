@@ -2,32 +2,25 @@
 
 # Session A: Web Platform (P0.1 + P2 전체)
 
-> **워크트리**: `session-a-web-platform` (절대 경로: `/Volumes/MERCURY/PROJECTS/session-a-web-platform`)
-> **기준 커밋**: `4f5f303` (main)
-> **수정 파일**: `runtime.rs`, `session.rs`, `frame.rs`
-> **금지 파일**: `crates/oxibrowser-cdp/**`, `Cargo.toml` (root), `benches/`
+> **워크트리 경로**: `/Volumes/MERCURY/PROJECTS/session-a-web-platform`
 
 ---
 
-## 워크트리 설정
+## 🚀 시작: 워크트리 생성 + 코드 실행
 
-이 세션은 별도 워크트리에서 실행됩니다:
+**메인 pi에서 이 명령 먼저 실행하고, 작업 디렉토리를 바꿔라:**
 
 ```bash
-# (메인 디렉토리에서 실행)
 cd /Volumes/MERCURY/PROJECTS/oxibrowser
-git worktree add ../session-a-web-platform -b feat/web-platform 4f5f303
+git worktree add ../session-a-web-platform -b feat/web-platform HEAD
 cd /Volumes/MERCURY/PROJECTS/session-a-web-platform
-
-# 작업 완료 후 메인으로 병합
-cd /Volumes/MERCURY/PROJECTS/oxibrowser
-git merge feat/web-platform --no-ff -m "feat: v0.5 web platform (P0.1 + P2.1-4)"
-git worktree remove ../session-a-web-platform
-git branch -d feat/web-platform
 ```
 
-**워크트리隔绝**: 두 세션의 파일 수정 범위가 완전히 분리되어 있으므로
-동시 편집 시 충돌 불가. 모든 빌드/테스트는 워크트리 내에서 독립적으로 실행.
+**이후 모든 작업은 `/Volumes/MERCURY/PROJECTS/session-a-web-platform` 에서 수행한다.**
+
+---
+
+## 나머지 내용 그대로...
 
 ## 컨텍스트
 
