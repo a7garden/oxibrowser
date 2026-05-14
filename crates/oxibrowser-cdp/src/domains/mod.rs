@@ -10,6 +10,7 @@ pub mod browser;
 pub mod dom;
 pub mod fetch;
 pub mod network;
+pub mod oxi;
 pub mod page;
 pub mod runtime;
 pub mod target;
@@ -55,6 +56,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "DOM" => dom::handle(method_name, params, ctx).await,
         "Fetch" => fetch::handle(method_name, params, ctx).await,
         "Network" => network::handle(method_name, params, ctx).await,
+        "OXI" => oxi::handle(method_name, params, ctx),
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
         "Target" => target::handle(method_name, params),

@@ -1879,6 +1879,7 @@ dependencies = [
  "markup5ever",
  "oxibrowser-webapi",
  "parking_lot",
+ "pollster",
  "reqwest",
  "serde",
  "serde_json",

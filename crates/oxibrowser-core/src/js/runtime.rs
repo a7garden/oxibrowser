@@ -36,6 +36,7 @@ use serde_json::Value;
 
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
+use crate::js::job_queue::TokioJobQueue;
 
 // ---------------------------------------------------------------------------
 // Public types
