@@ -1322,6 +1322,121 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("URL"), 1, url_ctor);
 
+    // --- crypto.getRandomValues ---
+    let get_random_values_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let arr = args.first().cloned().unwrap_or(JsValue::undefined());
+            if let Some(arr_obj) = arr.as_object() {
+                if let Ok(js_arr) = JsArray::from_object(arr_obj.clone()) {
+                    if let Ok(len) = js_arr.length(ctx) {
+                        for i in 0..len.min(65536) {
+                            let val = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u8).wrapping_add(i as u8);
+                            let _ = js_arr.set(i, JsValue::from(val), true, ctx);
+                        }
+                    }
+                }
+            }
+            Ok(arr)
+        })
+    };
+    let crypto_obj = boa_engine::object::ObjectInitializer::new(&mut context)
+        .function(get_random_values_fn, js_string!("getRandomValues"), 1)
+        .build();
+    let _ = context.register_global_property(
+        js_string!("crypto"),
+        JsValue::from(crypto_obj),
+        Attribute::all(),
+    );
+
+    // --- TextEncoder ---
+    let te_encode_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let input = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let bytes = input.as_bytes();
+            let arr = JsArray::new(ctx);
+            for &b in bytes {
+                let _ = arr.push(JsValue::from(b), ctx);
+            }
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("encoding"), JsValue::from(JsString::from("utf-8")), Attribute::all())
+.build();
+            // Return Uint8Array-like object
+            let result = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("buffer"), JsValue::from(arr.clone()), Attribute::all())
+                .build();
+            Ok(JsValue::from(result))
+        })
+    };
+    // Avoid recursive closure — use a simpler approach
+    let te_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let encode_fn = unsafe {
+                NativeFunction::from_closure(move |_this2, args2, ctx2| {
+                    let input = args2
+                        .first()
+                        .and_then(|v| v.to_string(ctx2).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let bytes = input.as_bytes();
+                    let arr = JsArray::new(ctx2);
+                    for &b in bytes {
+                        let _ = arr.push(JsValue::from(b), ctx2);
+                    }
+                    Ok(JsValue::from(arr))
+                })
+            };
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("encoding"), JsValue::from(JsString::from("utf-8")), Attribute::all())
+                .function(encode_fn, js_string!("encode"), 1)
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("TextEncoder"), 0, te_ctor);
+
+    // --- TextDecoder ---
+    let td_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let decode_fn = unsafe {
+                NativeFunction::from_closure(move |_this2, args2, ctx2| {
+                    // Decode buffer/array back to string
+                    let input = args2.first().cloned().unwrap_or(JsValue::undefined());
+                    if let Some(arr_obj) = input.as_object() {
+                        if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
+                            if let Ok(len) = arr.length(ctx2) {
+                                let mut bytes = Vec::with_capacity(len as usize);
+                                for i in 0..len {
+                                    if let Ok(v) = arr.at(i as i64, ctx2) {
+                                        if let Some(n) = v.as_number() {
+                                            bytes.push(n as u8);
+                                        }
+                                    }
+                                }
+                                let s = String::from_utf8_lossy(&bytes).to_string();
+                                return Ok(JsValue::from(JsString::from(s.as_str())));
+                            }
+                        }
+                    }
+                    Ok(JsValue::from(JsString::from("")))
+                })
+            };
+            let encoding = args
+                .first()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_else(|| "utf-8".to_string());
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("encoding"), JsValue::from(JsString::from(encoding.as_str())), Attribute::all())
+                .function(decode_fn, js_string!("decode"), 1)
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("TextDecoder"), 0, td_ctor);
+
     context
 }
 
