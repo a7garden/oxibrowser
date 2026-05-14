@@ -33,6 +33,7 @@ use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
+use base64::Engine;
 
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
@@ -958,7 +959,7 @@ fn create_context(
                 .unwrap_or_default();
             // Decode base64
             use std::io::Read;
-            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encoded);
+            let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded);
             match decoded {
                 Ok(bytes) => {
                     let s = String::from_utf8_lossy(&bytes).to_string();
@@ -966,10 +967,7 @@ fn create_context(
                 }
                 Err(_) => {
                     // Try URL-safe base64
-                    let decoded = base64::Engine::decode(
-                        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                        &encoded,
-                    );
+                    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&encoded);
                     match decoded {
                         Ok(bytes) => {
                             let s = String::from_utf8_lossy(&bytes).to_string();
@@ -991,10 +989,7 @@ fn create_context(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             // Encode base64
-            let encoded = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                decoded.as_bytes(),
-            );
+            let encoded = base64::engine::general_purpose::STANDARD.encode(decoded.as_bytes());
             Ok(JsValue::from(JsString::from(encoded.as_str())))
         })
     };
@@ -1512,6 +1507,7 @@ fn register_document_object(
                             node,
                             ctx,
                             &mutations_capture_qs,
+                            &dom_capture_qs,
                         ));
                     }
                 }
@@ -1538,7 +1534,7 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_qsa)
+                            create_element_object(snapshot, node, ctx, &mutations_capture_qsa, &dom_capture_qsa)
                         })
                     })
                     .collect();
@@ -1570,6 +1566,7 @@ fn register_document_object(
                             node,
                             ctx,
                             &mutations_capture_gbi,
+                            &dom_capture_gbi,
                         ));
                     }
                 }
@@ -1596,7 +1593,7 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_gtn)
+                            create_element_object(snapshot, node, ctx, &mutations_capture_gtn, &dom_capture_gtn)
                         })
                     })
                     .collect();
@@ -1626,7 +1623,7 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_gcn)
+                            create_element_object(snapshot, node, ctx, &mutations_capture_gcn, &dom_capture_gcn)
                         })
                     })
                     .collect();
@@ -1750,6 +1747,7 @@ fn register_document_object(
 
     // document.body / document.head / document.documentElement getters
     let dom_snap_body = dom_snapshot.clone();
+    let dom_snap_body_clone = dom_snapshot.clone();
     let body_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
@@ -1758,7 +1756,7 @@ fn register_document_object(
                 if let Some(ref s) = *snap {
                     if let Some(bid) = s.body_id {
                         if let Some(node) = s.nodes.get(&bid) {
-                            return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                            return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_body_clone));
                         }
                     }
                 }
@@ -1771,6 +1769,7 @@ fn register_document_object(
     };
 
     let dom_snap_head = dom_snapshot.clone();
+    let dom_snap_head_clone = dom_snapshot.clone();
     let head_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
@@ -1779,7 +1778,7 @@ fn register_document_object(
                 if let Some(ref s) = *snap {
                     if let Some(hid) = s.head_id {
                         if let Some(node) = s.nodes.get(&hid) {
-                            return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                            return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_head_clone));
                         }
                     }
                 }
@@ -1792,6 +1791,7 @@ fn register_document_object(
     };
 
     let dom_snap_de = dom_snapshot.clone();
+    let dom_snap_de_clone = dom_snapshot.clone();
     let document_element_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
@@ -1812,7 +1812,7 @@ fn register_document_object(
                         })
                     });
                     if let Some((_, node)) = html_node {
-                        return Ok(create_element_object(s, node, ctx, &mutations_clone));
+                        return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_de));
                     }
                 }
                 Ok(JsValue::null())
@@ -2087,6 +2087,7 @@ fn create_element_object(
     node: &DomNode,
     ctx: &mut Context,
     mutations: &Arc<RwLock<Vec<DomMutation>>>,
+    dom_snapshot_arc: &Arc<RwLock<Option<DomSnapshot>>>,
 ) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
     let id_val = node.attributes.get("id").map(|s| s.as_str()).unwrap_or("");
@@ -2287,6 +2288,68 @@ fn create_element_object(
         })
     };
 
+    // appendChild — update DomSnapshot parent/child relationships
+    let node_id_ac = node.id;
+    let dom_snap_ac = dom_snapshot_arc.clone();
+    let mutations_ac = mutations.clone();
+    let append_child_obj_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let child = args.first().cloned().unwrap_or(JsValue::undefined());
+            let child_id = child.as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+
+            if let Some(cid) = child_id {
+                let mut dom = dom_snap_ac.write();
+                if let Some(ref mut snap) = *dom {
+                    if let Some(parent) = snap.nodes.get_mut(&node_id_ac) {
+                        if !parent.children.contains(&cid) {
+                            parent.children.push(cid);
+                        }
+                    }
+                    if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                        child_node.parent = Some(node_id_ac);
+                    }
+                }
+                mutations_ac.write().push(DomMutation::AppendChild {
+                    parent_id: node_id_ac,
+                    child_id: cid,
+                });
+            }
+            Ok(child)
+        })
+    };
+
+    // removeChild — remove child from parent
+    let node_id_rc = node.id;
+    let dom_snap_rc = dom_snapshot_arc.clone();
+    let mutations_rc = mutations.clone();
+    let remove_child_obj_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let child = args.first().cloned().unwrap_or(JsValue::undefined());
+            let child_id = child.as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+
+            if let Some(cid) = child_id {
+                let mut dom = dom_snap_rc.write();
+                if let Some(ref mut snap) = *dom {
+                    if let Some(parent) = snap.nodes.get_mut(&node_id_rc) {
+                        parent.children.retain(|&id| id != cid);
+                    }
+                    if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                        child_node.parent = None;
+                    }
+                }
+                mutations_rc.write().push(DomMutation::RemoveChild {
+                    parent_id: node_id_rc,
+                    child_id: cid,
+                });
+            }
+            Ok(child)
+        })
+    };
+
     // value getter
     let value_val = node
         .attributes
@@ -2442,6 +2505,9 @@ fn create_element_object(
         .function(dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .function(click_fn, js_string!("click"), 0)
         .function(set_attribute_fn, js_string!("setAttribute"), 2)
+        .function(append_child_obj_fn, js_string!("appendChild"), 1)
+        .function(remove_child_obj_fn, js_string!("removeChild"), 1)
+        .property(js_string!("__nodeId"), JsValue::from(node.id), Attribute::all())
         .accessor(
             js_string!("value"),
             Some(value_getter_fn),
@@ -2863,7 +2929,7 @@ fn register_window_globals(
             if let Some(ref s) = *snap {
                 if let Some(bid) = s.body_id {
                     if let Some(node) = s.nodes.get(&bid) {
-                        return Ok(create_element_object(s, node, ctx, &mutations_body));
+                        return Ok(create_element_object(s, node, ctx, &mutations_body, &snap_body));
                     }
                 }
             }
@@ -2879,7 +2945,7 @@ fn register_window_globals(
             if let Some(ref s) = *snap {
                 if let Some(hid) = s.head_id {
                     if let Some(node) = s.nodes.get(&hid) {
-                        return Ok(create_element_object(s, node, ctx, &mutations_head));
+                        return Ok(create_element_object(s, node, ctx, &mutations_head, &snap_head));
                     }
                 }
             }
@@ -2905,7 +2971,7 @@ fn register_window_globals(
                     })
                 });
                 if let Some((_, node)) = html_node {
-                    return Ok(create_element_object(s, node, ctx, &mutations_de));
+                    return Ok(create_element_object(s, node, ctx, &mutations_de, &snap_de));
                 }
             }
             Ok(JsValue::null())
