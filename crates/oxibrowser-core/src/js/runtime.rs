@@ -2252,6 +2252,61 @@ fn register_document_object(
             .build()
     };
 
+    // === document.write() ===
+    let dw_snap = dom_snapshot.clone();
+    let dw_mut = mutations.clone();
+    let doc_write_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let html = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if html.is_empty() {
+                return Ok(JsValue::undefined());
+            }
+
+            // Parse HTML fragment into text nodes and append to body
+            let mut dom = dw_snap.write();
+            if let Some(ref mut snap) = *dom {
+                let body_id = match snap.body_id {
+                    Some(id) => id,
+                    None => return Ok(JsValue::undefined()),
+                };
+
+                // Generate a new node ID
+                let max_id = snap.nodes.keys().max().copied().unwrap_or(0);
+                let new_id = max_id + 1;
+
+                // Create a text node with the raw HTML content
+                // (Full HTML fragment parsing requires html5ever tree builder —
+                //  for now, insert as a single text node)
+                let node = DomNode {
+                    id: new_id,
+                    tag: String::new(),
+                    attributes: HashMap::new(),
+                    text_content: html.clone(),
+                    children: Vec::new(),
+                    parent: Some(body_id),
+                    node_type: 3, // TEXT_NODE
+                };
+                snap.nodes.insert(new_id, node);
+
+                // Append to body's children
+                if let Some(body) = snap.nodes.get_mut(&body_id) {
+                    body.children.push(new_id);
+                }
+
+                dw_mut.write().push(DomMutation::AppendChild {
+                    parent_id: body_id,
+                    child_id: new_id,
+                });
+            }
+
+            Ok(JsValue::undefined())
+        })
+    };
+
     // === DOM Mutation: createElement ===
     let dom_snap_ce = dom_snapshot.clone();
     let mutations_ce = mutations.clone();
@@ -2486,6 +2541,7 @@ fn register_document_object(
         .function(doc_dispatch_event_fn, js_string!("dispatchEvent"), 1)
         .function(create_element_fn, js_string!("createElement"), 1)
         .function(create_text_node_fn, js_string!("createTextNode"), 1)
+        .function(doc_write_fn, js_string!("write"), 1)
         // DOM tree accessors
         .accessor(
             js_string!("body"),
