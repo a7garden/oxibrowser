@@ -749,7 +749,7 @@ fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
 
             // Re-schedule interval timers
             if timer.is_interval {
-                let interval_ms = timer.interval_ms.unwrap_or(0);
+                let interval_ms = timer.interval_ms.unwrap_or(0).max(1);
                 let deadline = Instant::now() + Duration::from_millis(interval_ms);
                 queue.schedule_timer(
                     deadline,
@@ -836,46 +836,83 @@ fn create_context(
 
     let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
 
-    // --- Timer functions (synchronous emulation) ---
+    // --- Timer functions (scheduled via TokioJobQueue) ---
     //
-    // setTimeout(fn, delay, ...args) — callback is invoked immediately (no event loop).
-    // setInterval(fn, delay)        — same: executes once immediately.
-    // clearTimeout / clearInterval   — no-ops.
+    // setTimeout(fn, delay, ...args) — schedules callback via schedule_timer().
+    //   The callback fires on the next timer drain (after eval returns).
+    // setInterval(fn, delay)        — same, but re-schedules after each firing.
+    // clearTimeout / clearInterval   — cancels the timer by ID.
 
+    let timer_queue_st = job_queue.clone();
     let set_timeout_fn = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
             if args.is_empty() {
                 return Ok(JsValue::undefined());
             }
-            let callback = &args[0];
-            if let Some(func) = callback.as_object() {
+            let callback = args[0].clone();
+            let delay_ms = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .unwrap_or(0.0) as u64;
+            let cb_args: Vec<JsValue> = args[2..].to_vec();
+
+            if let Some(func) = callback.as_object().cloned() {
                 if func.is_callable() {
-                    let cb_args = &args[2..]; // args after (fn, delay)
-                    let _ = func.call(&JsValue::undefined(), cb_args, ctx);
+                    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+                    let id = timer_queue_st.schedule_timer(
+                        deadline,
+                        func,
+                        cb_args,
+                        false,
+                        None,
+                    );
+                    return Ok(JsValue::from(id as f64));
                 }
             }
-            Ok(JsValue::from(1)) // timer id (simplified)
+            Ok(JsValue::undefined())
         })
     };
 
+    let timer_queue_si = job_queue.clone();
     let set_interval_fn = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
             if args.is_empty() {
                 return Ok(JsValue::undefined());
             }
-            let callback = &args[0];
-            if let Some(func) = callback.as_object() {
+            let callback = args[0].clone();
+            let delay_ms = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .unwrap_or(0.0) as u64;
+            let cb_args: Vec<JsValue> = args[2..].to_vec();
+
+            if let Some(func) = callback.as_object().cloned() {
                 if func.is_callable() {
-                    let cb_args = &args[2..];
-                    let _ = func.call(&JsValue::undefined(), cb_args, ctx);
+                    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+                    let id = timer_queue_si.schedule_timer(
+                        deadline,
+                        func,
+                        cb_args,
+                        true,
+                        Some(delay_ms),
+                    );
+                    return Ok(JsValue::from(id as f64));
                 }
             }
-            Ok(JsValue::from(1))
+            Ok(JsValue::undefined())
         })
     };
 
+    let timer_queue_ct = job_queue.clone();
     let clear_timer_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+        unsafe {
+            NativeFunction::from_closure(move |_this, args, _ctx| {
+                if let Some(id) = args.first().and_then(|v| v.as_number()) {
+                    timer_queue_ct.cancel_timer(id as u64);
+                }
+                Ok(JsValue::undefined())
+            })
+        };
 
     let _ = context.register_global_callable(js_string!("setTimeout"), 2, set_timeout_fn);
     let _ = context.register_global_callable(js_string!("setInterval"), 2, set_interval_fn);
@@ -1053,6 +1090,279 @@ fn create_context(
     };
 
     let _ = context.register_global_callable(js_string!("fetch"), 2, fetch_fn);
+
+    // --- XMLHttpRequest ---
+    let xhr_fetch_tx = fetch_tx_arc.clone();
+    let xhr_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let open_method: Arc<RwLock<String>> = Arc::new(RwLock::new("GET".to_string()));
+            let open_url: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
+            let open_async: Arc<RwLock<bool>> = Arc::new(RwLock::new(true));
+            let ready_state: Arc<RwLock<f64>> = Arc::new(RwLock::new(0.0)); // UNSENT
+            let status_val: Arc<RwLock<f64>> = Arc::new(RwLock::new(0.0));
+            let response_text: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
+            let response_headers: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
+
+            // Event handler callbacks
+            let onload_cb: Arc<RwLock<Option<JsValue>>> = Arc::new(RwLock::new(None));
+            let onerror_cb: Arc<RwLock<Option<JsValue>>> = Arc::new(RwLock::new(None));
+            let onreadystatechange_cb: Arc<RwLock<Option<JsValue>>> = Arc::new(RwLock::new(None));
+
+            // onload setter
+            let onload_set = onload_cb.clone();
+            let onload_setter = unsafe {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
+                    if let Some(v) = args.first() {
+                        *onload_set.write() = Some(v.clone());
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let onload_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onload_setter)
+                .name(js_string!("set onload")).build();
+
+            // onerror setter
+            let onerror_set = onerror_cb.clone();
+            let onerror_setter = unsafe {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
+                    if let Some(v) = args.first() {
+                        *onerror_set.write() = Some(v.clone());
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let onerror_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onerror_setter)
+                .name(js_string!("set onerror")).build();
+
+            // onreadystatechange setter
+            let onrsc_set = onreadystatechange_cb.clone();
+            let onrsc_setter = unsafe {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
+                    if let Some(v) = args.first() {
+                        *onrsc_set.write() = Some(v.clone());
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let onrsc_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onrsc_setter)
+                .name(js_string!("set onreadystatechange")).build();
+
+            // .open(method, url, async)
+            let om = open_method.clone();
+            let ou = open_url.clone();
+            let oa = open_async.clone();
+            let rs = ready_state.clone();
+            let open_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let method = args.first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let url = args.get(1)
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let async_flag = args.get(2)
+                        .and_then(|v| v.as_boolean())
+                        .unwrap_or(true);
+                    *om.write() = method;
+                    *ou.write() = url;
+                    *oa.write() = async_flag;
+                    *rs.write() = 1.0; // OPENED
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // .send(body?)
+            let send_method = open_method.clone();
+            let send_url = open_url.clone();
+            let send_async = open_async.clone();
+            let send_rs = ready_state.clone();
+            let send_status = status_val.clone();
+            let send_resp = response_text.clone();
+            let send_hdrs = response_headers.clone();
+            let send_onload = onload_cb.clone();
+            let send_onerror = onerror_cb.clone();
+            let send_onrsc = onreadystatechange_cb.clone();
+            let send_tx = xhr_fetch_tx.clone();
+            let send_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let body = args.first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped());
+                    let method = send_method.read().clone();
+                    let url = send_url.read().clone();
+                    let is_async = *send_async.read();
+
+                    *send_rs.write() = 2.0; // HEADERS_RECEIVED
+
+                    let tx_guard = send_tx.read();
+                    if let Some(ref tx) = *tx_guard {
+                        let (response_tx, response_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+                        let request = FetchRequestMsg {
+                            url: url.clone(),
+                            method: method.clone(),
+                            headers: Vec::new(),
+                            body,
+                            response_tx,
+                        };
+                        if tx.send(request).is_ok() {
+                            match response_rx.recv() {
+                                Ok(resp) => {
+                                    *send_rs.write() = 3.0; // LOADING
+                                    *send_status.write() = resp.status as f64;
+                                    *send_resp.write() = resp.body.clone();
+                                    // Parse response headers
+                                    let mut hdr_str = String::new();
+                                    for (k, v) in &resp.headers {
+                                        hdr_str.push_str(&format!("{}: {}\r\n", k, v));
+                                    }
+                                    *send_hdrs.write() = hdr_str;
+                                    *send_rs.write() = 4.0; // DONE
+
+                                    if resp.error.is_none() {
+                                        // Fire onload
+                                        if let Some(ref cb) = *send_onload.read() {
+                                            if let Some(cb_obj) = cb.as_object() {
+                                                if cb_obj.is_callable() {
+                                                    let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        if let Some(ref cb) = *send_onerror.read() {
+                                            if let Some(cb_obj) = cb.as_object() {
+                                                if cb_obj.is_callable() {
+                                                    let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Fire onreadystatechange
+                                    if let Some(ref cb) = *send_onrsc.read() {
+                                        if let Some(cb_obj) = cb.as_object() {
+                                            if cb_obj.is_callable() {
+                                                let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    *send_rs.write() = 4.0;
+                                    *send_status.write() = 0.0;
+                                }
+                            }
+                        }
+                    }
+
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // .setRequestHeader(name, value) — noop for now
+            let set_req_header_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // .getResponseHeader(name)
+            let get_hdr_rs = response_headers.clone();
+            let get_header_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let name = args.first()
+                        .and_then(|v| v.to_string(ctx).ok())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let hdrs = get_hdr_rs.read();
+                    for line in hdrs.lines() {
+                        if let Some(eq) = line.find(':') {
+                            let key = line[..eq].trim();
+                            if key.eq_ignore_ascii_case(&name) {
+                                return Ok(JsValue::from(JsString::from(line[eq+1..].trim())));
+                            }
+                        }
+                    }
+                    Ok(JsValue::null())
+                })
+            };
+
+            // .abort() — reset state
+            let abort_rs = ready_state.clone();
+            let abort_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    *abort_rs.write() = 0.0;
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // Build object
+            let rs_clone = ready_state.clone();
+            let rs_getter = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(JsValue::from(*rs_clone.read()))
+                })
+            };
+            let rs_getter_fn = FunctionObjectBuilder::new(ctx.realm(), rs_getter)
+                .name(js_string!("get readyState")).build();
+
+            let st_clone = status_val.clone();
+            let st_getter = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(JsValue::from(*st_clone.read()))
+                })
+            };
+            let st_getter_fn = FunctionObjectBuilder::new(ctx.realm(), st_getter)
+                .name(js_string!("get status")).build();
+
+            let rt_clone = response_text.clone();
+            let rt_getter = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(JsValue::from(JsString::from(rt_clone.read().as_str())))
+                })
+            };
+            let rt_getter_fn = FunctionObjectBuilder::new(ctx.realm(), rt_getter)
+                .name(js_string!("get responseText")).build();
+
+            let ol_clone = onload_cb.clone();
+            let ol_getter = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(ol_clone.read().clone().unwrap_or(JsValue::null()))
+                })
+            };
+            let ol_getter_fn = FunctionObjectBuilder::new(ctx.realm(), ol_getter)
+                .name(js_string!("get onload")).build();
+
+            let oe_clone = onerror_cb.clone();
+            let oe_getter = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    Ok(oe_clone.read().clone().unwrap_or(JsValue::null()))
+                })
+            };
+            let oe_getter_fn = FunctionObjectBuilder::new(ctx.realm(), oe_getter)
+                .name(js_string!("get onerror")).build();
+
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .accessor(js_string!("readyState"), Some(rs_getter_fn), None, Attribute::all())
+                .accessor(js_string!("status"), Some(st_getter_fn), None, Attribute::all())
+                .accessor(js_string!("responseText"), Some(rt_getter_fn), None, Attribute::all())
+                .accessor(js_string!("onload"), Some(ol_getter_fn), Some(onload_setter_fn), Attribute::all())
+                .accessor(js_string!("onerror"), Some(oe_getter_fn), Some(onerror_setter_fn), Attribute::all())
+                .accessor(js_string!("onreadystatechange"), None, Some(onrsc_setter_fn), Attribute::all())
+                .property(js_string!("responseType"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("timeout"), JsValue::from(0), Attribute::all())
+                .property(js_string!("withCredentials"), JsValue::from(false), Attribute::all())
+                .function(open_fn, js_string!("open"), 3)
+                .function(send_fn, js_string!("send"), 1)
+                .function(set_req_header_fn, js_string!("setRequestHeader"), 2)
+                .function(get_header_fn, js_string!("getResponseHeader"), 1)
+                .function(abort_fn, js_string!("abort"), 0)
+                .build();
+
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("XMLHttpRequest"), 0, xhr_ctor);
 
     // --- Document object ---
 
@@ -4128,10 +4438,12 @@ mod tests {
     #[tokio::test]
     async fn test_set_timeout() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("let x = 0; setTimeout(() => { x = 42; }, 100); x")
+        // setTimeout schedules the callback; it fires during timer drain after eval.
+        rt.evaluate("let x = 0; setTimeout(() => { x = 42; }, 0)")
             .await
             .unwrap();
+        // Verify on the next evaluate() that x was set by the timer callback.
+        let result = rt.evaluate("x").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(42.into())));
     }
@@ -4139,10 +4451,10 @@ mod tests {
     #[tokio::test]
     async fn test_set_timeout_with_args() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("let r; setTimeout((a, b) => { r = a + b; }, 0, 3, 4); r")
+        rt.evaluate("let r; setTimeout((a, b) => { r = a + b; }, 0, 3, 4)")
             .await
             .unwrap();
+        let result = rt.evaluate("r").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(7.into())));
     }
@@ -4150,35 +4462,35 @@ mod tests {
     #[tokio::test]
     async fn test_set_interval_executes_once() {
         let mut rt = JsRuntime::new();
-        // setInterval also executes immediately in our sync model
-        let result = rt
-            .evaluate("let c = 0; setInterval(() => { c++; }, 100); c")
+        // setInterval fires once during timer drain, then re-schedules
+        rt.evaluate("let c = 0; setInterval(() => { c++; }, 0)")
             .await
             .unwrap();
+        let result = rt.evaluate("c").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value, Some(Value::Number(1.into())));
     }
 
     #[tokio::test]
-    async fn test_clear_timeout_noop() {
+    async fn test_clear_timeout_cancels_timer() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("clearTimeout(1); clearTimeout(999); 'ok'")
+        rt.evaluate("let x = 0; let id = setTimeout(() => { x = 99; }, 0); clearTimeout(id)")
             .await
             .unwrap();
+        let result = rt.evaluate("x").await.unwrap();
         assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("ok".into())));
+        assert_eq!(result.value, Some(Value::Number(0.into())));
     }
 
     #[tokio::test]
-    async fn test_clear_interval_noop() {
+    async fn test_clear_interval_cancels_timer() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("clearInterval(1); clearInterval(99); 'done'")
+        rt.evaluate("let c = 0; let id = setInterval(() => { c++; }, 0); clearInterval(id)")
             .await
             .unwrap();
+        let result = rt.evaluate("c").await.unwrap();
         assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::String("done".into())));
+        assert_eq!(result.value, Some(Value::Number(0.into())));
     }
 
     #[tokio::test]
