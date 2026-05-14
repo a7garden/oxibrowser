@@ -21,8 +21,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 
-oxibrowser-core = { workspace = true }
-oxibrowser-cdp = { workspace = true }
+oxibrowser-core = "0.6.0"
+oxibrowser-cdp = "0.6.0"
 
 [dev-dependencies]
 futures = { workspace = true }
