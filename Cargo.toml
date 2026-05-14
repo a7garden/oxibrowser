@@ -20,61 +20,34 @@ categories = ["web-programming", "parser-implementations"]
 rust-version = "1.82"
 
 [workspace.dependencies]
-# Async
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
-
-# JavaScript engine
-boa_engine = "0.20"
-boa_gc = "0.20"
-
-# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Error handling
 anyhow = "1"
 thiserror = "2"
-
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
-# WebSocket
 tokio-tungstenite = "0.26"
-
-# Image
 image = "0.25"
-
-# URL
 url = "2"
-
-# DOM / HTML parsing (from servo ecosystem)
 html5ever = "0.29"
 markup5ever = "0.14"
 string_cache = "0.8"
-
-# Logging / tracing
 log = "0.4"
-
-# Encoding
 encoding_rs = "0.8"
-
-# Utilities
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
+boa_engine = "0.20"
+boa_gc = "0.20"
 
-# Internal crates
-oxibrowser-core = { path = "crates/oxibrowser-core" }
-oxibrowser-cdp = { path = "crates/oxibrowser-cdp" }
-oxibrowser-webapi = { path = "crates/oxibrowser-webapi" }
+[workspace.metadata.release]
+version = "0.6.0"
