@@ -243,7 +243,7 @@ impl JsRuntime {
                     console_output_clone,
                     mutations_clone,
                     viewport,
-                    local_storage.clone(),
+                    None,
                 );
             })
             .expect("failed to spawn JS thread");
@@ -445,8 +445,10 @@ fn js_thread_loop(
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
-    mut local_storage: Arc<RwLock<HashMap<String, String>>>,
+    fetch_tx: Option<std::sync::mpsc::Sender<()>>,
 ) {
+    let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>> =
+        Arc::new(RwLock::new(None));
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
     let mut ctx = create_context(
         &console_output,
@@ -455,7 +457,7 @@ fn js_thread_loop(
         viewport,
         "",
         "OxiBrowser/0.2",
-        &local_storage,
+        &fetch_tx_arc,
     );
 
     while let Ok(cmd) = cmd_rx.recv() {
@@ -503,7 +505,7 @@ fn js_thread_loop(
                         viewport,
                         "",
                         "OxiBrowser/0.2",
-                        &local_storage,
+                        &fetch_tx_arc,
                     );
                     let _ = resp_tx.send(JsResponse::EvalResult {
                         value: None,
@@ -589,7 +591,7 @@ fn js_thread_loop(
                     viewport,
                     &url,
                     "OxiBrowser/0.2",
-                    &local_storage,
+                    &fetch_tx_arc,
                 );
                 let _ = resp_tx.send(JsResponse::Done);
             }
@@ -610,7 +612,7 @@ fn create_context(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
-    local_storage: &Arc<RwLock<HashMap<String, String>>>,
+    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>>,
 ) -> Context {
     let mut context = Context::default();
 
@@ -774,7 +776,7 @@ fn create_context(
         viewport,
         page_url,
         user_agent,
-        &local_storage,
+        fetch_tx_arc,
     );
 
     context
@@ -1557,8 +1559,9 @@ fn register_window_globals(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
-    local_storage: &Arc<RwLock<HashMap<String, String>>>,
+    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>>,
 ) {
+    let _ = fetch_tx_arc; // suppress unused warning
     let url_owned = page_url.to_string();
     let ua_owned = user_agent.to_string();
     let (vp_w, vp_h) = viewport;
