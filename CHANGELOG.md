@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-05-13
+
+### Added
+- **DOM Mutation**: `document.createElement(tag)`, `document.createTextNode(text)`, `element.appendChild(child)`, `element.removeChild(child)` — full DOM mutation with `DomSnapshot` sync
+- **fetch Response**: `.text()` → `Promise<string>`, `.json()` → `Promise<object>`, `headers` object, `bodyUsed`, `type` properties
+- **XMLHttpRequest**: Constructor with `.open()`, `.send()`, `.setRequestHeader()`, `.getResponseHeader()`, `.abort()`, `onload`/`onerror`/`onreadystatechange` callbacks
+- **Real-world integration tests**: `createElement` on real page, window globals verification
+
+### Changed
+- **Clippy**: Zero warnings across entire workspace (was 48+)
+- **fetch Response**: Body serialization via `serde_json` (no more string injection bugs)
+
+### Tests
+- 201 tests pass (151 core + 22 E2E + 18 webapi + 10 event)
+- 9 integration tests (real websites, `--ignored` flag required)
+
+## [0.3.0] - 2025-05-13
+
+### Added
+- **Logs to stderr**: `tracing_subscriber` now writes to stderr, stdout is clean data output
+- **window global**: `navigator`, `location`, `performance`, `viewport`, `crypto` properties
+- **document.body/head/documentElement**: Real DOM elements as JS objects
+- **Real fetch()**: Channel-based JS↔HttpClient bridge with `FetchRequestMsg`/`FetchResponseMsg`
+- **localStorage**: Full Storage interface (getItem/setItem/removeItem/clear/key/length)
+- **atob/btoa**: Base64 encode/decode via `base64` crate
+- **URLSearchParams**: Constructor with get/set/append/delete/has/forEach/toString
+- **URL class**: Constructor with `url::Url` parsing and accessor getters
+- **crypto.getRandomValues**: Pseudo-random byte generation
+- **TextEncoder/TextDecoder**: UTF-8 encode/decode
+- **EventTarget**: Real `addEventListener`/`removeEventListener`/`dispatchEvent` on document and elements
+- **CDP Network cookies**: `getAllCookies`, `getCookies`, `setCookie`, `deleteCookies` with full CRUD
+- **CDP Fetch domain**: Full implementation with event interception pattern
+
+### Tests
+- 194→201 tests
+
 ## [0.2.0] - 2025-05-13
 
 ### Added
