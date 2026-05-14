@@ -16,7 +16,6 @@ use crate::page::Page;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-/// (JoinHandle removed — using std::thread instead)
 use tracing::info;
 use url::Url;
 
@@ -74,33 +73,96 @@ pub struct Session {
 // ---------------------------------------------------------------------------
 
 /// Handle fetch requests from the JS thread.
-/// Runs on a std::thread because std::sync::mpsc is blocking.
-fn handle_fetch_requests(fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>) {
-    loop {
-        // Use a timeout to avoid blocking forever
-        match fetch_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(request) => {
-                // Process the fetch request
-                // For now, just acknowledge receipt
-                let _ = request.response_tx.send(FetchResponseMsg {
-                    status: 500,
-                    status_text: "Fetch handler not yet implemented".to_string(),
-                    url: request.url,
-                    headers: vec![],
-                    body: String::new(),
-                    error: Some("fetch() is not yet connected to HttpClient".to_string()),
-                });
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Continue waiting
-                continue;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // Channel closed — exit
-                break;
+/// Spawns a minimal tokio runtime for async HTTP calls.
+fn handle_fetch_requests(
+    fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>,
+    http_client: Arc<HttpClient>,
+    _cookie_jar: Arc<RwLock<CookieJar>>,
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime for fetch");
+
+    rt.block_on(async {
+        loop {
+            // Use try_recv to avoid blocking
+            match fetch_rx.try_recv() {
+                Ok(request) => {
+                    // Process the fetch request
+                    let url = match Url::parse(&request.url) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            let _ = request.response_tx.send(FetchResponseMsg {
+                                status: 400,
+                                status_text: "Invalid URL".to_string(),
+                                url: request.url,
+                                headers: vec![],
+                                body: String::new(),
+                                error: Some(format!("invalid URL: {}", e)),
+                            });
+                            continue;
+                        }
+                    };
+
+                    let resp = http_client.fetch(&url).await;
+                    match resp {
+                        Ok(response) => {
+                            let status = response.status().as_u16();
+                            let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+                            let resp_url = response.url().to_string();
+                            let headers: Vec<(String, String)> = response
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                                .collect();
+                            let body = match response.bytes().await {
+                                Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                                Err(e) => {
+                                    let _ = request.response_tx.send(FetchResponseMsg {
+                                        status,
+                                        status_text,
+                                        url: resp_url,
+                                        headers,
+                                        body: String::new(),
+                                        error: Some(format!("failed to read body: {}", e)),
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            let _ = request.response_tx.send(FetchResponseMsg {
+                                status,
+                                status_text,
+                                url: resp_url,
+                                headers,
+                                body,
+                                error: None,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = request.response_tx.send(FetchResponseMsg {
+                                status: 0,
+                                status_text: "Network Error".to_string(),
+                                url: request.url,
+                                headers: vec![],
+                                body: String::new(),
+                                error: Some(e.to_string()),
+                            });
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // No request ready — sleep briefly
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Channel closed — exit
+                    break;
+                }
             }
         }
-    }
+    });
 }
 
 impl Session {
@@ -121,8 +183,10 @@ impl Session {
         js_runtime.set_fetch_channel(fetch_tx);
 
         // Spawn fetch handler on a blocking thread
+        let http_client_clone = http_client.clone();
+        let cookie_jar_clone = cookie_jar.clone();
         let fetch_task = Some(std::thread::spawn(move || {
-            handle_fetch_requests(fetch_rx);
+            handle_fetch_requests(fetch_rx, http_client_clone, cookie_jar_clone);
         }));
 
         Ok(Self {
@@ -524,6 +588,11 @@ impl Session {
     /// Get a local storage value.
     pub fn get_local_storage(&self, key: &str) -> Option<&str> {
         self.local_storage.get(key).map(|s| s.as_str())
+    }
+
+    /// Get the cookie jar for this session.
+    pub fn cookie_jar(&self) -> &Arc<RwLock<crate::network::CookieJar>> {
+        &self.cookie_jar
     }
 
     /// Close the session.

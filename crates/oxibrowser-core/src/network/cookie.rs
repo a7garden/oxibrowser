@@ -138,6 +138,30 @@ impl CookieJar {
         self.cookies.is_empty()
     }
 
+    /// Get all cookies as a flat Vec (all domains merged).
+    pub fn get_all(&self) -> Vec<CookieEntry> {
+        self.cookies.values().flatten().cloned().collect()
+    }
+
+    /// Remove cookies matching name for a given URL.
+    pub fn remove(&mut self, url: &Url, name: &str) {
+        for cookies in self.cookies.values_mut() {
+            cookies.retain(|c| {
+                if c.name != name {
+                    return true;
+                }
+                if let (Some(dom), Some(cdom)) = (&c.domain, url.domain()) {
+                    if !dom.starts_with('.') && dom != cdom {
+                        return true;
+                    }
+                }
+                false
+            });
+        }
+        // Clean up empty domain entries
+        self.cookies.retain(|_, v| !v.is_empty());
+    }
+
     /// Save cookies to a JSON file.
     pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(self)
