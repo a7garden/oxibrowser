@@ -233,6 +233,7 @@ impl JsRuntime {
         let console_output_clone = console_output.clone();
         let mutations_clone = mutations.clone();
         let viewport = (config.viewport_width, config.viewport_height);
+        let local_storage = Arc::new(RwLock::new(HashMap::<String, String>::new()));
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
             .spawn(move || {
@@ -242,6 +243,7 @@ impl JsRuntime {
                     console_output_clone,
                     mutations_clone,
                     viewport,
+                    local_storage.clone(),
                 );
             })
             .expect("failed to spawn JS thread");
@@ -443,6 +445,7 @@ fn js_thread_loop(
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
+    mut local_storage: Arc<RwLock<HashMap<String, String>>>,
 ) {
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
     let mut ctx = create_context(
@@ -452,6 +455,7 @@ fn js_thread_loop(
         viewport,
         "",
         "OxiBrowser/0.2",
+        &local_storage,
     );
 
     while let Ok(cmd) = cmd_rx.recv() {
@@ -499,6 +503,7 @@ fn js_thread_loop(
                         viewport,
                         "",
                         "OxiBrowser/0.2",
+                        &local_storage,
                     );
                     let _ = resp_tx.send(JsResponse::EvalResult {
                         value: None,
@@ -584,6 +589,7 @@ fn js_thread_loop(
                     viewport,
                     &url,
                     "OxiBrowser/0.2",
+                    &local_storage,
                 );
                 let _ = resp_tx.send(JsResponse::Done);
             }
@@ -604,6 +610,7 @@ fn create_context(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
+    local_storage: &Arc<RwLock<HashMap<String, String>>>,
 ) -> Context {
     let mut context = Context::default();
 
@@ -767,6 +774,7 @@ fn create_context(
         viewport,
         page_url,
         user_agent,
+        &local_storage,
     );
 
     context
@@ -1549,6 +1557,7 @@ fn register_window_globals(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
+    local_storage: &Arc<RwLock<HashMap<String, String>>>,
 ) {
     let url_owned = page_url.to_string();
     let ua_owned = user_agent.to_string();
