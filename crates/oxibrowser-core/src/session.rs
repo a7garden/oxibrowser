@@ -253,6 +253,12 @@ impl Session {
 
         let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
 
+        // Store the response body for Network.getResponseBody
+        if !html.is_empty() {
+            let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
+            self.store_response_body(&request_id, html.clone(), &ct_header);
+        }
+
         // Create a new page for this navigation
         let page = Page::from_html(parsed.clone(), &html, status, ct_header).await?;
 
