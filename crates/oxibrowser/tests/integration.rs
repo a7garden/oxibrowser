@@ -168,3 +168,63 @@ async fn test_encoding_meta_charset() {
 
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_js_create_element_on_real_page() {
+    let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+    let session = browser.new_page("https://example.com").await.unwrap();
+
+    // Create element and append to body via JS
+    let result = {
+        let mut guard = session.write().await;
+        guard
+            .evaluate_js(
+                "const div = document.createElement('div'); \
+                 div.id = 'test-div'; \
+                 document.body.appendChild(div); \
+                 document.getElementById('test-div') !== null ? 'ok' : 'fail'",
+            )
+            .await
+            .unwrap()
+    };
+    assert!(result.is_ok());
+    if let Some(val) = &result.value {
+        let s = val.as_str().unwrap_or("");
+        assert_eq!(s, "ok", "createElement + appendChild should work, got: {s}");
+    }
+
+    drop(session);
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_js_window_globals_on_real_page() {
+    let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+    let session = browser.new_page("https://example.com").await.unwrap();
+
+    // Test window, navigator, location, crypto exist
+    let result = {
+        let mut guard = session.write().await;
+        guard
+            .evaluate_js(
+                "typeof window === 'object' && \
+                 typeof navigator === 'object' && \
+                 typeof location === 'object' && \
+                 typeof crypto === 'object' && \
+                 typeof atob === 'function' && \
+                 typeof btoa === 'function' ? 'ok' : 'fail'",
+            )
+            .await
+            .unwrap()
+    };
+    assert!(result.is_ok());
+    if let Some(val) = &result.value {
+        let s = val.as_str().unwrap_or("");
+        assert_eq!(s, "ok", "window globals should exist, got: {s}");
+    }
+
+    drop(session);
+    browser.close().await.unwrap();
+}
