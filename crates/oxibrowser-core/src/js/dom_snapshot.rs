@@ -31,6 +31,31 @@ pub enum DomMutation {
     ClickElement { node_id: u32 },
     /// Input text into a form element.
     InputElement { node_id: u32, value: String },
+    /// Create a new element node.
+    CreateElement {
+        node_id: u32,
+        tag: String,
+    },
+    /// Create a new text node.
+    CreateTextNode {
+        node_id: u32,
+        text: String,
+    },
+    /// Append a child node to a parent.
+    AppendChild {
+        parent_id: u32,
+        child_id: u32,
+    },
+    /// Remove a child node from its parent.
+    RemoveChild {
+        parent_id: u32,
+        child_id: u32,
+    },
+    /// Set innerHTML of an element (parse + replace children).
+    SetInnerHtml {
+        node_id: u32,
+        html: String,
+    },
 }
 
 /// Serializable DOM node.

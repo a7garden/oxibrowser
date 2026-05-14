@@ -1823,6 +1823,199 @@ fn register_document_object(
             .build()
     };
 
+    // === DOM Mutation: createElement ===
+    let dom_snap_ce = dom_snapshot.clone();
+    let mutations_ce = mutations.clone();
+    let create_element_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let tag = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if tag.is_empty() {
+                return Ok(JsValue::undefined());
+            }
+
+            // Generate a new node ID (use a large number to avoid collision with parsed nodes)
+            let new_id = {
+                let dom = dom_snap_ce.read();
+                let max_id = dom.as_ref()
+                    .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
+                    .unwrap_or(0);
+                max_id + 1 + (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as u32) % 10000
+            };
+
+            let tag_upper = tag.to_uppercase();
+
+            // Create DomNode in snapshot
+            {
+                let mut dom = dom_snap_ce.write();
+                if let Some(ref mut snap) = *dom {
+                    let node = DomNode {
+                        id: new_id,
+                        tag: tag.clone(),
+                        attributes: HashMap::new(),
+                        text_content: String::new(),
+                        children: Vec::new(),
+                        parent: None,
+                        node_type: 1,
+                    };
+                    snap.nodes.insert(new_id, node);
+                }
+            }
+
+            // Record mutation
+            mutations_ce.write().push(DomMutation::CreateElement {
+                node_id: new_id,
+                tag: tag.clone(),
+            });
+
+            // Build a JS element object
+            let tag_for_obj = tag_upper.clone();
+            let id_for_obj = new_id;
+            let mut attrs_map: HashMap<String, String> = HashMap::new();
+            let dom_snap_el = dom_snap_ce.clone();
+            let mutations_el = mutations_ce.clone();
+
+            // setAttribute for this element
+            let mut_set_attr = mutations_el.clone();
+            let mut_set_id = id_for_obj;
+            let set_attr_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
+                    let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let value = args.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    mut_set_attr.write().push(DomMutation::SetAttribute { node_id: mut_set_id, name, value });
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // getAttribute for this element
+            let attrs_for_get = attrs_map.clone();
+            let get_attr_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
+                    let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    match attrs_for_get.get(&name) {
+                        Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                        None => Ok(JsValue::null()),
+                    }
+                })
+            };
+
+            // click for this element
+            let mut_click = mutations_el.clone();
+            let click_id = id_for_obj;
+            let click_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                    mut_click.write().push(DomMutation::ClickElement { node_id: click_id });
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            // appendChild for this element
+            let dom_snap_ac = dom_snap_el.clone();
+            let parent_id_ac = id_for_obj;
+            let append_child_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let child = args.first().cloned().unwrap_or(JsValue::undefined());
+                    let child_id = child.as_object()
+                        .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                        .and_then(|v| v.as_number().map(|n| n as u32));
+
+                    if let Some(cid) = child_id {
+                        // Update snapshot
+                        let mut dom = dom_snap_ac.write();
+                        if let Some(ref mut snap) = *dom {
+                            // Add child to parent's children list
+                            if let Some(parent) = snap.nodes.get_mut(&parent_id_ac) {
+                                if !parent.children.contains(&cid) {
+                                    parent.children.push(cid);
+                                }
+                            }
+                            // Set child's parent
+                            if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                                child_node.parent = Some(parent_id_ac);
+                            }
+                        }
+                    }
+
+                    Ok(child)
+                })
+            };
+
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("tagName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
+                .property(js_string!("nodeName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
+                .property(js_string!("textContent"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("id"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("className"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("__nodeId"), JsValue::from(id_for_obj), Attribute::all())
+                .function(get_attr_fn, js_string!("getAttribute"), 1)
+                .function(set_attr_fn, js_string!("setAttribute"), 2)
+                .function(click_fn, js_string!("click"), 0)
+                .function(append_child_fn, js_string!("appendChild"), 1)
+                .build();
+
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    // === DOM Mutation: createTextNode ===
+    let dom_snap_ct = dom_snapshot.clone();
+    let mutations_ct = mutations.clone();
+    let create_text_node_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let text = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let new_id = {
+                let dom = dom_snap_ct.read();
+                let max_id = dom.as_ref()
+                    .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
+                .unwrap_or(0);
+                max_id + 1 + (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as u32) % 10000
+            };
+
+            {
+                let mut dom = dom_snap_ct.write();
+                if let Some(ref mut snap) = *dom {
+                    let node = DomNode {
+                        id: new_id,
+                        tag: String::new(),
+                        attributes: HashMap::new(),
+                        text_content: text.clone(),
+                        children: Vec::new(),
+                        parent: None,
+                        node_type: 3,
+                    };
+                    snap.nodes.insert(new_id, node);
+                }
+            }
+
+            mutations_ct.write().push(DomMutation::CreateTextNode {
+                node_id: new_id,
+                text: text.clone(),
+            });
+
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("textContent"), JsValue::from(JsString::from(text.as_str())), Attribute::all())
+                .property(js_string!("nodeType"), JsValue::from(3), Attribute::all())
+                .property(js_string!("__nodeId"), JsValue::from(new_id), Attribute::all())
+                .build();
+
+            Ok(JsValue::from(obj))
+        })
+    };
+
     let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .accessor(
             js_string!("title"),
@@ -1862,6 +2055,8 @@ fn register_document_object(
             2,
         )
         .function(doc_dispatch_event_fn, js_string!("dispatchEvent"), 1)
+        .function(create_element_fn, js_string!("createElement"), 1)
+        .function(create_text_node_fn, js_string!("createTextNode"), 1)
         // DOM tree accessors
         .accessor(
             js_string!("body"),

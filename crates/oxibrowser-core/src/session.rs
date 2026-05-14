@@ -4,6 +4,7 @@
 //! session storage, and the cookie jar.
 
 use crate::browser::BrowserId;
+use std::collections::HashMap;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
@@ -36,6 +37,14 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Stored HTTP response body for Network.getResponseBody.
+#[derive(Debug, Clone)]
+pub struct CapturedResponse {
+    pub body: String,
+    pub base64: bool,
+    pub content_type: String,
+}
+
 /// A browsing session with its own history, storage, and pages.
 pub struct Session {
     /// Unique ID.
@@ -59,6 +68,8 @@ pub struct Session {
     history_index: usize,
     /// Session-local storage.
     local_storage: std::collections::HashMap<String, String>,
+    /// Stored response bodies (requestId -> body) for getResponseBody.
+    response_bodies: Arc<parking_lot::RwLock<HashMap<String, CapturedResponse>>>,
     /// JS runtime (per-session).
     js_runtime: JsRuntime,
     /// Fetch handler task handle (for cleanup).
@@ -199,6 +210,7 @@ impl Session {
             history: Vec::new(),
             history_index: 0,
             local_storage: std::collections::HashMap::new(),
+            response_bodies: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             js_runtime,
             fetch_task,
             closed: false,
@@ -505,6 +517,12 @@ impl Session {
                         );
                     }
                 }
+                // DOM structure mutations (not yet supported)
+                DomMutation::CreateElement { .. }
+                | DomMutation::CreateTextNode { .. }
+                | DomMutation::AppendChild { .. }
+                | DomMutation::RemoveChild { .. }
+                | DomMutation::SetInnerHtml { .. } => {}
             }
         }
     }
@@ -588,6 +606,20 @@ impl Session {
     /// Get a local storage value.
     pub fn get_local_storage(&self, key: &str) -> Option<&str> {
         self.local_storage.get(key).map(|s| s.as_str())
+    }
+
+    /// Store a response body for later retrieval (Network.getResponseBody).
+    pub fn store_response_body(&self, request_id: &str, body: String, content_type: &str) {
+        let mut guard = self.response_bodies.write();
+        guard.insert(
+            request_id.to_string(),
+            CapturedResponse { body, base64: false, content_type: content_type.to_string() },
+        );
+    }
+
+    /// Get a stored response body by request ID.
+    pub fn get_response_body(&self, request_id: &str) -> Option<CapturedResponse> {
+        self.response_bodies.read().get(request_id).cloned()
     }
 
     /// Get the cookie jar for this session.

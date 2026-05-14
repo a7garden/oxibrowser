@@ -204,11 +204,38 @@ async fn delete_cookies(params: Option<Value>, ctx: &DispatchContext) -> DomainR
 // ---------------------------------------------------------------------------
 
 /// Network.getResponseBody — returns body of a network response.
-async fn get_response_body(_params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
-    Ok(Some(json!({
-        "body": "",
-        "base64Encoded": false,
-    })))
+async fn get_response_body(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.ok_or_else(|| CdpError {
+        code: -32602,
+        message: "getResponseBody requires parameters".to_string(),
+    })?;
+
+    let request_id = params.get("requestId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CdpError {
+            code: -32602,
+            message: "requestId required".to_string(),
+        })?;
+
+    let session = ctx.session.read().await;
+
+    if let Some(captured) = session.get_response_body(request_id) {
+        let body = if captured.base64 {
+            // For binary content, we could base64-encode here
+            captured.body
+        } else {
+            captured.body
+        };
+        Ok(Some(json!({
+            "body": body,
+            "base64Encoded": captured.base64,
+        })))
+    } else {
+        Err(CdpError {
+            code: -32602,
+            message: format!("Could not find body for requestId: {}", request_id),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
