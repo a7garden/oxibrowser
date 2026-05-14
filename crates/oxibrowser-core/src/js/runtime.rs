@@ -129,6 +129,8 @@ enum JsCommand {
     SetDom { snapshot: Option<DomSnapshot> },
     /// Update the page URL (for window.location).
     SetPageUrl { url: String },
+    /// Set the fetch channel so JS can make real HTTP requests.
+    SetFetchChannel { tx: std::sync::mpsc::Sender<FetchRequestMsg> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -144,6 +146,40 @@ enum JsResponse {
     },
     /// Ack for SetGlobal / SetDom / Shutdown.
     Done,
+}
+
+// ---------------------------------------------------------------------------
+// Fetch message types
+// ---------------------------------------------------------------------------
+
+/// A fetch request from JS.
+pub struct FetchRequestMsg {
+    /// URL to fetch.
+    pub url: String,
+    /// HTTP method.
+    pub method: String,
+    /// Request headers (name, value pairs).
+    pub headers: Vec<(String, String)>,
+    /// Request body (if any).
+    pub body: Option<String>,
+    /// Channel to send the response back.
+    pub response_tx: std::sync::mpsc::Sender<FetchResponseMsg>,
+}
+
+/// HTTP response sent back to the JS thread.
+pub struct FetchResponseMsg {
+    /// HTTP status code.
+    pub status: u16,
+    /// HTTP status text.
+    pub status_text: String,
+    /// Final URL (after redirects).
+    pub url: String,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// Response body text.
+    pub body: String,
+    /// Error message if request failed.
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +249,8 @@ pub struct JsRuntime {
     globals: RwLock<HashMap<String, Value>>,
     /// Runtime configuration (limits, timeouts).
     config: JsRuntimeConfig,
+    /// Channel to send fetch requests (set via set_fetch_channel()).
+    fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
 }
 
 impl JsRuntime {
@@ -256,6 +294,25 @@ impl JsRuntime {
             mutations,
             globals: RwLock::new(HashMap::new()),
             config,
+            fetch_tx: None,
+        }
+    }
+
+    /// Set the channel for fetch requests. Must be called before JS can use fetch().
+    pub fn set_fetch_channel(&mut self, tx: std::sync::mpsc::Sender<FetchRequestMsg>) {
+        self.fetch_tx = Some(tx.clone());
+        self.cmd_tx
+            .send(JsCommand::SetFetchChannel { tx })
+            .expect("JS thread has died");
+        let resp = self
+            .resp_rx
+            .lock()
+            .expect("resp_rx lock poisoned")
+            .recv()
+            .expect("JS thread has died");
+        match resp {
+            JsResponse::Done => {}
+            _ => panic!("unexpected response"),
         }
     }
 
@@ -446,9 +503,9 @@ fn js_thread_loop(
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
-    fetch_tx: Option<std::sync::mpsc::Sender<()>>,
+    fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
 ) {
-    let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>> =
+    let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>> =
         Arc::new(RwLock::new(None));
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
     let mut ctx = create_context(
@@ -458,7 +515,7 @@ fn js_thread_loop(
         viewport,
         "",
         "OxiBrowser/0.2",
-        &fetch_tx_arc,
+        &&fetch_tx_arc,
     );
 
     while let Ok(cmd) = cmd_rx.recv() {
@@ -594,6 +651,14 @@ fn js_thread_loop(
                     "OxiBrowser/0.2",
                     &fetch_tx_arc,
                 );
+                // Also re-register localStorage on URL change
+                let empty = std::collections::HashMap::new();
+                register_local_storage(&mut ctx, empty, &dom_snapshot_ref);
+                let _ = resp_tx.send(JsResponse::Done);
+            }
+            // SetLocalStorage: not needed — SetPageUrl already re-registers localStorage
+            JsCommand::SetFetchChannel { tx } => {
+                *fetch_tx_arc.write() = Some(tx);
                 let _ = resp_tx.send(JsResponse::Done);
             }
             JsCommand::Shutdown => {
@@ -613,7 +678,7 @@ fn create_context(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
-    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>>,
+    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
 ) -> Context {
     let mut context = Context::default();
 
@@ -777,7 +842,7 @@ fn create_context(
         viewport,
         page_url,
         user_agent,
-        fetch_tx_arc,
+        &&fetch_tx_arc,
     );
 
     context
@@ -1504,6 +1569,127 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
 }
 
 // ---------------------------------------------------------------------------
+// localStorage
+// ---------------------------------------------------------------------------
+
+/// Register the `localStorage` global object (Storage interface).
+///
+/// localStorage is a simple key-value store with synchronous getItem/setItem.
+/// Changes are propagated back to the Session via read-only Arc (since JS thread
+/// can't mutate Session directly).
+fn register_local_storage(
+    ctx: &mut Context,
+    storage: std::collections::HashMap<String, String>,
+    _dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+) {
+
+    // Build a JS object with Storage interface methods
+    // We store the HashMap in a RefCell so JS can mutate it.
+    use std::cell::RefCell;
+    let storage_arc = Arc::new(RefCell::new(storage));
+    let storage_for_methods = storage_arc.clone();
+
+    // --- getItem ---
+    let get_storage = storage_arc.clone();
+    let get_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            let key = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let val = get_storage.borrow().get(&key).cloned();
+            match val {
+                Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+
+    // --- setItem ---
+    let set_storage = storage_arc.clone();
+    let set_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if args.len() >= 2 {
+                let key = args[0]
+                    .to_string(ctx)
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let val = args[1]
+                    .to_string(ctx)
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                set_storage.borrow_mut().insert(key, val);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // --- removeItem ---
+    let rem_storage = storage_arc.clone();
+    let remove_item_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if let Some(key_arg) = args.first() {
+                let key = key_arg
+                    .to_string(ctx)
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                rem_storage.borrow_mut().remove(&key);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // --- clear ---
+    let clear_storage = storage_arc.clone();
+    let clear_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+            clear_storage.borrow_mut().clear();
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // --- key ---
+    let key_storage = storage_arc.clone();
+    let key_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+            if let Some(idx_arg) = args.first() {
+                let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
+                let keys: Vec<_> = key_storage.borrow().keys().cloned().collect();
+                match keys.get(idx) {
+                    Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
+                    None => Ok(JsValue::null()),
+                }
+            } else {
+                Ok(JsValue::null())
+            }
+        })
+    };
+
+    // --- get length (snapshot) ---
+    let len_storage = storage_arc.clone();
+    let len_fn = unsafe {
+        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+            Ok(JsValue::from(len_storage.borrow().len() as i32))
+        })
+    };
+
+    // Build localStorage object (Storage interface)
+    let local_storage_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .function(get_item_fn, js_string!("getItem"), 1)
+        .function(set_item_fn, js_string!("setItem"), 2)
+        .function(remove_item_fn, js_string!("removeItem"), 1)
+        .function(clear_fn, js_string!("clear"), 0)
+        .function(key_fn, js_string!("key"), 1)
+        .build();
+
+    let _ = ctx.register_global_property(
+        js_string!("localStorage"),
+        local_storage_obj,
+        Attribute::all(),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Error formatting
 // ---------------------------------------------------------------------------
 
@@ -1560,7 +1746,7 @@ fn register_window_globals(
     viewport: (u32, u32),
     page_url: &str,
     user_agent: &str,
-    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<()>>>>,
+    fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
 ) {
     let _ = fetch_tx_arc; // suppress unused warning
     let url_owned = page_url.to_string();
