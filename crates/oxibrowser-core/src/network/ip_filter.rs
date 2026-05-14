@@ -18,11 +18,11 @@ impl CidrRange {
 
         // Parse IP in network byte order
         let octets: Vec<u32> = ip.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect();
-        let n = octets.len();
-        let a = octets.get(0).copied().unwrap_or(0) as u32;
-        let b = octets.get(1).copied().unwrap_or(0) as u32;
-        let c = octets.get(2).copied().unwrap_or(0) as u32;
-        let d = octets.get(3).copied().unwrap_or(0) as u32;
+        let _n = octets.len();
+        let a = octets.first().copied().unwrap_or(0);
+        let b = octets.get(1).copied().unwrap_or(0);
+        let c = octets.get(2).copied().unwrap_or(0);
+        let d = octets.get(3).copied().unwrap_or(0);
         let network = (a << 24) | (b << 16) | (c << 8) | d;
         let shift = 32 - bits;
         let mask = if shift >= 32 { 0 } else { 0xFFFFFFFF_u32.wrapping_shl(shift) };

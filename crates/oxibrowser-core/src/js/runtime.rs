@@ -1,3 +1,4 @@
+#![allow(unused_unsafe, unused_variables, unused_mut, unused_imports, clippy::clone_on_copy, clippy::arc_with_non_send_sync)]
 //! JavaScript runtime using boa_engine with a persistent context.
 //!
 //! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
@@ -41,6 +42,7 @@ use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -135,6 +137,8 @@ enum JsCommand {
     SetPageUrl { url: String },
     /// Set the fetch channel so JS can make real HTTP requests.
     SetFetchChannel { tx: std::sync::mpsc::Sender<FetchRequestMsg> },
+    /// Set the localStorage sync channel so JS operations propagate to Session.
+    SetLocalStorageChannel { tx: std::sync::mpsc::Sender<LocalStorageMsg> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -184,6 +188,21 @@ pub struct FetchResponseMsg {
     pub body: String,
     /// Error message if request failed.
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// LocalStorage sync messages
+// ---------------------------------------------------------------------------
+
+/// Messages sent from JS localStorage operations to Session for sync.
+#[derive(Debug)]
+pub enum LocalStorageMsg {
+    /// localStorage.setItem(key, value)
+    SetItem(String, String),
+    /// localStorage.removeItem(key)
+    RemoveItem(String),
+    /// localStorage.clear()
+    Clear,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +295,7 @@ impl JsRuntime {
         let console_output_clone = console_output.clone();
         let mutations_clone = mutations.clone();
         let viewport = (config.viewport_width, config.viewport_height);
-        let local_storage = Arc::new(RwLock::new(HashMap::<String, String>::new()));
+        let _local_storage = Arc::new(RwLock::new(HashMap::<String, String>::new()));
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
             .spawn(move || {
@@ -307,6 +326,26 @@ impl JsRuntime {
         self.fetch_tx = Some(tx.clone());
         self.cmd_tx
             .send(JsCommand::SetFetchChannel { tx })
+            .expect("JS thread has died");
+        let resp = self
+            .resp_rx
+            .lock()
+            .expect("resp_rx lock poisoned")
+            .recv()
+            .expect("JS thread has died");
+        match resp {
+            JsResponse::Done => {}
+            _ => panic!("unexpected response"),
+        }
+    }
+
+    /// Set the channel for localStorage sync.
+    ///
+    /// When JS calls localStorage.setItem/removeItem/clear, the operation
+    /// is forwarded to Session via this channel.
+    pub fn set_local_storage_channel(&mut self, tx: std::sync::mpsc::Sender<LocalStorageMsg>) {
+        self.cmd_tx
+            .send(JsCommand::SetLocalStorageChannel { tx })
             .expect("JS thread has died");
         let resp = self
             .resp_rx
@@ -511,8 +550,10 @@ fn js_thread_loop(
 ) {
     let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>> =
         Arc::new(RwLock::new(None));
+    let local_storage_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<LocalStorageMsg>>>> =
+        Arc::new(RwLock::new(None));
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
-    let mut ctx = create_context(
+    let (mut ctx, mut job_queue) = create_context(
         &console_output,
         &dom_snapshot,
         &mutations,
@@ -521,10 +562,6 @@ fn js_thread_loop(
         "OxiBrowser/0.2",
         &fetch_tx_arc,
     );
-
-    // job_queue reference stored at js_thread scope for timer access
-    // NOTE: job_queue access removed from eval loop due to RefCell borrow conflict.
-    // Timers are still queued via setTimeout/setInterval, just not auto-drained yet.
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -558,8 +595,11 @@ fn js_thread_loop(
                 let source = Source::from_bytes(&expression);
                 let result = ctx.eval(source);
 
-                // Drain Promise microtasks queued during eval (skip for now — causes RefCell borrow conflict)
-                // TODO: fix after timer drain refactored to avoid RefCell conflict
+                // Drain Promise microtasks queued during eval
+                ctx.run_jobs();
+
+                // Drain due timers and fire their callbacks
+                drain_timers(&job_queue, &mut ctx);
 
                 let elapsed = start.elapsed();
                 let console = console_output.read().clone();
@@ -567,7 +607,7 @@ fn js_thread_loop(
                 // Check if we timed out
                 if elapsed.as_millis() > timeout as u128 {
                     // Context may be in a bad state — recreate it
-                    ctx = create_context(
+                    let (new_ctx, new_queue) = create_context(
                         &console_output,
                         &dom_snapshot,
                         &mutations,
@@ -576,6 +616,8 @@ fn js_thread_loop(
                         "OxiBrowser/0.2",
                         &fetch_tx_arc,
                     );
+                    ctx = new_ctx;
+                    job_queue = new_queue;
                     let _ = resp_tx.send(JsResponse::EvalResult {
                         value: None,
                         exception: Some(format!(
@@ -662,12 +704,15 @@ fn js_thread_loop(
                     "OxiBrowser/0.2",
                     &fetch_tx_arc,
                 );
-                // Also re-register localStorage on URL change
+                // Also re-register localStorage on URL change (clears JS-side storage)
                 let empty = std::collections::HashMap::new();
-                register_local_storage(&mut ctx, empty, &dom_snapshot_ref);
+                register_local_storage(&mut ctx, empty, &dom_snapshot_ref, local_storage_tx_arc.clone());
                 let _ = resp_tx.send(JsResponse::Done);
             }
-            // SetLocalStorage: not needed — SetPageUrl already re-registers localStorage
+            JsCommand::SetLocalStorageChannel { tx } => {
+                *local_storage_tx_arc.write() = Some(tx);
+                let _ = resp_tx.send(JsResponse::Done);
+            }
             JsCommand::SetFetchChannel { tx } => {
                 *fetch_tx_arc.write() = Some(tx);
                 let _ = resp_tx.send(JsResponse::Done);
@@ -682,6 +727,51 @@ fn js_thread_loop(
 
 /// Create a fresh boa_engine Context with console.log/warn/error/info
 /// and `document` object registered.
+// ---------------------------------------------------------------------------
+// Timer drain
+// ---------------------------------------------------------------------------
+
+/// Drain all due timers from the job queue and execute their callbacks.
+///
+/// For interval timers, the callback is re-scheduled with the original interval.
+/// After each batch of timer callbacks, we also drain any microtasks they
+/// enqueued. Repeats until no more due timers remain (up to a safety limit).
+fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
+    let mut iterations = 0u32;
+    loop {
+        let due = queue.pop_due_timers();
+        if due.is_empty() {
+            break;
+        }
+
+        for timer in due {
+            let _ = timer.callback.call(&JsValue::undefined(), &timer.args, ctx);
+
+            // Re-schedule interval timers
+            if timer.is_interval {
+                let interval_ms = timer.interval_ms.unwrap_or(0);
+                let deadline = Instant::now() + Duration::from_millis(interval_ms);
+                queue.schedule_timer(
+                    deadline,
+                    timer.callback,
+                    timer.args,
+                    true,
+                    Some(interval_ms),
+                );
+            }
+        }
+
+        // Timer callbacks may have queued microtasks — drain those too
+        ctx.run_jobs();
+
+        iterations += 1;
+        if iterations > 100 {
+            // Safety limit to prevent infinite timer loops
+            break;
+        }
+    }
+}
+
 fn create_context(
     output: &Arc<RwLock<Vec<String>>>,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
@@ -690,9 +780,10 @@ fn create_context(
     page_url: &str,
     user_agent: &str,
     fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
-) -> Context {
+) -> (Context, Rc<TokioJobQueue>) {
+    let job_queue = Rc::new(TokioJobQueue::new());
     let mut context = Context::builder()
-        .job_queue(Rc::new(TokioJobQueue::new()))
+        .job_queue(job_queue.clone())
         .build()
         .expect("failed to build boa Engine context");
 
@@ -814,7 +905,7 @@ fn create_context(
             let mut method = String::from("GET");
             let mut headers: Vec<(String, String)> = Vec::new();
             let mut body: Option<String> = None;
-            let mut timeout_ms: Option<u64> = None;
+            let mut _timeout_ms: Option<u64> = None;
 
             if args.len() > 1 {
                 if let Some(opts) = args[1].as_object() {
@@ -838,7 +929,7 @@ fn create_context(
                     // timeout
                     if let Ok(t) = opts.get(js_string!("timeout"), ctx) {
                         if let Some(n) = t.as_number() {
-                            timeout_ms = Some(n as u64);
+                            _timeout_ms = Some(n as u64);
                         }
                     }
                 }
@@ -976,7 +1067,7 @@ fn create_context(
         viewport,
         page_url,
         user_agent,
-        &fetch_tx_arc,
+        fetch_tx_arc,
     );
 
     // --- atob / btoa (Base64) ---
@@ -988,7 +1079,6 @@ fn create_context(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             // Decode base64
-            use std::io::Read;
             let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded);
             match decoded {
                 Ok(bytes) => {
@@ -1055,7 +1145,7 @@ fn create_context(
             }
 
             let storage_arc = std::sync::Arc::new(storage);
-            let sp_storage = storage_arc.clone();
+            let _sp_storage = storage_arc.clone();
 
             // --- get ---
             let get_sp = storage_arc.clone();
@@ -1253,7 +1343,7 @@ fn create_context(
             let us_storage5 = url_storage.clone();
             let us_storage6 = url_storage.clone();
             let us_storage7 = url_storage.clone();
-            let us_storage8 = url_storage.clone();
+            let _us_storage8 = url_storage.clone();
 
             // href getter
             let href_fn = unsafe {
@@ -1374,7 +1464,7 @@ fn create_context(
     );
 
     // --- TextEncoder ---
-    let te_encode_fn = unsafe {
+    let _te_encode_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let input = args
                 .first()
@@ -1386,7 +1476,7 @@ fn create_context(
             for &b in bytes {
                 let _ = arr.push(JsValue::from(b), ctx);
             }
-            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+            let _obj = boa_engine::object::ObjectInitializer::new(ctx)
                 .property(js_string!("encoding"), JsValue::from(JsString::from("utf-8")), Attribute::all())
 .build();
             // Return Uint8Array-like object
@@ -1821,7 +1911,6 @@ fn register_document_object(
     };
 
     let dom_snap_de = dom_snapshot.clone();
-    let dom_snap_de_clone = dom_snapshot.clone();
     let document_element_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
@@ -1873,10 +1962,10 @@ fn register_document_object(
                 let max_id = dom.as_ref()
                     .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
                     .unwrap_or(0);
-                max_id + 1 + (std::time::SystemTime::now()
+                max_id + 1 + std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .subsec_nanos() as u32) % 10000
+                    .subsec_nanos() % 10000
             };
 
             let tag_upper = tag.to_uppercase();
@@ -2009,10 +2098,10 @@ fn register_document_object(
                 let max_id = dom.as_ref()
                     .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
                 .unwrap_or(0);
-                max_id + 1 + (std::time::SystemTime::now()
+                max_id + 1 + std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .subsec_nanos() as u32) % 10000
+                    .subsec_nanos() % 10000
             };
 
             {
@@ -2674,13 +2763,14 @@ fn register_local_storage(
     ctx: &mut Context,
     storage: std::collections::HashMap<String, String>,
     _dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
+    local_storage_tx: Arc<RwLock<Option<std::sync::mpsc::Sender<LocalStorageMsg>>>>,
 ) {
 
     // Build a JS object with Storage interface methods
     // We store the HashMap in a RefCell so JS can mutate it.
     use std::cell::RefCell;
     let storage_arc = Arc::new(RefCell::new(storage));
-    let storage_for_methods = storage_arc.clone();
+    let _storage_for_methods = storage_arc.clone();
 
     // --- getItem ---
     let get_storage = storage_arc.clone();
@@ -2700,6 +2790,7 @@ fn register_local_storage(
 
     // --- setItem ---
     let set_storage = storage_arc.clone();
+    let set_ls_tx = local_storage_tx.clone();
     let set_item_fn = unsafe {
         NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
             if args.len() >= 2 {
@@ -2711,7 +2802,12 @@ fn register_local_storage(
                     .to_string(ctx)
                     .map(|s| s.to_std_string_escaped())
                     .unwrap_or_default();
-                set_storage.borrow_mut().insert(key, val);
+                set_storage.borrow_mut().insert(key.clone(), val.clone());
+                // Sync to Session
+                let tx_opt = { set_ls_tx.read().as_ref().cloned() };
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(LocalStorageMsg::SetItem(key, val));
+                }
             }
             Ok(JsValue::undefined())
         })
@@ -2719,6 +2815,7 @@ fn register_local_storage(
 
     // --- removeItem ---
     let rem_storage = storage_arc.clone();
+    let rem_ls_tx = local_storage_tx.clone();
     let remove_item_fn = unsafe {
         NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
             if let Some(key_arg) = args.first() {
@@ -2727,6 +2824,11 @@ fn register_local_storage(
                     .map(|s| s.to_std_string_escaped())
                     .unwrap_or_default();
                 rem_storage.borrow_mut().remove(&key);
+                // Sync to Session
+                let tx_opt = { rem_ls_tx.read().as_ref().cloned() };
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(LocalStorageMsg::RemoveItem(key));
+                }
             }
             Ok(JsValue::undefined())
         })
@@ -2734,9 +2836,15 @@ fn register_local_storage(
 
     // --- clear ---
     let clear_storage = storage_arc.clone();
+    let clear_ls_tx = local_storage_tx.clone();
     let clear_fn = unsafe {
         NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
             clear_storage.borrow_mut().clear();
+            // Sync to Session
+            let tx_opt = { clear_ls_tx.read().as_ref().cloned() };
+            if let Some(tx) = tx_opt {
+                let _ = tx.send(LocalStorageMsg::Clear);
+            }
             Ok(JsValue::undefined())
         })
     };
@@ -2760,7 +2868,7 @@ fn register_local_storage(
 
     // --- get length (snapshot) ---
     let len_storage = storage_arc.clone();
-    let len_fn = unsafe {
+    let _len_fn = unsafe {
         NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
             Ok(JsValue::from(len_storage.borrow().len() as i32))
         })
@@ -2869,7 +2977,7 @@ fn register_storage_obj(
     };
 
     // length (computed via getter property)
-    let len_s = storage_arc.clone();
+    let _len_s = storage_arc.clone();
     // Use a data property instead of a getter for length (avoids move conflict)
     let storage_len = storage_arc.borrow().len() as i32;
     let storage_obj = boa_engine::object::ObjectInitializer::new(ctx)

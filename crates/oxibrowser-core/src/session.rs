@@ -12,7 +12,7 @@ use crate::js::runtime::JsRuntimeConfig;
 use crate::js::JsRuntime;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
-use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg};
+use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::page::Page;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -66,8 +66,8 @@ pub struct Session {
     history: Vec<Url>,
     /// Current position in history.
     history_index: usize,
-    /// Session-local storage.
-    local_storage: std::collections::HashMap<String, String>,
+    /// Session-local storage (shared with localStorage sync handler thread).
+    local_storage: Arc<parking_lot::RwLock<std::collections::HashMap<String, String>>>,
     /// Stored response bodies (requestId -> body) for getResponseBody.
     response_bodies: Arc<parking_lot::RwLock<HashMap<String, CapturedResponse>>>,
     /// JS runtime (per-session).
@@ -75,6 +75,9 @@ pub struct Session {
     /// Fetch handler task handle (for cleanup).
     #[allow(dead_code)]
     fetch_task: Option<std::thread::JoinHandle<()>>,
+    /// LocalStorage sync handler task handle (for cleanup).
+    #[allow(dead_code)]
+    local_storage_task: Option<std::thread::JoinHandle<()>>,
     /// Whether the session has been closed.
     closed: bool,
 }
@@ -176,6 +179,33 @@ fn handle_fetch_requests(
     });
 }
 
+// ---------------------------------------------------------------------------
+// LocalStorage sync handler
+// ---------------------------------------------------------------------------
+
+/// Handle localStorage sync messages from the JS thread.
+///
+/// Updates the Session's shared `local_storage` HashMap in response to
+/// JS localStorage.setItem/removeItem/clear calls.
+fn handle_local_storage_sync(
+    ls_rx: std::sync::mpsc::Receiver<LocalStorageMsg>,
+    local_storage: Arc<parking_lot::RwLock<std::collections::HashMap<String, String>>>,
+) {
+    while let Ok(msg) = ls_rx.recv() {
+        match msg {
+            LocalStorageMsg::SetItem(key, value) => {
+                local_storage.write().insert(key, value);
+            }
+            LocalStorageMsg::RemoveItem(key) => {
+                local_storage.write().remove(&key);
+            }
+            LocalStorageMsg::Clear => {
+                local_storage.write().clear();
+            }
+        }
+    }
+}
+
 impl Session {
     /// Create a new session.
     pub async fn new(
@@ -189,15 +219,26 @@ impl Session {
         // Create fetch channel
         let (fetch_tx, fetch_rx) = std::sync::mpsc::channel();
 
+        // Create localStorage sync channel
+        let (ls_tx, ls_rx) = std::sync::mpsc::channel::<LocalStorageMsg>();
+
         // Create JS runtime and wire up fetch channel
         let mut js_runtime = JsRuntime::with_config(js_config);
         js_runtime.set_fetch_channel(fetch_tx);
+        js_runtime.set_local_storage_channel(ls_tx);
 
         // Spawn fetch handler on a blocking thread
         let http_client_clone = http_client.clone();
         let cookie_jar_clone = cookie_jar.clone();
         let fetch_task = Some(std::thread::spawn(move || {
             handle_fetch_requests(fetch_rx, http_client_clone, cookie_jar_clone);
+        }));
+
+        // Spawn localStorage sync handler thread
+        let local_storage_arc = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+        let ls_arc_clone = local_storage_arc.clone();
+        let local_storage_task = Some(std::thread::spawn(move || {
+            handle_local_storage_sync(ls_rx, ls_arc_clone);
         }));
 
         Ok(Self {
@@ -209,10 +250,11 @@ impl Session {
             active_page: None,
             history: Vec::new(),
             history_index: 0,
-            local_storage: std::collections::HashMap::new(),
+            local_storage: local_storage_arc,
             response_bodies: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             js_runtime,
             fetch_task,
+            local_storage_task,
             closed: false,
         })
     }
@@ -605,13 +647,13 @@ impl Session {
     }
 
     /// Set a local storage value.
-    pub fn set_local_storage(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.local_storage.insert(key.into(), value.into());
+    pub fn set_local_storage(&self, key: impl Into<String>, value: impl Into<String>) {
+        self.local_storage.write().insert(key.into(), value.into());
     }
 
     /// Get a local storage value.
-    pub fn get_local_storage(&self, key: &str) -> Option<&str> {
-        self.local_storage.get(key).map(|s| s.as_str())
+    pub fn get_local_storage(&self, key: &str) -> Option<String> {
+        self.local_storage.read().get(key).cloned()
     }
 
     /// Store a response body for later retrieval (Network.getResponseBody).
@@ -642,7 +684,7 @@ impl Session {
         self.closed = true;
         self.active_page = None;
         self.history.clear();
-        self.local_storage.clear();
+        self.local_storage.write().clear();
         Ok(())
     }
 

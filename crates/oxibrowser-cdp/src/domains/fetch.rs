@@ -127,7 +127,7 @@ async fn fulfill_request(params: Option<Value>, _ctx: &DispatchContext) -> Domai
         }
     }
 
-    let content_type = headers.get("Content-Type")
+    let _content_type = headers.get("Content-Type")
         .and_then(|v| v.as_str())
         .unwrap_or("text/html");
     let body_size = body.len();
@@ -227,8 +227,7 @@ impl FetchPattern {
         } else if pattern.ends_with('*') {
             let prefix = &pattern[..pattern.len() - 1];
             url.starts_with(prefix)
-        } else if pattern.starts_with('*') {
-            let suffix = &pattern[1..];
+        } else if let Some(suffix) = pattern.strip_prefix('*') {
             url.ends_with(suffix)
         } else {
             url == pattern

@@ -267,7 +267,7 @@ pub fn emit_navigation_events(
                 "urlFragment": "",
             },
             "timestamp": timestamp,
-            "wallTime": timestamp as f64 / 1000.0,
+            "wallTime": timestamp / 1000.0,
             "initiator": { "type": "other" },
             "type": "Document",
             "frameId": "main",

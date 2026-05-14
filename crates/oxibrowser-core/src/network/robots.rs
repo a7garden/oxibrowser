@@ -84,7 +84,7 @@ impl RobotStore {
     }
 }
 
-fn rules_for_agent<'a>(rules: &'a mut RobotRules, agent: &str) -> &'a mut RobotRules {
+fn rules_for_agent<'a>(rules: &'a mut RobotRules, _agent: &str) -> &'a mut RobotRules {
     // For simplicity, we use a single shared ruleset per domain
     // Full RFC 9309 would need per-agent rules
     rules
@@ -110,12 +110,10 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     if pattern.is_empty() {
         return false;
     }
-    if pattern.ends_with('$') {
-        let p = &pattern[..pattern.len() - 1];
+    if let Some(p) = pattern.strip_suffix('$') {
         return path == p;
     }
-    if pattern.ends_with('*') {
-        let p = &pattern[..pattern.len() - 1];
+    if let Some(p) = pattern.strip_suffix('*') {
         return path.starts_with(p);
     }
     path.starts_with(pattern)

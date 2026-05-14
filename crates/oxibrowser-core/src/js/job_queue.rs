@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use boa_engine::context::Context;
 use boa_engine::job::{JobQueue, NativeJob};
@@ -59,6 +59,7 @@ impl TokioJobQueue {
         callback: boa_engine::JsObject,
         args: Vec<boa_engine::JsValue>,
         is_interval: bool,
+        interval_ms: Option<u64>,
     ) -> u64 {
         let id = *self.next_timer_id.borrow();
         *self.next_timer_id.borrow_mut() += 1;
@@ -69,7 +70,7 @@ impl TokioJobQueue {
             is_interval,
             callback,
             args,
-            interval_ms: None,
+            interval_ms,
         };
 
         self.timers.borrow_mut().push(entry);
@@ -114,10 +115,18 @@ impl JobQueue for TokioJobQueue {
     }
 
     fn run_jobs(&self, context: &mut Context) {
-        while let Some(job) = self.microtasks.borrow_mut().pop_front() {
-            if job.call(context).is_err() {
-                self.microtasks.borrow_mut().clear();
-                return;
+        // We must release the RefCell borrow between iterations so that
+        // job callbacks can enqueue new microtasks without panicking.
+        loop {
+            let job = self.microtasks.borrow_mut().pop_front();
+            match job {
+                Some(job) => {
+                    if job.call(context).is_err() {
+                        self.microtasks.borrow_mut().clear();
+                        return;
+                    }
+                }
+                None => return,
             }
         }
     }
