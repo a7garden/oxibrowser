@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Default)]
 pub struct RobotStore {
     rules: HashMap<String, RobotRules>,
+    #[allow(dead_code)]
     sitemaps: HashMap<String, Vec<String>>,
 }
 

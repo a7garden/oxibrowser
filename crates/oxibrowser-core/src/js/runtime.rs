@@ -725,8 +725,8 @@ fn js_thread_loop(
     }
 }
 
-/// Create a fresh boa_engine Context with console.log/warn/error/info
-/// and `document` object registered.
+// Create a fresh boa_engine Context with console.log/warn/error/info
+// and `document` object registered.
 // ---------------------------------------------------------------------------
 // Timer drain
 // ---------------------------------------------------------------------------
@@ -1045,7 +1045,7 @@ fn create_context(
             // Return rejected Promise on error
             let reject_code = format!(
                 "Promise.reject(new Error('{}'))",
-                resp_error.unwrap_or_else(|| "fetch failed".to_string()).replace("'", "\'")
+                resp_error.unwrap_or_else(|| "fetch failed".to_string())
             );
             let result = ctx.eval(Source::from_bytes(reject_code.trim()));
             result
@@ -1849,7 +1849,7 @@ fn register_document_object(
                                         if let Ok(cb) = arr.at(i as i64, ctx) {
                                             if let Some(cb_obj) = cb.as_object() {
                                                 if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(_this, &[event.clone()], ctx);
+                                                    let _ = cb_obj.call(_this, std::slice::from_ref(&event), ctx);
                                                 }
                                             }
                                         }
