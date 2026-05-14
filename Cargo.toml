@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/oxibrowser",
     "crates/oxibrowser-cdp",
     "crates/oxibrowser-core",
     "crates/oxibrowser-webapi",
