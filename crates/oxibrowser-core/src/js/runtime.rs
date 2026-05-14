@@ -1364,6 +1364,68 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("XMLHttpRequest"), 0, xhr_ctor);
 
+    // --- MutationObserver ---
+    let mo_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let callback = args.first().cloned().unwrap_or(JsValue::undefined());
+
+            // Observation state stored in JS object properties
+            // __callback: the MutationCallback
+            // __observing: boolean flag
+            // __records: array of MutationRecord objects
+
+            let disconnect_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    if let Some(obj) = _this.as_object() {
+                        let _ = obj.set(js_string!("__observing"), JsValue::from(false), true, ctx);
+                        let empty_arr = JsArray::new(ctx);
+                        let _ = obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            let observe_fn = unsafe {
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let _target = args.first();
+                    let _options = args.get(1);
+
+                    if let Some(obj) = _this.as_object() {
+                        let _ = obj.set(js_string!("__observing"), JsValue::from(true), true, ctx);
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            let take_records_fn = unsafe {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
+                    if let Some(obj) = _this.as_object() {
+                        let records = obj.get(js_string!("__records"), ctx).unwrap_or(JsValue::Null);
+                        // Clear records
+                        let empty_arr = JsArray::new(ctx);
+                        let _ = obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
+                        return Ok(records);
+                    }
+                    let arr = JsArray::new(ctx);
+                    Ok(JsValue::from(arr))
+                })
+            };
+
+            let empty_arr = JsArray::new(ctx);
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("__callback"), callback, Attribute::all())
+                .property(js_string!("__observing"), JsValue::from(false), Attribute::all())
+                .property(js_string!("__records"), JsValue::from(empty_arr), Attribute::all())
+                .function(observe_fn, js_string!("observe"), 2)
+                .function(disconnect_fn, js_string!("disconnect"), 0)
+                .function(take_records_fn, js_string!("takeRecords"), 0)
+                .build();
+
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("MutationObserver"), 1, mo_ctor);
+
     // --- Document object ---
 
     register_document_object(&mut context, dom_snapshot, mutations);
@@ -2101,7 +2163,7 @@ fn register_document_object(
             let arr_key = JsString::from(event_type.as_str());
             let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
             if ev.as_object().is_none() {
-                let a: JsValue = JsArray::new(ctx).into();
+                let a: JsValue = JsValue::from(JsArray::new(ctx));
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
             }
             let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
@@ -2651,7 +2713,7 @@ fn create_element_object(
             let arr_key = JsString::from(event_type.as_str());
             let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
             if ev.as_object().is_none() {
-                let a: JsValue = JsArray::new(ctx).into();
+                let a: JsValue = JsValue::from(JsArray::new(ctx));
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
             }
             let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
