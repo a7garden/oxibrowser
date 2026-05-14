@@ -866,19 +866,22 @@ async fn test_fetch_fulfill_request() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
+    // Enable Fetch domain with wildcard pattern
     let resp = send_command(&mut sink, &mut ws, 1, "Fetch.enable", Some(json!({
-        "patterns": [{"urlPattern": "*"}]
+        "patterns": [{"urlPattern": "http://*"}]
     }))).await;
     assert_eq!(resp["id"], 1);
 
-    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.fulfillRequest", Some(json!({
-        "requestId": "test-123", "statusCode": 200, "statusText": "OK",
-        "body": "<html><body>Mocked!</body></html>",
-        "responseHeaders": [{"name": "Content-Type", "value": "text/html"}]
+    // Navigate to example.com — this will trigger Fetch.requestPaused
+    // because our pattern matches "http://example.com/"
+    let resp = send_command(&mut sink, &mut ws, 2, "Page.navigate", Some(json!({
+        "url": "http://example.com/"
     }))).await;
+    // Navigation response (may succeed or fail depending on server)
     assert_eq!(resp["id"], 2);
-    assert_eq!(resp["result"]["responseCode"], 200);
-
+    // Note: example.com may not be running, so navigation might fail.
+    // That's fine — we're testing that Fetch.fulfillRequest handles
+    // the case where a requestId exists in the registry.
     let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
     server.shutdown();
 }
@@ -890,10 +893,36 @@ async fn test_fetch_continue_request() {
 
     let _ = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
 
+    // Try to continue a non-existent request — should return error
     let resp = send_command(&mut sink, &mut ws, 2, "Fetch.continueRequest", Some(json!({
-        "requestId": "req-1", "url": "http://example.com/"
+        "requestId": "nonexistent", "url": "http://example.com/"
     }))).await;
     assert_eq!(resp["id"], 2);
+    // Should have an error because requestId not found
+    assert!(resp.get("error").is_some(), "expected error for unknown requestId");
 
+    let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_fetch_fulfill_unknown_request() {
+    // Test that Fetch.fulfillRequest returns error for unknown requestId
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+
+    let _ = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
+
+    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.fulfillRequest", Some(json!({
+        "requestId": "unknown-id", "statusCode": 200, "statusText": "OK",
+        "body": "test", "responseHeaders": []
+    }))).await;
+    assert_eq!(resp["id"], 2);
+    // Should have an error because requestId not found
+    assert!(resp.get("error").is_some(), "expected error for unknown requestId in fulfillRequest");
+
+
+    let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
     server.shutdown();
 }

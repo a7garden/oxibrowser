@@ -45,6 +45,8 @@ pub struct CdpSession {
     session: Arc<RwLock<oxibrowser_core::session::Session>>,
     /// Event sender (cloned into DispatchContext for domain handlers).
     event_sender: EventSender,
+    /// Registry of paused Fetch requests (shared via DispatchContext).
+    fetch_registry: oxibrowser_core::network::SharedRegistry,
     /// Event receiver (drained by background task).
     event_receiver: Option<EventReceiver>,
 }
@@ -79,6 +81,7 @@ impl CdpSession {
             browser,
             session,
             event_sender,
+            fetch_registry: oxibrowser_core::network::intercept::shared_registry(),
             event_receiver: Some(event_receiver),
         })
     }
@@ -201,10 +204,11 @@ impl CdpSession {
             "dispatching CDP command"
         );
 
-        // Create dispatch context with session + event sender
+        // Create dispatch context with session + event sender + fetch registry
         let ctx = DispatchContext {
             session: self.session.clone(),
             events: self.event_sender.clone(),
+            fetch_registry: self.fetch_registry.clone(),
         };
 
         // Dispatch to domain handler

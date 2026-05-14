@@ -2607,7 +2607,7 @@ fn register_document_object(
         // DOM tree accessors
         .accessor(
             js_string!("body"),
-            Some(body_getter_fn),
+            Some(body_getter_fn.clone()),
             None,
             Attribute::all(),
         )
@@ -2622,6 +2622,54 @@ fn register_document_object(
             Some(document_element_getter_fn),
             None,
             Attribute::all(),
+        )
+        // activeElement — same as body (no real focus tracking yet)
+        .accessor(
+            js_string!("activeElement"),
+            Some(body_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        // elementFromPoint(x, y) — returns element at viewport coordinates.
+        // Approximation: finds the Nth visible element by DOM order.
+        // We approximate Y positions using estimated line heights.
+        .function(
+            {
+                let snap_efp = dom_snapshot.clone();
+                let mutations_efp = mutations.clone();
+                let dom_efp = dom_snapshot.clone();
+                unsafe {
+                    let fn_ptr: NativeFunction = NativeFunction::from_closure(move |_this, args, ctx| {
+                        let x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
+                        let y = args.get(1).and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
+                        let snap = snap_efp.read();
+                        if let Some(ref s) = *snap {
+                            if let Some(bid) = s.body_id {
+                                if let Some(body) = s.nodes.get(&bid) {
+                                    // Walk body children in order, estimate Y positions
+                                    let mut estimated_y = 0.0;
+                                    for &child_id in &body.children {
+                                        if let Some(el) = s.nodes.get(&child_id) {
+                                            let el_h = estimate_element_height(el);
+                                            if y >= estimated_y && y < estimated_y + el_h {
+                                                // Found approximate match
+                                                return Ok(create_element_object(s, el, ctx, &mutations_efp, &dom_efp));
+                                            }
+                                            estimated_y += el_h;
+                                        }
+                                    }
+                                    // Fallback: return body itself
+                                    return Ok(create_element_object(s, body, ctx, &mutations_efp, &dom_efp));
+                                }
+                            }
+                        }
+                        Ok(JsValue::null())
+                    });
+                    fn_ptr
+                }
+            },
+            js_string!("elementFromPoint"),
+            2,
         )
         .build();
 
@@ -4867,5 +4915,31 @@ mod tests {
         let mut rt = JsRuntime::new();
         let result = rt.evaluate("new URLSearchParams('foo=bar&baz=1').get('foo')").await.unwrap();
         assert!(result.is_ok());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Estimate the height of a DOM element for elementFromPoint approximation.
+fn estimate_element_height(node: &DomNode) -> f64 {
+    let tag = node.tag.to_uppercase();
+    match tag.as_str() {
+        "H1" => 40.0,
+        "H2" => 36.0,
+        "H3" => 32.0,
+        "H4" | "H5" | "H6" => 28.0,
+        "P" => 24.0,
+        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER" | "NAV" | "MAIN" | "ASIDE" => 40.0,
+        "UL" | "OL" => 24.0,
+        "LI" => 20.0,
+        "TABLE" => 32.0,
+        "TR" => 24.0,
+        "IMG" | "IFRAME" => 300.0,
+        "INPUT" | "TEXTAREA" | "SELECT" => 32.0,
+        "SCRIPT" | "STYLE" | "LINK" | "META" => 0.0, // invisible
+        "SVG" | "CANVAS" => 200.0,
+        _ => 24.0, // default line height
     }
 }

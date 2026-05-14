@@ -128,6 +128,14 @@ impl Page {
         crate::css::render_to_text(&snapshot)
     }
 
+    /// Render the page as a PNG screenshot.
+    ///
+    /// Renders the DOM text content as a PNG image using a monospace bitmap font.
+    pub fn to_screenshot_png(&self, viewport_width: u32) -> Vec<u8> {
+        let text = self.to_text_screenshot();
+        crate::css::text_to_png(&text, viewport_width)
+    }
+
     /// Get the page ID.
     pub fn id(&self) -> PageId {
         self.id

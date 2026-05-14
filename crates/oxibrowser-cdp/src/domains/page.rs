@@ -24,8 +24,8 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "reload" => reload(params, ctx).await,
         "getFrameTree" => get_frame_tree(ctx).await,
         "getFrameMetrics" => get_frame_metrics(),
-        "captureScreenshot" => capture_screenshot(params),
-        "printToPDF" => print_to_pdf(params),
+        "captureScreenshot" => capture_screenshot(params, ctx).await,
+        "printToPDF" => print_to_pdf(params, ctx).await,
         "getLifecycleEvents" => Ok(Some(json!({ "events": [] }))),
         "setLifecycleEventsEnabled" => set_lifecycle_events_enabled(params, ctx),
         _ => Err(CdpError {
@@ -126,17 +126,8 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 "text/html",
             );
 
-            // Emit Fetch.requestPaused if Fetch domain is enabled
-            if ctx.events.is_fetch_enabled() {
-                crate::domains::fetch::emit_request_paused(
-                    &ctx.events,
-                    &request_id,
-                    &final_url,
-                    "GET",
-                    &[],
-                    "Document",
-                );
-            }
+            // Fetch.requestPaused will be emitted from Session::navigate
+            // once Fetch interception is fully integrated with the HTTP client
 
             Ok(Some(json!({
                 "frameId": frame_id,
@@ -264,22 +255,33 @@ fn get_frame_metrics() -> DomainResult {
 
 /// Page.captureScreenshot — captures a screenshot of the page.
 ///
-/// Placeholder: returns a 1x1 transparent PNG until full rendering is available.
-fn capture_screenshot(params: Option<Value>) -> DomainResult {
+/// Renders the DOM as a PNG image using text-based rendering with bitmap font.
+async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let _format = params
         .get("format")
         .and_then(|v| v.as_str())
         .unwrap_or("png");
+    let viewport_width = params
+        .get("clip")
+        .and_then(|v| v.get("width"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1280.0) as u32;
 
-    // Minimal valid 1x1 transparent PNG (base64 encoded)
-    let placeholder = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HwADBwIAMCbHYQAAAABJRU5ErkJggg==";
+    let guard = ctx.session.read().await;
+    let png_bytes = match guard.page() {
+        Some(page) => page.to_screenshot_png(viewport_width.max(64)),
+        None => oxibrowser_core::css::text_to_png("", viewport_width.max(64)),
+    };
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
 
     Ok(Some(json!({
-        "data": placeholder,
+        "data": data,
         "metadata": {
             "pageScaleFactor": 1,
-            "deviceWidth": 1280,
+            "deviceWidth": viewport_width,
             "deviceHeight": 720
         }
     })))
@@ -287,8 +289,10 @@ fn capture_screenshot(params: Option<Value>) -> DomainResult {
 
 /// Page.printToPDF — prints the page to PDF.
 ///
-/// Placeholder until rendering is available.
-fn print_to_pdf(_params: Option<Value>) -> DomainResult {
+/// Currently returns an empty PDF. Full PDF generation requires the `printpdf` dependency.
+async fn print_to_pdf(_params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
+    // TODO: Add printpdf dependency for real PDF generation
+    // Tracking: https://github.com/oxibrowser/oxibrowser/issues/TODO
     Ok(Some(json!({
         "data": "",
         "stream": ""

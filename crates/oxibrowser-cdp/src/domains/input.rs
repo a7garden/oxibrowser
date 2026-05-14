@@ -4,13 +4,16 @@
 //! - Input.dispatchKeyEvent — keyboard events (keydown, keyup, rawKeyDown, char)
 //! - Input.dispatchMouseEvent — mouse events (mousePressed, mouseReleased, mouseMoved)
 //!
-//! Note: These are simulation-only. Real keyboard/mouse events require a
-//! rendering engine (Servo). Here we mainly handle the CDP protocol correctly
-//! so Puppeteer/Playwright don't error out.
+//! Implementation: dispatches real DOM events via JS evaluation.
+//! - Keyboard events → `document.activeElement.dispatchEvent(new KeyboardEvent(...))`
+//! - Mouse events → `document.elementFromPoint(x, y).dispatchEvent(new MouseEvent(...))`
+//! - insertText → updates input/textarea values via JS
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
+use oxibrowser_core::js::{js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
 use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Dispatch Input domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
@@ -35,17 +38,7 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
 
 /// Input.dispatchKeyEvent — simulate keyboard events.
 ///
-/// Params:
-/// - type: "keyDown" | "keyUp" | "rawKeyDown" | "char"
-/// - key: string (e.g., "a", "Enter", "F12")
-/// - code: string (e.g., "KeyA", "Enter")
-/// - windowsVirtualKeyCode: number
-/// - nativeVirtualKeyCode: number
-/// - autoRepeat: boolean
-/// - isKeypad: boolean
-/// - isLeft: boolean (left modifier)
-/// - isRight: boolean (right modifier)
-/// - location: 0=standard, 1=left, 2=right, 3=numpad
+/// Dispatches a real `KeyboardEvent` on `document.activeElement` via JS.
 async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let p = params.ok_or_else(|| CdpError {
         code: -32602,
@@ -57,33 +50,50 @@ async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> Dom
     let code = p.get("code").and_then(|v| v.as_str()).unwrap_or("");
     let modifiers = calculate_modifiers(&p);
 
+    // Timestamp from params (or current time)
+    let timestamp = p
+        .get("timestamp")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(current_timestamp_ms);
+
     tracing::debug!(
         "Input.dispatchKeyEvent: type={}, key={}, code={}, modifiers={}",
-        event_type, key, code, modifiers
+        event_type,
+        key,
+        code,
+        modifiers
     );
 
-    // Emit input event for debugging/inspection
-    ctx.events.send_page_event(
-        "Input.dispatchKeyEvent",
-        json!({
-            "type": event_type,
-            "key": key,
-            "code": code,
-            "modifiers": modifiers,
-        }),
-    );
+    // Generate JS to dispatch the keyboard event
+    let js = js_dispatch_key_event(key, code, event_type, modifiers, timestamp);
+    let mut session_guard = ctx.session.write().await;
+    let result = session_guard.evaluate_js(&js).await;
 
-    // TODO: Forward to rendering engine (Servo) when integrated
-    // For now: accept the event without actual keypress
+    match result {
+        Ok(val) => {
+            tracing::debug!("dispatchKeyEvent result: {:?}", val);
+            ctx.events.send_page_event(
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": event_type,
+                    "key": key,
+                    "code": code,
+                    "modifiers": modifiers,
+                }),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("dispatchKeyEvent JS eval failed: {}", e);
+        }
+    }
 
-    let keydown_time = p.get("timestamp").and_then(|v| v.as_f64()).unwrap_or(0.0);
     Ok(Some(json!({
-        "timestamp": keydown_time,
+        "timestamp": timestamp,
     })))
 }
 
 /// Input.insertText — insert text as if typed (IME composition).
-async fn insert_text(params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
+async fn insert_text(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let p = params.ok_or_else(|| CdpError {
         code: -32602,
         message: "insertText requires parameters".to_string(),
@@ -91,6 +101,10 @@ async fn insert_text(params: Option<Value>, _ctx: &DispatchContext) -> DomainRes
 
     let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
     tracing::debug!("Input.insertText: text={}", text);
+
+    let js = js_insert_text(text);
+    let mut session_guard = ctx.session.write().await;
+    let _ = session_guard.evaluate_js(&js).await;
 
     Ok(Some(json!({})))
 }
@@ -102,7 +116,11 @@ async fn ime_set_composition(params: Option<Value>, _ctx: &DispatchContext) -> D
         message: "imeSetComposition requires parameters".to_string(),
     })?;
 
-    let selections = p.get("segments").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let selections = p
+        .get("segments")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
     tracing::debug!("Input.imeSetComposition: {} segments", selections);
 
     Ok(Some(json!({})))
@@ -114,13 +132,7 @@ async fn ime_set_composition(params: Option<Value>, _ctx: &DispatchContext) -> D
 
 /// Input.dispatchMouseEvent — simulate mouse events.
 ///
-/// Params:
-/// - type: "mousePressed" | "mouseReleased" | "mouseMoved"
-/// - x: number (viewport-relative)
-/// - y: number (viewport-relative)
-/// - button: "left" | "right" | "middle" | "none"
-/// - clickCount: number
-/// - modifiers: number
+/// Dispatches a real `MouseEvent` on the element at (x, y) via JS.
 async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let p = params.ok_or_else(|| CdpError {
         code: -32602,
@@ -131,28 +143,40 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
     let x = p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let button = p.get("button").and_then(|v| v.as_str()).unwrap_or("none");
-    let click_count = p.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0);
-    let modifiers = p.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+    let click_count = p.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
 
     tracing::debug!(
         "Input.dispatchMouseEvent: type={}, x={}, y={}, button={}, clicks={}",
-        event_type, x, y, button, click_count
+        event_type,
+        x,
+        y,
+        button,
+        click_count
     );
 
-    // Emit mouse event for inspection
-    ctx.events.send_page_event(
-        "Input.dispatchMouseEvent",
-        json!({
-            "type": event_type,
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": click_count,
-            "modifiers": modifiers,
-        }),
-    );
+    // Generate JS to dispatch the mouse event
+    let js = js_dispatch_mouse_event(x, y, event_type, button, click_count);
+    let mut session_guard = ctx.session.write().await;
+    let result = session_guard.evaluate_js(&js).await;
 
-    // TODO: Forward to rendering engine (Servo) when integrated
+    match result {
+        Ok(val) => {
+            tracing::debug!("dispatchMouseEvent result: {:?}", val);
+            ctx.events.send_page_event(
+                "Input.dispatchMouseEvent",
+                json!({
+                    "type": event_type,
+                    "x": x,
+                    "y": y,
+                    "button": button,
+                    "clickCount": click_count,
+                }),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("dispatchMouseEvent JS eval failed: {}", e);
+        }
+    }
 
     Ok(Some(json!({})))
 }
@@ -168,7 +192,12 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
     let x = p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    tracing::debug!("Input.dispatchDragEvent: type={}, x={}, y={}", event_type, x, y);
+    tracing::debug!(
+        "Input.dispatchDragEvent: type={}, x={}, y={}",
+        event_type,
+        x,
+        y
+    );
 
     Ok(Some(json!({})))
 }
@@ -182,7 +211,7 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
 fn calculate_modifiers(params: &serde_json::Value) -> u32 {
     let mut m = 0u32;
     if params.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
-        m |= 1; // click
+        m |= 1;
     }
     if params.get("shiftKey").and_then(|v| v.as_bool()).unwrap_or(false) {
         m |= 8;
@@ -197,4 +226,13 @@ fn calculate_modifiers(params: &serde_json::Value) -> u32 {
         m |= 16;
     }
     m
+}
+
+/// Get current timestamp in milliseconds since epoch.
+fn current_timestamp_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0
 }

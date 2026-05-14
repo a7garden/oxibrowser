@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod dom;
 pub mod fetch;
+pub mod input;
 pub mod network;
 pub mod oxi;
 pub mod page;
@@ -17,6 +18,7 @@ pub mod target;
 
 use crate::event::EventSender;
 use crate::protocol::CdpError;
+use oxibrowser_core::network::SharedRegistry;
 use oxibrowser_core::session::Session;
 use serde_json::Value;
 use std::sync::Arc;
@@ -31,6 +33,8 @@ pub struct DispatchContext {
     pub session: Arc<RwLock<Session>>,
     /// Event sender for emitting CDP events to the client.
     pub events: EventSender,
+    /// Registry of paused requests for Fetch domain interception.
+    pub fetch_registry: SharedRegistry,
 }
 
 /// Result of handling a CDP domain method.
@@ -57,6 +61,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "Fetch" => fetch::handle(method_name, params, ctx).await,
         "Network" => network::handle(method_name, params, ctx).await,
         "OXI" => oxi::handle(method_name, params, ctx),
+        "Input" => input::handle(method_name, params, ctx).await,
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
         "Target" => target::handle(method_name, params),

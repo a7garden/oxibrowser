@@ -8,29 +8,34 @@ OxiBrowser is a headless browser built in pure Rust, designed for AI agents and 
 
 - **Headless browsing** — fetch pages, parse HTML, evaluate JavaScript
 - **CDP (Chrome DevTools Protocol)** — Puppeteer/Playwright compatible WebSocket server
-- **DOM manipulation** — query selectors, text extraction, Markdown conversion
-- **Servo ecosystem** — html5ever for HTML parsing, with a roadmap for full Servo offscreen rendering
+- **DOM manipulation** — query selectors, DOM mutation (createElement, appendChild, removeChild), text extraction, Markdown conversion
+- **CSS text rendering** — ASCII/Unicode DOM→text rendering + PNG screenshot (bitmap font)
+- **AI-agent extensions** — OXI CDP domain with `getMarkdown`, `getPageInfo`
 
 The project targets AI agent workflows where a lightweight, fast, embeddable browser is needed without the overhead of Chromium.
+
+> **Implementation status**: See `CHANGELOG.md` for the authoritative, version-tracked feature history.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                    OxiBrowser                    │
-├─────────────────────────────────────────────────┤
-│  CDP Server (WebSocket, Puppeteer/Playwright)    │
-├─────────────────────────────────────────────────┤
-│  Browser → Session → Page → Frame               │
-├──────────┬──────────┬───────────────────────────┤
-│  WebAPI  │  Network │  JS Runtime (Servo V8/SM) │
-│  DOM     │  HTTP    │  evaluate_javascript()     │
-│  CSS     │  WS      │  event loop                │
-│  Storage │  Cache   │                            │
-├──────────┴──────────┴───────────────────────────┤
-│              Servo Engine (Rendering)            │
-│         html5ever · cssparser · offscreen        │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                      OxiBrowser                        │
+├──────────────────────────────────────────────────────┤
+│  CDP Server (WebSocket, Puppeteer/Playwright compat)    │
+│  10 domains: Browser, DOM, Fetch, Input, Network,       │
+│             OXI, Page, Runtime, Target                  │
+├──────────────────────────────────────────────────────┤
+│  Browser → Session → Page → Frame                     │
+├──────────┬──────────┬──────────────┬─────────────────┤
+│  WebAPI  │  Network │  JS Runtime  │  CSS Rendering  │
+│  DOM     │  HTTP    │  boa_engine  │  PNG screenshot │
+│  Tree    │  Cookies │  ES2024+     │  text→PNG       │
+│  Node    │  SSRF    │  persistent  │  font_8x16.bin  │
+│  Storage │  robots  │  context     │                 │
+├──────────┴──────────┴──────────────┴─────────────────┤
+│           html5ever · encoding_rs · reqwest · image    │
+└──────────────────────────────────────────────────────┘
 ```
 
 ### Core Hierarchy: Browser → Session → Page → Frame
@@ -39,201 +44,183 @@ The project targets AI agent workflows where a lightweight, fast, embeddable bro
 |-------|------|---------------|
 | `Browser` | Top-level singleton | Owns sessions, HTTP client, global cookie jar, browser config |
 | `Session` | Browsing context group | Owns pages, navigation history, local storage, JS runtime |
-| `Page` | Loaded document | Owns root frame, sub-resources, metadata (status, content-type, title) |
+| `Page` | Loaded document | Owns root frame, sub-resources, metadata (status, content-type, title), text rendering |
 | `Frame` | Document frame | Owns parsed DOM (`Document`), child frames (iframes), raw HTML |
 
-Each level has a unique atomic ID (`BrowserId`, `SessionId`, `PageId`, `FrameId`) with thread-safe counters.
-
-### CDP Server
-
-The CDP server (`oxibrowser-cdp`) implements the Chrome DevTools Protocol over WebSocket. It provides:
-- HTTP endpoints: `/json/version`, `/json` (target discovery)
-- WebSocket message dispatch to domain handlers
-- Protocol types: `CdpRequest`, `CdpResponse`, `CdpEvent`
+Each level has a unique atomic ID (`BrowserId`, `SessionId`, `PageId`, `FrameId`, `NodeId`) with thread-safe counters.
 
 ### JS Runtime
 
-Dual-mode JavaScript runtime:
-- **Stub mode** (default): Minimal expression evaluator (string/number/boolean literals, `console.log`, `document.title`, global variable lookup)
-- **Servo mode** (`full-servo` feature, not yet wired): Wraps `servo::WebView::evaluate_javascript()` for real JS execution via SpiderMonkey/V8
+`boa_engine`-based persistent JavaScript runtime:
+
+- **Persistent context** — JS state (variables, functions, closures) survives across `evaluate()` calls
+- Runs on a dedicated `std::thread` with `mpsc` channel communication (boa `Context` is `!Send`)
+- `TokioJobQueue` for `setTimeout`/`setInterval` timer scheduling
+- **JS↔Rust bridges**: fetch channel, localStorage channel, DOM snapshot sync
+
+**Web APIs registered**:
+
+| API | Implementation |
+|-----|----------------|
+| `document.querySelector/All` | DomSnapshot lookup |
+| `document.createElement/createTextNode` | DomMutation creation |
+| `document.activeElement` | Returns document.body |
+| `document.elementFromPoint(x,y)` | DOM-order approximation |
+| `element.appendChild/removeChild` | DomMutation tracking |
+| `element.getAttribute/hasAttribute` | Attribute lookup |
+| `element.addEventListener/dispatchEvent` | Real JS event system |
+| `document.write()` | Appends text node to body |
+| `fetch()` | Channel-based HTTP bridge |
+| `XMLHttpRequest` | Full XHR with callbacks |
+| `localStorage` | Storage interface + Session sync |
+| `MutationObserver` | observe/disconnect/takeRecords |
+| `setTimeout/setInterval/clearTimeout` | TokioJobQueue timers |
+| `atob/btoa` | Base64 encode/decode |
+| `URL/URLSearchParams` | url::Url parsing |
+| `crypto.getRandomValues` | Pseudo-random bytes |
+| `TextEncoder/TextDecoder` | UTF-8 encode/decode |
+
+### CDP Server
+
+The CDP server implements the Chrome DevTools Protocol over WebSocket:
+
+- HTTP endpoints: `/json/version`, `/json` (target discovery)
+- WebSocket message dispatch to **10 domain handlers**
+- Protocol types: `CdpRequest`, `CdpResponse`, `CdpEvent`
+- Event broadcasting: `frameNavigated`, `domContentLoadedEventFired`, `loadEventFired`, `requestWillBeSent`, `responseReceived`, `loadingFinished`, `executionContextCreated`, `consoleAPICalled`
+- **OXI domain**: `OXI.getMarkdown`, `OXI.getPageInfo` (AI-agent extensions)
 
 ### Network Layer
 
-- **HttpClient**: Wraps `reqwest` with cookie injection, redirect following, and configurable pool size
-- **CookieJar**: Domain-scoped cookie storage with `store()` / `cookies_for_url()` methods
-- **Resource**: Typed resource tracking (`Document`, `Script`, `Stylesheet`, `Image`, `Font`, `XHR`, `Fetch`, `WebSocket`, `Other`)
+| Component | Purpose |
+|-----------|---------|
+| `HttpClient` | reqwest wrapper with cookies, intercept |
+| `CookieJar` | Domain-scoped cookie storage |
+| `IpFilter` | SSRF prevention — CIDR blocking |
+| `RobotStore` | RFC 9309 robots.txt parser |
+| `Resource` | Typed resource tracking |
+| `InterceptRegistry` | Paused request tracking for Fetch domain |
+
+### CSS Rendering
+
+`crates/oxibrowser-core/src/css/` provides two renderers:
+
+- **render.rs**: ASCII/Unicode text rendering — `render_to_text()`, `render_to_markdown()`
+- **screenshot.rs**: PNG image rendering — `text_to_png()` with embedded 8×16 bitmap font (ASCII 32–126)
 
 ## Directory Structure
 
 ```
 oxibrowser/
-├── Cargo.toml                  # Workspace definition
+├── Cargo.toml              # Workspace definition
+├── CHANGELOG.md            # Version-tracked feature history
+├── AGENTS.md               # This file — conventions & architecture
 ├── crates/
-│   ├── oxibrowser/             # Binary + CLI entry point (placeholder)
-│   ├── oxibrowser-core/        # Core engine: Browser, Session, Page, Frame
+│   ├── oxibrowser/         # Binary + CLI entry point
 │   │   └── src/
-│   │       ├── lib.rs          # Re-exports
-│   │       ├── browser.rs      # Browser (top-level)
-│   │       ├── session.rs      # Session (browsing context)
-│   │       ├── page.rs         # Page (loaded document)
-│   │       ├── frame.rs        # Frame (DOM + child frames)
-│   │       ├── config.rs       # BrowserConfig
-│   │       ├── error.rs        # CoreError enum
-│   │       ├── js/
-│   │       │   ├── mod.rs      # JS runtime abstraction module
-│   │       │   └── runtime.rs  # JsRuntime (stub + servo modes)
-│   │       └── network/
-│   │           ├── mod.rs      # Network module re-exports
-│   │           ├── client.rs   # HttpClient (reqwest wrapper)
-│   │           ├── cookie.rs   # CookieJar (domain-scoped)
-│   │           └── resource.rs # Resource + ResourceType
-│   ├── oxibrowser-cdp/         # Chrome DevTools Protocol server
-│   │   └── src/
-│   │       ├── lib.rs          # Re-exports (CdpServer)
-│   │       ├── server.rs       # CdpServer: HTTP endpoints (/json, /json/version)
-│   │       ├── session.rs      # CdpSession: per-connection WebSocket dispatch + events
-│   │       ├── protocol.rs     # CdpRequest, CdpResponse, CdpEvent, JsonVersion, JsonTarget
-│   │       ├── event.rs        # EventSender/EventReceiver (broadcast channel)
-│   │       └── domains/
-│   │           ├── mod.rs      # dispatch() router + DispatchContext + DomainResult
-│   │           ├── browser.rs  # Browser domain (getVersion, close)
-│   │           ├── dom.rs      # DOM domain (getDocument, querySelector, ...)
-│   │           ├── fetch.rs    # Fetch domain (network interception)
-│   │           ├── network.rs  # Network domain (enable/disable, lifecycle events)
-│   │           ├── page.rs     # Page domain (navigate, reload, getFrameTree, lifecycle events)
-│   │           ├── runtime.rs  # Runtime domain (evaluate, executionContextCreated)
-│   │           └── target.rs   # Target domain (createTarget, attachToTarget)
+│   │       ├── main.rs     # CLI: fetch, serve, version (clap)
+│   │       └── lib.rs
 │   │   └── tests/
-│   │       └── e2e.rs          # Pure-Rust E2E tests (tokio-tungstenite client)
-│   │           ├── network.rs  # Network domain (enable, disable, ...)
-│   │           ├── page.rs     # Page domain (navigate, reload, screenshot, ...)
-│   │           ├── runtime.rs  # Runtime domain (evaluate, callFunctionOn, ...)
-│   │           └── target.rs   # Target domain (attachToTarget, createTarget, ...)
-│   └── oxibrowser-webapi/      # DOM and Web API implementations
-│       └── src/
-│           ├── lib.rs          # Re-exports (Document)
-│           ├── dom.rs          # DOM module re-exports
-│           └── dom/
-│               ├── document.rs # Document: HTML parsing, queries, Markdown
-│               ├── node.rs     # Node, NodeId, NodeType
-│               └── tree.rs     # Tree: adjacency-list parent/child structure
-├── docs/                       # Documentation (to be created)
-├── AGENTS.md                   # This file
-└── README.md                   # Project overview
+│   │       ├── integration.rs  # Real-website tests (--ignored)
+│   │       └── smoke.rs        # Puppeteer/Playwright smoke tests
+│   ├── oxibrowser-core/     # Core engine
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── browser.rs
+│   │       ├── session.rs
+│   │       ├── page.rs          # to_screenshot_png()
+│   │       ├── frame.rs
+│   │       ├── config.rs
+│   │       ├── encoding.rs     # Charset detection + decoding
+│   │       ├── error.rs        # CoreError + InterceptedResponse
+│   │       ├── js/
+│   │       │   ├── mod.rs      # re-exports + input helpers
+│   │       │   ├── runtime.rs  # JsRuntime — boa_engine context (4871 lines)
+│   │       │   ├── dom_snapshot.rs  # DomSnapshot + DomMutation
+│   │       │   ├── input.rs    # js_dispatch_key/mouse/insert_text()
+│   │       │   └── job_queue.rs
+│   │       ├── css/
+│   │       │   ├── mod.rs      # render_to_text + text_to_png re-exports
+│   │       │   ├── render.rs   # ASCII/Unicode text renderer
+│   │       │   ├── screenshot.rs  # PNG renderer + font data
+│   │       │   └── font_8x16.bin  # 8×16 bitmap font (95 chars, 1520 bytes)
+│   │       └── network/
+│   │           ├── mod.rs       # re-exports
+│   │           ├── client.rs    # HttpClient + intercept()
+│   │           ├── cookie.rs
+│   │           ├── resource.rs
+│   │           ├── ip_filter.rs
+│   │           ├── robots.rs
+│   │           └── intercept.rs  # PausedRequestRegistry + InterceptAction
+│   ├── oxibrowser-cdp/        # CDP server
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server.rs
+│   │       ├── session.rs
+│   │       ├── protocol.rs
+│   │       ├── event.rs
+│   │       └── domains/
+│   │           ├── mod.rs           # dispatch() + DispatchContext
+│   │           ├── browser.rs
+│   │           ├── dom.rs
+│   │           ├── fetch.rs         # continue/fail/fulfillRequest
+│   │           ├── input.rs         # dispatchKey/Mouse/insertText
+│   │           ├── network.rs
+│   │           ├── oxi.rs
+│   │           ├── page.rs         # navigate + captureScreenshot
+│   │           ├── runtime.rs
+│   │           └── target.rs
+│   │   └── tests/e2e.rs       # 23 E2E tests (tokio-tungstenite)
+│   └── oxibrowser-webapi/     # DOM
+│       └── src/dom/{document,node,tree}.rs
+└── docs/                      # Design documents
 ```
-
-## Crate Dependency Map
-
-```
-oxibrowser (binary)
-├── oxibrowser-cdp
-│   └── oxibrowser-core
-│       └── oxibrowser-webapi
-└── oxibrowser-core
-    └── oxibrowser-webapi
-```
-
-| Crate | Depends On | Purpose |
-|-------|-----------|---------|
-| `oxibrowser` | `oxibrowser-core`, `oxibrowser-cdp` | Binary entry point, CLI |
-| `oxibrowser-core` | `oxibrowser-webapi` | Browser lifecycle, network, JS runtime |
-| `oxibrowser-cdp` | `oxibrowser-core` | CDP WebSocket server, protocol dispatch |
-| `oxibrowser-webapi` | *(none internal)* | DOM parsing via html5ever, node/tree types |
 
 ## Code Conventions
 
 ### Language
 
 - All code, comments, docs, commit messages: **English**
-- User-facing documentation: English
 
 ### Rust
 
-- Edition 2021 (workspace-wide)
-- MSRV: current stable Rust
-- `#![warn(missing_docs)]` on public crates (planned)
-- Error handling:
-  - `thiserror` for library crates (`CoreError` enum with `#[derive(Error)]`)
-  - `anyhow` for application/binary crate
-  - `Result<T>` type alias in each crate (`crate::error::Result<T>`)
-- Async: `tokio` runtime throughout
-  - `parking_lot::RwLock` for sync interior mutability (browser sessions list, cookie jar)
-  - `tokio::sync::RwLock` for async-guarded data (Session in Browser)
-- Serialization: `serde` + `serde_json` for wire formats (CDP messages), no TOML config file yet
-- IDs: Atomic counters (`AtomicU64` / `AtomicU32`) for thread-safe unique IDs
+- Edition 2021 (workspace-wide), MSRV: 1.82
+- Error handling: `thiserror` for library crates, `anyhow` for binary
+- Async: `tokio` throughout, `parking_lot::RwLock` for sync, `tokio::sync::RwLock` for async
+- Serialization: `serde` + `serde_json` for CDP wire format
+- IDs: Atomic counters (`AtomicU64`/`AtomicU32`)
 
 ### Naming
 
 - Crates: `oxibrowser-<component>` (kebab-case)
 - Modules: `snake_case`
 - Types/traits: `PascalCase`
-- Public API: verb_noun pattern (`new_session`, `fetch_text`, `query_selector`)
+- Public API: `verb_noun` pattern
 - ID types: `PascalCaseId` (`BrowserId`, `SessionId`, `PageId`, `FrameId`, `NodeId`)
-
-### Error Handling Pattern
-
-Each crate defines its own error enum:
-
-```rust
-// In oxibrowser-core
-#[derive(Error, Debug)]
-pub enum CoreError {
-    #[error("navigation failed: {0}")]
-    NavigationFailed(String),
-    // ...
-}
-pub type Result<T> = std::result::Result<T, CoreError>;
-```
-
-CDP domain handlers return `DomainResult = Result<Option<Value>, CdpError>`.
-
-External error types are converted via `impl From<...> for CoreError`.
 
 ### Async Patterns
 
-- `Browser::new()`, `Session::navigate()` etc. are async
-- `Frame::from_html()` is async (for future servo integration) but currently synchronous internally
-- `JsRuntime::evaluate()` is async (for future servo mode)
+- `Browser::new()`, `Session::navigate()` etc. are `async`
+- `JsRuntime::evaluate()` is `async` (sends command to JS thread via `mpsc` channel)
 - `HttpClient::fetch()` is truly async (reqwest)
 
 ### Interior Mutability
 
-| Data | Lock Type | Reason |
-|------|-----------|--------|
-| `Browser.sessions` | `parking_lot::RwLock<Vec<Arc<tokio::sync::RwLock<Session>>>>` | Sync access to session list, async access to individual sessions |
-| `CookieJar` | `parking_lot::RwLock` inside `Arc` | Shared across HttpClient and Session |
-| `Browser.closed` | `AtomicBool` | Simple flag, no contention |
-| DOM mutation tracking | `dom_version: u64` | Incremented on any DOM mutation |
-
-### Serialization
-
-- CDP protocol types use `#[derive(Serialize, Deserialize)]`
-- `CdpRequest`: `Deserialize` only (incoming)
-- `CdpResponse`, `CdpEvent`, `JsonVersion`, `JsonTarget`: `Serialize` only (outgoing)
-- `#[serde(rename_all = "camelCase")]` for CDP wire format
-- `#[serde(skip_serializing_if = "Option::is_none")]` to minimize wire size
+| Data | Lock | Reason |
+|------|------|--------|
+| `Browser.sessions` | `parking_lot::RwLock` | Sync access to list |
+| `Session` in Browser | `tokio::sync::RwLock` | Async access per session |
+| `CookieJar` | `parking_lot::RwLock` in `Arc` | Shared across HttpClient and Session |
+| DOM mutations | `parking_lot::RwLock<Vec<DomMutation>>` | Shared between JS thread and async callers |
 
 ## Testing Strategy
 
-- Unit tests in `#[cfg(test)] mod tests` within each file
-- Integration tests in `tests/` directory per crate
+- Unit tests: `#[cfg(test)] mod tests` within each file
+- Integration tests: `tests/` directory per crate
+- E2E tests: `crates/oxibrowser-cdp/tests/e2e.rs` (tokio-tungstenite WebSocket client)
+- Smoke tests: `crates/oxibrowser/tests/smoke.rs` (Puppeteer process spawn)
 - `cargo test --workspace` must pass at every commit
-- DOM parsing tests: use `Document::parse()` with known HTML, assert node structure
-- CDP tests: construct `CdpRequest` JSON, call `dispatch()`, assert `CdpResponse`
-- Network tests: mock HTTP responses via `mockito` or similar (planned)
-
-### Key Test Scenarios
-
-| Component | Test Focus |
-|-----------|------------|
-| `Document::parse()` | HTML parsing correctness, edge cases (malformed HTML, empty input) |
-| `Tree` | Parent/child relationships, traversal (DFS, BFS) |
-| `Node` | Type checks, attribute access |
-| `CookieJar` | Store/retrieve, domain isolation |
-| `JsRuntime` (stub) | Literal evaluation, console.log, globals |
-| CDP `dispatch()` | Domain routing, error codes, unknown domain |
-| `Browser` lifecycle | Create → new_session → close, double-close, max_sessions |
-| `Session` navigation | Navigate → go_back → go_forward → reload |
+- Real-website integration tests: `--ignored` flag required
 
 ## Commit Conventions
 
@@ -244,222 +231,79 @@ Types: feat, fix, refactor, test, docs, chore
 Scopes: core, cdp, webapi, cli, docs
 ```
 
-Examples:
-```
-feat(cdp): implement Page.navigate domain handler
-fix(core): handle empty HTML input in Frame::from_html
-refactor(webapi): optimize Tree::traverse_dfs to use iterative approach
-test(cdp): add dispatch tests for all six CDP domains
-docs: update ARCHITECTURE.md with session lifecycle diagram
-```
-
 ## Key Principles
 
-1. **Mirrors Lightpanda but Rust-native:** The Browser → Session → Page → Frame hierarchy is directly inspired by Lightpanda's `Browser.zig` / `Session.zig` / `Page.zig` / `Frame.zig`. We port the architecture, not the code.
+1. **Mirrors Lightpanda but Rust-native**: Browser → Session → Page → Frame hierarchy ported from Lightpanda's Zig code.
 
-2. **Servo-powered:** Use Servo ecosystem crates (html5ever, markup5ever, string_cache) for HTML parsing. Full Servo rendering integration is the roadmap goal.
+2. **CDP-compatible**: Wire-compatible with Chrome DevTools Protocol. Puppeteer and Playwright must connect without knowing they're talking to OxiBrowser.
 
-3. **CDP-compatible:** The CDP server must be wire-compatible with Chrome DevTools Protocol 1.3. Puppeteer and Playwright must be able to connect and perform basic operations without knowing they're talking to OxiBrowser.
+3. **Pure Rust, zero C deps**: `boa_engine` for JS (no V8/SpiderMonkey), `encoding_rs` for charset (no ICU). Single static binary.
 
-4. **No reimplementation:** Use `reqwest` for HTTP, `html5ever` for parsing, `tokio-tungstenite` for WebSocket, `serde_json` for serialization. Don't reinvent the wheel.
+4. **AI-agent-first**: Designed for programmatic control via CDP. Optimization targets: startup time, memory usage, CDP response latency.
 
-5. **AI-agent-first:** Designed for programmatic control via CDP, not human interactive browsing. Optimization targets: startup time, memory usage, CDP response latency.
+5. **Thread-safe by default**: All shared state uses `Arc<RwLock>`, `AtomicBool`, `AtomicU64`.
 
-6. **Progressive enhancement:** Stub implementations (JS runtime, rendering) are acceptable for initial scaffolding. Each stub must have a clear path to the real implementation (servo mode).
+## Key Technical Decisions
 
-7. **Thread-safe by default:** All shared state uses appropriate synchronization (`Arc<RwLock<...>>`, `AtomicBool`, `AtomicU64`).
+### boa_engine for JS runtime
+
+`boa_engine` is pure Rust ES2024+ JavaScript engine — no C dependencies, MIT licensed, lightweight (~1MB compiled). `Context` is `!Send` so JS runs on a dedicated `std::thread` with `mpsc` channels.
+
+### JsRuntime thread architecture
+
+```
+main thread (async)          JS thread (sync, std::thread)
+┌─────────────┐             ┌──────────────────┐
+│ JsRuntime   │──mpsc send─→│ Context (persist)│
+│ evaluate()  │             │  register APIs    │
+│ set_dom()   │←mpsc recv───│  eval(script)    │
+└─────────────┘             └──────────────────┘
+```
+
+JS state persists across calls. `TokioJobQueue` bridges `setTimeout`/`setInterval` to tokio's timer wheel.
+
+### JS↔DOM bridge (DomSnapshot)
+
+DOM lives in webapi (main thread), JS lives in boa (JS thread):
+
+1. `Frame`'s `Document` → `DomSnapshot::from_frame()` → serialized → sent to JS thread
+2. JS operates via `document.querySelector()`, `createElement()`, etc.
+3. Mutations collected as `Vec<DomMutation>` → drained by main thread → applied to real DOM
+
+### JS↔Network bridge
+
+JS `fetch()` and `XMLHttpRequest` use `std::sync::mpsc` channels:
+- JS thread sends `FetchRequestMsg` → blocking thread receives → calls `HttpClient` → sends `FetchResponseMsg` back
 
 ## Development Guide
 
 ### Adding a New CDP Domain
 
-1. **Create the domain file** at `crates/oxibrowser-cdp/src/domains/<domain>.rs`:
+1. Create `crates/oxibrowser-cdp/src/domains/<domain>.rs` with `handle()` function
+2. Add `pub mod my_domain` and `"MyDomain" => my_domain::handle()` in `domains/mod.rs`
+3. Add tests in `#[cfg(test)]` block
 
-```rust
-//! <Domain> domain implementation.
+### Adding a New JS Global (Web API)
 
-use super::DomainResult;
-use crate::protocol::CdpError;
-use serde_json::Value;
+1. Register in `create_context()` at `crates/oxibrowser-core/src/js/runtime.rs`
+2. For async operations: create an `mpsc` channel bridge
+3. For DOM operations: add to `DomSnapshot` and `DomMutation` types
+4. Test via `JsRuntime::evaluate()` in a unit test
 
-/// Handle a <domain> method.
-pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
-    match method {
-        "methodA" => method_a(params),
-        "methodB" => method_b(params),
-        _ => Err(CdpError {
-            code: -32601,
-            message: format!("unknown method: <domain>.{}", method),
-        }),
-    }
-}
+### Adding a New CSS Renderer
 
-fn method_a(params: Option<Value>) -> DomainResult {
-    // Implementation
-    Ok(Some(serde_json::json!({ "result": "value" })))
-}
-
-fn method_b(params: Option<Value>) -> DomainResult {
-    // Implementation
-    Ok(None)
-}
-```
-
-2. **Register in dispatcher** at `crates/oxibrowser-cdp/src/domains/mod.rs`:
-
-```rust
-pub mod my_domain;  // Add module declaration
-
-// In dispatch():
-match domain {
-    // ... existing domains ...
-    "MyDomain" => my_domain::handle(method_name, params),
-    _ => Err(CdpError { ... }),
-}
-```
-
-3. **Add tests** in a `#[cfg(test)] mod tests` block at the bottom of the domain file.
-
-4. **Document** in `docs/CDP.md`.
-
-### Adding a New WebAPI Type
-
-1. **Create the type file** at `crates/oxibrowser-webapi/src/dom/<type>.rs` or a new sub-module.
-
-2. **Define the type** using `NodeType` variants or new structs:
-
-```rust
-/// A new WebAPI type.
-pub struct MyType {
-    // fields
-}
-
-impl MyType {
-    pub fn new() -> Self { ... }
-}
-```
-
-3. **Register the module** in `crates/oxibrowser-webapi/src/dom.rs`:
-
-```rust
-pub mod my_type;
-pub use my_type::MyType;
-```
-
-4. **Ensure `Document` can interact with it** if the type is DOM-related (add query methods, mutation methods as needed).
-
-### Adding a New DOM Operation
-
-1. **Identify the right layer:**
-   - **Tree structure** (parent/child, traversal) → `tree.rs`
-   - **Node data** (attributes, type checks) → `node.rs`
-   - **Document-level queries** (CSS selectors, text extraction) → `document.rs`
-
-2. **Add the method** to the appropriate type.
-
-3. **If mutation:** increment `dom_version` in the containing `Frame` (via `Frame::document_mut()`).
-
-4. **Add tests** for the operation with known HTML fixtures.
-
-### Adding a New Network Feature
-
-1. **Core networking** → `crates/oxibrowser-core/src/network/`
-2. **Use `HttpClient`** as the entry point for all HTTP operations.
-3. **Cookie handling** → `CookieJar` (add methods as needed).
-4. **Resource tracking** → `Resource` / `ResourceType` (add variants as needed).
-
-### Adding a Browser Config Option
-
-1. **Add field** to `BrowserConfig` in `config.rs`.
-2. **Set default** in `Default::default()`.
-3. **Use in** `HttpClient::new()`, `Browser::new()`, or `Session` methods as appropriate.
-4. **Document** the new option.
+1. Add module in `crates/oxibrowser-core/src/css/`
+2. Export via `crates/oxibrowser-core/src/css/mod.rs`
+3. Wire into `Page::to_screenshot_png()` or create new `Page` method
 
 ## Build & Run
 
 ```bash
 cargo build                    # Build everything
-cargo test --workspace         # Run all tests
-cargo run                      # Run oxibrowser (when binary is wired)
-cargo build --release          # Release build
+cargo test --workspace         # Run all tests (208 tests)
+cargo test --workspace -- --ignored  # Include real-website integration tests
+cargo run -- fetch <url>       # Fetch and render a URL
+cargo run -- serve              # Start CDP server
+cargo run -- version            # Print version
+cargo build --release           # Release build
 ```
-
-### Feature Flags
-
-| Flag | Crate | Description |
-|------|-------|-------------|
-| `full-servo` | `oxibrowser-core` | Enable Servo engine for real JS execution and rendering (not yet implemented) |
-
-## Current Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| `Browser` | ✅ Complete | Lifecycle, sessions, cookie jar |
-| `Session` | ✅ Complete | Navigation, history, local storage |
-| `Page` | ✅ Complete | HTML loading, title extraction, resources |
-| `Frame` | ✅ Complete | DOM parsing, child frames, queries, sub-resource extraction |
-| `Document` | ✅ Complete | html5ever parsing, CSS selectors, Markdown, resource URL extraction |
-| `Tree` | ✅ Complete | Adjacency list, DFS/BFS traversal |
-| `Node` | ✅ Complete | Type variants, attribute access |
-| `JsRuntime` | ✅ **boa_engine** | Real JS execution (ES2024+), pure Rust, no C deps |
-| `HttpClient` | ✅ Complete | reqwest wrapper with cookies |
-| `CookieJar` | ✅ Complete | Domain-scoped storage |
-| `Resource` | ✅ Complete | Typed resource tracking |
-| `BrowserConfig` | ✅ Complete | Timeout, viewport, TLS, pool size |
-| `CoreError` | ✅ Complete | Typed error variants with `From` impls |
-| CDP Protocol types | ✅ Complete | CdpRequest/Response/Event, JsonVersion/Target |
-| CDP Event Broadcasting | ✅ Complete | EventSender/EventReceiver with atomic flags |
-| CDP DispatchContext | ✅ Complete | Session + EventSender in one context |
-| CDP Domain dispatch | ✅ Complete | Router dispatches to 7 domain handlers |
-| CDP Server | ✅ Complete | HTTP endpoints + WebSocket upgrade (RFC 6455) |
-| CDP Session | ✅ Complete | Per-connection dispatch loop with event forwarding |
-| CDP Domain handlers | ✅ Complete | Browser, DOM, Fetch, Network, Page, Runtime, Target |
-| CDP Page events | ✅ Complete | frameNavigated, domContentLoadedEventFired, loadEventFired |
-| CDP Runtime events | ✅ Complete | executionContextCreated, consoleAPICalled |
-| CDP Network events | ✅ Complete | requestWillBeSent, responseReceived, loadingFinished |
-| CDP Fetch domain | ✅ Complete | enable/disable/continueRequest/failRequest/fulfillRequest |
-| E2E Test Suite | ✅ Complete | 15 pure-Rust E2E tests via tokio-tungstenite |
-| Binary / CLI | ✅ Complete | `fetch`, `serve`, `version` subcommands via clap |
-| Servo rendering | 🔲 Planned | Offscreen rendering pipeline (separate from JS engine) |
-
-## Key Technical Decisions
-
-### boa_engine vs servo
-
-**servo** was initially considered for JS execution, but:
-- servo 0.1.0's embedder API is still `pub(crate)` (not public)
-- servo is a full browser engine (rendering, layout, etc.) — overkill for JS-only need
-- servo embedder API is still evolving
-
-**boa_engine** (pure Rust JS engine) is the right choice:
-- 100% pure Rust — no C dependencies (no SpiderMonkey, no V8)
-- MIT licensed
-- ES2024+ standard compliance
-- Lightweight (~1MB compiled vs servo >10MB)
-- Stable, public API with `Context::eval()`, `register_global_callable()`, etc.
-- `JsArray::from_iter()`, `JsArray::at()` for array access
-
-### JsRuntime architecture
-
-Since `boa_engine::Context` is `!Send` (internal GC uses `NonNull`):
-- We create a **fresh Context** on each `evaluate()` call (~μs overhead, acceptable)
-- Global state (variables) is tracked in Rust `RwLock<HashMap>` and injected per-eval
-- Thread-safe for tokio multi-thread: `JsRuntime` itself is `Send + Sync`
-
-### JsValue ↔ serde_json::Value
-
-Conversion implemented for all JS types:
-- `null`/`undefined` → `Value::Null`
-- `boolean` → `Value::Bool`
-- `integer`/`rational` → `Value::Number`
-- `string` → `Value::String`
-- `symbol` → `Value::String("[symbol]")`
-- `bigint` → stringified
-- `object` → arrays use `JsArray::from_object()` + `length()`/`at()`, others stringify
-
-### console.log implementation
-
-- `console_log_fn` as `NativeFunction::from_fn_ptr(console_log_fn)`
-- Registered via `context.register_global_callable()` as `log`
-- `console` object registered via `ObjectInitializer::new()` with `.log` method
-

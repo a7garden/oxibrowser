@@ -1,8 +1,14 @@
 //! HTTP client for resource fetching.
+//!
+//! Provides:
+//! - `fetch` — standard HTTP GET with cookies
+//! - `intercept` — fetch with an InterceptAction (continue/fail/fulfill)
+//! - `fetch_text`, `post`, `post_json` — convenience methods
 
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::network::cookie::CookieJar;
+use crate::network::intercept::{InterceptAction, InterceptedBody, InterceptedResponse};
 use parking_lot::RwLock;
 use reqwest::{Client, Response};
 use std::sync::Arc;
@@ -62,6 +68,76 @@ impl HttpClient {
         }
 
         Ok(response)
+    }
+
+    /// Fetch with an InterceptAction from the Fetch domain.
+    ///
+    /// - `Continue`: perform the actual HTTP request (with optional modifications)
+    /// - `Fail`: return a network error immediately
+    /// - `Fulfill`: return a synthetic response via InterceptedResponse
+    pub async fn intercept(
+        &self,
+        url: &Url,
+        _method: Option<&str>,
+        _headers: &[(String, String)],
+        _post_data: Option<&str>,
+        action: InterceptAction,
+    ) -> Result<Response> {
+        use reqwest::header::{HeaderName, HeaderValue};
+
+        match action {
+            InterceptAction::Continue { url: url_mod, method: method_mod, headers: headers_mod, post_data: post_data_mod } => {
+                let effective_url = url_mod.as_ref().and_then(|u| Url::parse(u).ok()).unwrap_or_else(|| url.clone());
+                let effective_method = method_mod.as_deref().unwrap_or("GET");
+                let effective_post = post_data_mod.as_deref();
+                let cookies = self.cookie_jar.read().cookies_for_url(&effective_url);
+
+
+                let mut req_builder = if effective_method == "POST" {
+                    let body = effective_post.unwrap_or_default();
+                    self.client.post(effective_url.as_str()).body(body.to_string())
+                } else {
+                    self.client.get(effective_url.as_str())
+                };
+
+                if !cookies.is_empty() {
+                    req_builder = req_builder.header("Cookie", cookies);
+                }
+                // Apply modified headers
+                for (k, v) in headers_mod.iter() {
+                    if let (Ok(name), Ok(val)) = (
+                        HeaderName::try_from(k.as_str()),
+                        HeaderValue::try_from(v.as_str()),
+                    ) {
+                        req_builder = req_builder.header(name, val);
+                    }
+                }
+
+                let response = req_builder
+                    .send()
+                    .await
+                    .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+                if let Some(set_cookie) = response.headers().get("set-cookie") {
+                    if let Ok(val) = set_cookie.to_str() {
+                        self.cookie_jar.write().store(&effective_url, val);
+                    }
+                }
+                Ok(response)
+            }
+            InterceptAction::Fail { error_reason } => {
+                Err(CoreError::NetworkError(error_reason))
+            }
+            InterceptAction::Fulfill { status_code, status_text, headers: resp_headers, body } => {
+                let resp = InterceptedResponse {
+                    status_code,
+                    status_text,
+                    headers: resp_headers,
+                    body: InterceptedBody::Bytes(body),
+                };
+                Err(CoreError::InterceptedResponse(resp))
+            }
+        }
     }
 
     /// Fetch URL and return body as a string, auto-detecting encoding.

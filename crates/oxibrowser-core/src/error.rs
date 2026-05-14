@@ -2,6 +2,18 @@
 
 use thiserror::Error;
 
+// Re-export intercept types from network module (single source of truth)
+pub use crate::network::{InterceptedBody, InterceptedResponse};
+
+/// Either a real HTTP response or a synthetic intercepted response.
+#[derive(Debug)]
+pub enum FetchResult {
+    /// Real HTTP response from reqwest.
+    Real(reqwest::Response),
+    /// Synthetic response from Fetch.fulfillRequest.
+    Intercepted(InterceptedResponse),
+}
+
 /// Core error type.
 #[derive(Error, Debug)]
 pub enum CoreError {
@@ -52,6 +64,10 @@ pub enum CoreError {
 
     #[error("DOM error: {0}")]
     DomError(String),
+
+    /// Intercepted response from Fetch.fulfillRequest (synthetic response).
+    #[error("intercepted response")]
+    InterceptedResponse(InterceptedResponse),
 }
 
 /// Convenience Result alias.
@@ -65,12 +81,10 @@ impl From<url::ParseError> for CoreError {
 
 impl From<reqwest::Error> for CoreError {
     fn from(e: reqwest::Error) -> Self {
-        // Classify reqwest errors into more specific variants
         if e.is_timeout() {
             return CoreError::ConnectionTimeout(e.to_string());
         }
         if e.is_connect() {
-            // Check for DNS-like errors
             let msg = e.to_string();
             if msg.contains("dns")
                 || msg.contains("resolve")

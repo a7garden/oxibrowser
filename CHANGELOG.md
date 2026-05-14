@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Input domain**: `Input.dispatchKeyEvent`, `Input.dispatchMouseEvent`, `Input.insertText` — dispatch real `KeyboardEvent`/`MouseEvent` via JS evaluation on `document.activeElement` / `document.elementFromPoint()`
+- **document.activeElement**: JS getter returning `document.body` (no real focus tracking)
+- **document.elementFromPoint(x, y)**: JS method approximating element hit-testing by DOM order with estimated element heights
+- **Page.captureScreenshot**: Real PNG output using built-in 8×16 bitmap font (ASCII 32–126) — renders DOM text content as white-background image, base64-encoded PNG response
+- **Fetch domain complete**: `continueRequest` (modify headers/URL/postData, resume), `failRequest` (fail with error reason), `fulfillRequest` (synthetic response), `getResponseBody` — with `PausedRequestRegistry` for request tracking
+- **HttpClient.intercept()**: HTTP fetch with `InterceptAction` (Continue/Fail/Fulfill) — enables Fetch domain interception integration
+- **InterceptedResponse**: New error variant for synthetic HTTP responses from Fetch.fulfillRequest
+- **Input JS helpers**: `js_dispatch_key_event()`, `js_dispatch_mouse_event()`, `js_insert_text()` — generate JS code strings for Input domain dispatch
+
+### Tests
+- 208 tests pass (164 core + 23 E2E + 18 webapi + 3 smoke)
+
 ## [0.5.0] - 2025-05-13
 
 ### Added
@@ -15,8 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - 205 tests pass (152 core + 3 smoke + 22 E2E + 18 webapi + 10 event)
-- 9 integration tests (real websites, `--ignored` flag)
-
 
 ## [0.4.0] - 2025-05-13
 
@@ -32,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - 201 tests pass (151 core + 22 E2E + 18 webapi + 10 event)
-- 9 integration tests (real websites, `--ignored` flag required)
 
 ## [0.3.0] - 2025-05-13
 
