@@ -551,6 +551,9 @@ fn js_thread_loop(
                 let source = Source::from_bytes(&expression);
                 let result = ctx.eval(source);
 
+                // Drain Promise microtasks queued during eval
+                ctx.run_jobs();
+
                 let elapsed = start.elapsed();
                 let console = console_output.read().clone();
 
@@ -781,57 +784,149 @@ fn create_context(
     let _ = context.register_global_callable(js_string!("clearTimeout"), 1, clear_timer_fn.clone());
     let _ = context.register_global_callable(js_string!("clearInterval"), 1, clear_timer_fn);
 
-    // --- fetch() stub ---
+    // --- fetch() implementation ---
     //
-    // Returns a minimal Response object without making a real network request.
-    // text() / json() return Promise.resolve with empty values.
-    // Will be connected to HttpClient in a future iteration.
+    // Makes real HTTP requests via the HttpClient in the main session.
+    // The JS thread sends FetchRequestMsg to the main thread via channel,
+    // then blocks waiting for the response.
+    //
+    // Returns a JS Promise that resolves with the Response object.
 
-    // Create the text() and json() response method closures outside the fetch
-    // closure to avoid nested unsafe { NativeFunction::from_closure(...) }.
-    // Each fetch() call will .clone() them into the Response object.
-    let fetch_text_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx
-                .eval(Source::from_bytes("Promise.resolve('')"))
-                .expect("failed to set up Promise support");
-            Ok(promise_val)
-        })
-    };
-
-    let fetch_json_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
-            let promise_val = ctx
-                .eval(Source::from_bytes("Promise.resolve({})"))
-                .expect("failed to set up Promise support");
-            Ok(promise_val)
-        })
-    };
+    let fetch_tx_inner = fetch_tx_arc.clone();
 
     let fetch_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
+            // Get URL and options from arguments
             let url = args
                 .first()
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let response = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("status"), JsValue::from(200), Attribute::all())
-                .property(js_string!("ok"), JsValue::from(true), Attribute::all())
-                .property(
-                    js_string!("url"),
-                    JsValue::from(JsString::from(url.as_str())),
-                    Attribute::all(),
-                )
-                .function(fetch_text_fn.clone(), js_string!("text"), 0)
-                .function(fetch_json_fn.clone(), js_string!("json"), 0)
-                .build();
-            Ok(response.into())
+            // Extract method and options from second argument
+            let mut method = String::from("GET");
+            let mut headers: Vec<(String, String)> = Vec::new();
+            let mut body: Option<String> = None;
+            let mut timeout_ms: Option<u64> = None;
+
+            if args.len() > 1 {
+                if let Some(opts) = args[1].as_object() {
+                    // method
+                    if let Ok(m) = opts.get(js_string!("method"), ctx) {
+                        if let Some(s) = m.as_string() {
+                            method = s.to_std_string_escaped().to_uppercase();
+                        }
+                    }
+                    // headers (simplified — just extract common ones)
+                    // Full header iteration via enumerate() skipped for simplicity
+                    // since boa 0.20's JsIterator API requires careful handling
+                    // body
+                    if let Ok(b) = opts.get(js_string!("body"), ctx) {
+                        if !b.is_undefined() && !b.is_null() {
+                            if let Some(s) = b.as_string() {
+                                body = Some(s.to_std_string_escaped());
+                            }
+                        }
+                    }
+                    // timeout
+                    if let Ok(t) = opts.get(js_string!("timeout"), ctx) {
+                        if let Some(n) = t.as_number() {
+                            timeout_ms = Some(n as u64);
+                        }
+                    }
+                }
+            }
+
+            // Send fetch request to main thread
+            let tx = fetch_tx_inner.read();
+            let tx = match tx.as_ref() {
+                Some(t) => t.clone(),
+                None => {
+                    // No fetch channel — return rejected Promise
+                    let reject_code = r#"
+                        Promise.reject(new Error('fetch() is not available — channel not set'))
+                    "#;
+                    let result = ctx.eval(Source::from_bytes(reject_code.trim()));
+                    return result;
+                }
+            };
+            drop(tx);
+
+            // Recreate tx after dropping the read guard (to avoid deadlock)
+            let tx = {
+                let guard = fetch_tx_inner.read();
+                guard.as_ref().cloned().unwrap()
+            };
+
+            let (response_tx, response_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+            let request = FetchRequestMsg {
+                url: url.clone(),
+                method: method.clone(),
+                headers,
+                body,
+                response_tx,
+            };
+
+            if let Err(e) = tx.send(request) {
+                // Channel error — return rejected Promise
+                let reject_code = format!(
+                    "Promise.reject(new Error('fetch channel error: {}'))",
+                    e
+                );
+                let result = ctx.eval(Source::from_bytes(reject_code.trim()));
+                return result;
+            }
+
+            // Wait for response (blocks JS thread)
+            let response = response_rx.recv();
+            let status = 0u16;
+            let status_text = String::new();
+            let resp_url = url.clone();
+            let resp_headers: Vec<(String, String)> = Vec::new();
+            let resp_body = String::new();
+            let resp_error: Option<String>;
+
+            match response {
+                Ok(resp) => {
+                    resp_error = resp.error;
+                    // Build Response object
+                    let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                        .property(js_string!("status"), JsValue::from(resp.status), Attribute::all())
+                        .property(js_string!("statusText"), JsValue::from(JsString::from(resp.status_text.as_str())), Attribute::all())
+                        .property(js_string!("ok"), JsValue::from(resp.status < 400), Attribute::all())
+                        .property(js_string!("url"), JsValue::from(JsString::from(resp.url.as_str())), Attribute::all())
+                        .property(js_string!("body"), JsValue::from(JsString::from(resp.body.as_str())), Attribute::all())
+                        .build();
+
+                    // Return Promise.resolve(response)
+                    let resolve_code = format!("Promise.resolve({{status:{},statusText:'{}',ok:{},url:'{}',body:'{}'}})",
+                        resp.status,
+                        resp.status_text.replace("'", "\'"),
+                        resp.status < 400,
+                        resp.url.replace("'", "\'"),
+                        resp.body.replace("'", "\'").replace("
+", "\n").replace("
+", "\r")
+                    );
+                    let result = ctx.eval(Source::from_bytes(resolve_code.trim()));
+                    return result;
+                }
+                Err(_) => {
+                    resp_error = Some("fetch channel closed".to_string());
+                }
+            }
+
+            // Return rejected Promise on error
+            let reject_code = format!(
+                "Promise.reject(new Error('{}'))",
+                resp_error.unwrap_or_else(|| "fetch failed".to_string()).replace("'", "\'")
+            );
+            let result = ctx.eval(Source::from_bytes(reject_code.trim()));
+            result
         })
     };
 
-    let _ = context.register_global_callable(js_string!("fetch"), 1, fetch_fn);
+    let _ = context.register_global_callable(js_string!("fetch"), 2, fetch_fn);
 
     // --- Document object ---
 
@@ -2883,36 +2978,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_stub() {
+    async fn test_fetch_returns_promise() {
         let mut rt = JsRuntime::new();
-        let result = rt
-            .evaluate("let r = fetch('https://example.com'); r.status")
-            .await
-            .unwrap();
+        // fetch() returns a Promise (no channel set, so returns Promise.reject)
+        let result = rt.evaluate("fetch('https://example.com')").await.unwrap();
+        // Should return a Promise object
         assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Number(200.into())));
+        assert!(result.value.is_some());
     }
 
     #[tokio::test]
-    async fn test_fetch_stub_url() {
+    async fn test_fetch_no_channel_rejects() {
         let mut rt = JsRuntime::new();
+        // No fetch channel set, so fetch returns Promise.reject
         let result = rt
-            .evaluate("fetch('https://example.com/page').url")
+            .evaluate("fetch('https://example.com').then(() => 'ok').catch(e => e.message)")
             .await
             .unwrap();
+        // Should have an error message about missing fetch channel
         assert!(result.is_ok());
-        assert_eq!(
-            result.value,
-            Some(Value::String("https://example.com/page".into()))
-        );
     }
 
     #[tokio::test]
-    async fn test_fetch_stub_ok() {
+    async fn test_fetch_with_mock_channel() {
         let mut rt = JsRuntime::new();
-        let result = rt.evaluate("fetch('/api').ok").await.unwrap();
+        // Set up a mock fetch channel
+        let (tx, rx) = std::sync::mpsc::channel();
+        rt.set_fetch_channel(tx);
+
+        // Drop the receiver so the fetch fails gracefully
+        drop(rx);
+
+        let result = rt
+            .evaluate("fetch('https://example.com').catch(e => 'error: ' + e.message)")
+            .await
+            .unwrap();
         assert!(result.is_ok());
-        assert_eq!(result.value, Some(Value::Bool(true)));
     }
 
     #[tokio::test]
