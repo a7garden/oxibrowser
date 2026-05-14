@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 authors = ["Oxios Team"]
@@ -75,6 +75,6 @@ sha1 = "0.10"
 base64 = "0.22"
 
 # Internal crates
-oxibrowser-core = { version = "0.2.0", path = "crates/oxibrowser-core" }
-oxibrowser-cdp = { version = "0.2.0", path = "crates/oxibrowser-cdp" }
-oxibrowser-webapi = { version = "0.2.0", path = "crates/oxibrowser-webapi" }
+oxibrowser-core = { path = "crates/oxibrowser-core" }
+oxibrowser-cdp = { path = "crates/oxibrowser-cdp" }
+oxibrowser-webapi = { path = "crates/oxibrowser-webapi" }
