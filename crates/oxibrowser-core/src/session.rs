@@ -11,10 +11,12 @@ use crate::js::runtime::JsRuntimeConfig;
 use crate::js::JsRuntime;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
+use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg};
 use crate::page::Page;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+/// (JoinHandle removed — using std::thread instead)
 use tracing::info;
 use url::Url;
 
@@ -60,8 +62,45 @@ pub struct Session {
     local_storage: std::collections::HashMap<String, String>,
     /// JS runtime (per-session).
     js_runtime: JsRuntime,
+    /// Fetch handler task handle (for cleanup).
+    #[allow(dead_code)]
+    fetch_task: Option<std::thread::JoinHandle<()>>,
     /// Whether the session has been closed.
     closed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Fetch handler
+// ---------------------------------------------------------------------------
+
+/// Handle fetch requests from the JS thread.
+/// Runs on a std::thread because std::sync::mpsc is blocking.
+fn handle_fetch_requests(fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>) {
+    loop {
+        // Use a timeout to avoid blocking forever
+        match fetch_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(request) => {
+                // Process the fetch request
+                // For now, just acknowledge receipt
+                let _ = request.response_tx.send(FetchResponseMsg {
+                    status: 500,
+                    status_text: "Fetch handler not yet implemented".to_string(),
+                    url: request.url,
+                    headers: vec![],
+                    body: String::new(),
+                    error: Some("fetch() is not yet connected to HttpClient".to_string()),
+                });
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Continue waiting
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Channel closed — exit
+                break;
+            }
+        }
+    }
 }
 
 impl Session {
@@ -73,6 +112,19 @@ impl Session {
         cookie_jar: Arc<RwLock<CookieJar>>,
     ) -> Result<Self> {
         let js_config = JsRuntimeConfig::from(&config);
+
+        // Create fetch channel
+        let (fetch_tx, fetch_rx) = std::sync::mpsc::channel();
+
+        // Create JS runtime and wire up fetch channel
+        let mut js_runtime = JsRuntime::with_config(js_config);
+        js_runtime.set_fetch_channel(fetch_tx);
+
+        // Spawn fetch handler on a blocking thread
+        let fetch_task = Some(std::thread::spawn(move || {
+            handle_fetch_requests(fetch_rx);
+        }));
+
         Ok(Self {
             id: SessionId::next(),
             browser_id,
@@ -83,7 +135,8 @@ impl Session {
             history: Vec::new(),
             history_index: 0,
             local_storage: std::collections::HashMap::new(),
-            js_runtime: JsRuntime::with_config(js_config),
+            js_runtime,
+            fetch_task,
             closed: false,
         })
     }
