@@ -3,38 +3,27 @@
 //! Provides an `EventSender` that domain handlers use to queue CDP events,
 //! and a background task that drains the queue and sends them over the
 //! WebSocket connection.
-//!
-//! Mirrors Lightpanda's `Notification.zig` approach: each `CdpSession`
-//! owns a broadcaster, and domain handlers receive a clone of the sender.
 
+use crate::domains::fetch::FetchPattern;
 use crate::protocol::CdpEvent;
+use std::sync::RwLock;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 /// Sender half of the event broadcaster.
-///
-/// Domain handlers call `send()` to queue events. The `EventReceiver`
-/// drains them and forwards to the WebSocket.
-///
-/// The enabled flags use `AtomicBool` for interior mutability — domain
-/// handlers only have `&self` but need to toggle these flags.
 #[derive(Clone)]
 pub struct EventSender {
     tx: mpsc::UnboundedSender<CdpEvent>,
-    /// Whether Page domain events are enabled.
     page_enabled: Arc<AtomicBool>,
-    /// Whether Runtime domain events are enabled.
     runtime_enabled: Arc<AtomicBool>,
-    /// Whether Network domain events are enabled.
     network_enabled: Arc<AtomicBool>,
-    /// Whether Fetch domain events are enabled.
     fetch_enabled: Arc<AtomicBool>,
+    /// Fetch interception patterns (set via Fetch.enable).
+    fetch_patterns: Arc<RwLock<Vec<FetchPattern>>>,
 }
-
-/// Wrapper for `Arc<AtomicBool>` to keep the import clean.
-use std::sync::Arc;
 
 /// Receiver half of the event broadcaster.
 pub struct EventReceiver {
@@ -50,6 +39,7 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
         runtime_enabled: Arc::new(AtomicBool::new(false)),
         network_enabled: Arc::new(AtomicBool::new(false)),
         fetch_enabled: Arc::new(AtomicBool::new(false)),
+        fetch_patterns: Arc::new(RwLock::new(Vec::new())),
     };
     let receiver = EventReceiver { rx };
     (sender, receiver)
@@ -97,7 +87,7 @@ impl EventSender {
         }
     }
 
-    // -- Flag getters/setters (atomic) --
+    // -- Flag getters/setters --
 
     /// Enable Page domain events.
     pub fn set_page_enabled(&self, enabled: bool) {
@@ -117,6 +107,18 @@ impl EventSender {
     /// Enable Fetch domain events.
     pub fn set_fetch_enabled(&self, enabled: bool) {
         self.fetch_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Set Fetch interception patterns.
+    pub fn set_fetch_patterns(&self, patterns: Vec<FetchPattern>) {
+        if let Ok(mut guard) = self.fetch_patterns.write() {
+            *guard = patterns;
+        }
+    }
+
+    /// Get Fetch interception patterns.
+    pub fn get_fetch_patterns(&self) -> Vec<FetchPattern> {
+        self.fetch_patterns.read().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Check if Page domain events are enabled.
@@ -159,6 +161,7 @@ impl EventReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::fetch::FetchPattern;
     use serde_json::json;
 
     #[test]
@@ -177,11 +180,9 @@ mod tests {
     fn test_page_event_gated() {
         let (sender, mut receiver) = event_channel();
 
-        // Not enabled — event should not be sent.
         sender.send_page_event("Page.loadEventFired", json!({}));
         assert!(receiver.drain().is_empty());
 
-        // Enable — event should be sent.
         sender.set_page_enabled(true);
         sender.send_page_event("Page.loadEventFired", json!({ "timestamp": 1.0 }));
         let events = receiver.drain();
@@ -215,7 +216,7 @@ mod tests {
     #[test]
     fn test_timestamp_ms() {
         let ts = EventSender::timestamp_ms();
-        assert!(ts > 1_700_000_000_000.0); // After 2023
+        assert!(ts > 1_700_000_000_000.0);
     }
 
     #[test]
@@ -226,6 +227,7 @@ mod tests {
             runtime_enabled: Arc::new(AtomicBool::new(false)),
             network_enabled: Arc::new(AtomicBool::new(false)),
             fetch_enabled: Arc::new(AtomicBool::new(false)),
+            fetch_patterns: Arc::new(RwLock::new(Vec::new())),
         };
 
         assert!(!sender.is_page_enabled());
@@ -235,5 +237,8 @@ mod tests {
         assert!(!sender.is_fetch_enabled());
         sender.set_fetch_enabled(true);
         assert!(sender.is_fetch_enabled());
+
+        sender.set_fetch_patterns(vec![FetchPattern::default()]);
+        assert!(!sender.get_fetch_patterns().is_empty());
     }
 }

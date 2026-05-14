@@ -132,6 +132,8 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                     &ctx.events,
                     &request_id,
                     &final_url,
+                    "GET",
+                    &[],
                     "Document",
                 );
             }
