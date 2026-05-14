@@ -1,7 +1,9 @@
 //! JavaScript runtime using boa_engine with a persistent context.
 //!
 //! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
+//! TEST EDIT
 //! Provides real JS evaluation with console.log and Math, JSON, etc.
+//! TEST EDIT
 //!
 //! ## Architecture
 //!
@@ -884,42 +886,70 @@ fn create_context(
 
             // Wait for response (blocks JS thread)
             let response = response_rx.recv();
-            let status = 0u16;
-            let status_text = String::new();
-            let resp_url = url.clone();
-            let resp_headers: Vec<(String, String)> = Vec::new();
-            let resp_body = String::new();
             let resp_error: Option<String>;
 
             match response {
                 Ok(resp) => {
-                    resp_error = resp.error;
-                    // Build Response object
-                    let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                        .property(js_string!("status"), JsValue::from(resp.status), Attribute::all())
-                        .property(js_string!("statusText"), JsValue::from(JsString::from(resp.status_text.as_str())), Attribute::all())
-                        .property(js_string!("ok"), JsValue::from(resp.status < 400), Attribute::all())
-                        .property(js_string!("url"), JsValue::from(JsString::from(resp.url.as_str())), Attribute::all())
-                        .property(js_string!("body"), JsValue::from(JsString::from(resp.body.as_str())), Attribute::all())
-                        .build();
+                    if let Some(err) = resp.error {
+                        resp_error = Some(err);
+                    } else {
+                        let text_fn_body = resp.body.clone();
+                        let text_fn = unsafe {
+                            NativeFunction::from_closure(move |_this, _args, ctx| {
+                                let body_json = serde_json::to_string(&text_fn_body)
+                                    .unwrap_or_else(|_| String::from("\"\""));
+                                let code = format!("Promise.resolve({})", body_json);
+                                ctx.eval(Source::from_bytes(code.trim()))
+                            })
+                        };
 
-                    // Return Promise.resolve(response)
-                    let resolve_code = format!("Promise.resolve({{status:{},statusText:'{}',ok:{},url:'{}',body:'{}'}})",
-                        resp.status,
-                        resp.status_text.replace("'", "\'"),
-                        resp.status < 400,
-                        resp.url.replace("'", "\'"),
-                        resp.body.replace("'", "\'").replace("
-", "\n").replace("
-", "\r")
-                    );
-                    let result = ctx.eval(Source::from_bytes(resolve_code.trim()));
-                    return result;
+                        let json_fn_body = resp.body.clone();
+                        let json_fn = unsafe {
+                            NativeFunction::from_closure(move |_this, _args, ctx| {
+                                let body_json = serde_json::to_string(&json_fn_body)
+                                    .unwrap_or_else(|_| String::from("null"));
+                                let code = format!("Promise.resolve(JSON.parse({}))", body_json);
+                                ctx.eval(Source::from_bytes(code.trim()))
+                            })
+                        };
+
+                        let headers_obj = boa_engine::object::ObjectInitializer::new(ctx).build();
+                        for (k, v) in &resp.headers {
+                            let _ = headers_obj.set(
+                                JsString::from(k.as_str()),
+                                JsValue::from(JsString::from(v.as_str())),
+                                true, ctx
+                            );
+                        }
+
+                        let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                            .property(js_string!("status"), JsValue::from(resp.status), Attribute::all())
+                            .property(js_string!("statusText"), JsValue::from(JsString::from(resp.status_text.as_str())), Attribute::all())
+                            .property(js_string!("ok"), JsValue::from(resp.status < 400), Attribute::all())
+                            .property(js_string!("url"), JsValue::from(JsString::from(resp.url.as_str())), Attribute::all())
+                            .property(js_string!("bodyUsed"), JsValue::from(false), Attribute::all())
+                            .property(js_string!("type"), JsValue::from(JsString::from("basic")), Attribute::all())
+                            .property(js_string!("headers"), JsValue::from(headers_obj), Attribute::all())
+                            .function(text_fn, js_string!("text"), 0)
+                            .function(json_fn, js_string!("json"), 0)
+                            .build();
+
+                        let _ = ctx.register_global_property(
+                            js_string!("__fetch_response"),
+                            JsValue::from(response_obj),
+                            Attribute::all(),
+                        );
+                        let result = ctx.eval(Source::from_bytes(
+                            "(() => { const r = __fetch_response; delete globalThis.__fetch_response; return Promise.resolve(r); })()"
+                        ));
+                        return result;
+                    }
                 }
                 Err(_) => {
                     resp_error = Some("fetch channel closed".to_string());
                 }
             }
+
 
             // Return rejected Promise on error
             let reject_code = format!(
@@ -1432,7 +1462,7 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("TextDecoder"), 0, td_ctor);
 
-    context
+    (context, job_queue)
 }
 
 // ---------------------------------------------------------------------------
