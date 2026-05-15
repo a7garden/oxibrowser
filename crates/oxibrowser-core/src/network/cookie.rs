@@ -778,7 +778,7 @@ mod tests {
         let big_value = "x".repeat(5000);
         jar.store(&url, &format!("big={}", big_value));
 
-        let cookies = jar.cookies_for_url(&url);
+        let _cookies = jar.cookies_for_url(&url);
         // Value should be truncated to 4096
         if let Some(entry) = jar
             .cookies

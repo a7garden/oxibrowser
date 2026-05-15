@@ -64,7 +64,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "Input" => input::handle(method_name, params, ctx).await,
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
-        "Target" => target::handle(method_name, params),
+        "Target" => target::handle(method_name, params, ctx)
         _ => Err(CdpError {
             code: -32601,
             message: format!("unknown domain: {domain}"),

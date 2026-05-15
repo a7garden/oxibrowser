@@ -2,16 +2,19 @@
 //!
 //! Handles Target.setDiscoverTargets, Target.setAutoAttach,
 //! Target.attachToTarget, Target.createTarget, Target.closeTarget.
+//!
+//! After setDiscoverTargets(true), emits Target.targetCreated for the
+//! current target. After setAutoAttach(true), emits Target.attachedToTarget.
 
-use crate::domains::DomainResult;
+use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
 use serde_json::{json, Value};
 
 /// Dispatch Target domain methods.
-pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
+pub fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
-        "setDiscoverTargets" => Ok(Some(json!({}))),
-        "setAutoAttach" => set_auto_attach(params),
+        "setDiscoverTargets" => set_discover_targets(params, ctx),
+        "setAutoAttach" => set_auto_attach(params, ctx),
         "attachToTarget" => attach_to_target(params),
         "detachFromTarget" => Ok(Some(json!({}))),
         "createTarget" => create_target(params),
@@ -25,8 +28,75 @@ pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
     }
 }
 
+/// Target.setDiscoverTargets — enables target discovery.
+///
+/// When enabled, emits Target.targetCreated for the current target
+/// so that Puppeteer/Playwright can discover it.
+fn set_discover_targets(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let discover = params
+        .get("discover")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if discover {
+        // Emit targetCreated for the default page target
+        ctx.events.send_event(
+            "Target.targetCreated",
+            json!({
+                "targetInfo": {
+                    "targetId": "default",
+                    "type": "page",
+                    "title": "OxiBrowser",
+                    "url": "about:blank",
+                    "attached": false,
+                    "canAccessOpener": false,
+                    "browserContextId": "default"
+                }
+            }),
+        );
+    }
+
+    Ok(Some(json!({})))
+}
+
 /// Target.setAutoAttach — enables auto-attaching to new targets.
-fn set_auto_attach(_params: Option<Value>) -> DomainResult {
+///
+/// When enabled, emits Target.attachedToTarget for the current session
+/// so that Puppeteer/Playwright can begin interacting.
+fn set_auto_attach(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let auto_attach = params
+        .get("autoAttach")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let _flatten = params
+        .get("flatten")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if auto_attach {
+        let session_id = format!("session-{}", uuid::Uuid::new_v4().as_simple());
+
+        // Emit attachedToTarget for the default target
+        ctx.events.send_event(
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": session_id,
+                "targetInfo": {
+                    "targetId": "default",
+                    "type": "page",
+                    "title": "OxiBrowser",
+                    "url": "about:blank",
+                    "attached": true,
+                    "canAccessOpener": false,
+                    "browserContextId": "default"
+                },
+                "waitingForDebugger": false
+            }),
+        );
+    }
+
     Ok(Some(json!({})))
 }
 
@@ -39,7 +109,7 @@ fn attach_to_target(params: Option<Value>) -> DomainResult {
         .unwrap_or("");
 
     Ok(Some(json!({
-        "sessionId": format!("session-{}", uuid::Uuid::new_v4())
+        "sessionId": format!("session-{}", uuid::Uuid::new_v4().as_simple())
     })))
 }
 

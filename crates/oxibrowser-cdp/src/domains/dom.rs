@@ -15,7 +15,7 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "querySelector" => query_selector(params, ctx).await,
         "querySelectorAll" => query_selector_all(params, ctx).await,
         "getOuterHTML" => get_outer_html(ctx).await,
-        "describeNode" => describe_node(params),
+        "describeNode" => describe_node(params, ctx).await,
         "resolveNode" => resolve_node(params),
         _ => Err(CdpError {
             code: -32601,
@@ -131,40 +131,87 @@ async fn get_outer_html(ctx: &DispatchContext) -> DomainResult {
     })))
 }
 
-/// DOM.describeNode — describes a DOM node.
-fn describe_node(params: Option<Value>) -> DomainResult {
+/// DOM.describeNode — describes a DOM node with real data from the document tree.
+async fn describe_node(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
-    let node_id = params
+    let node_id_val = params
         .get("nodeId")
         .and_then(|v| v.as_u64())
         .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
         .unwrap_or(0);
 
-    Ok(Some(json!({
-        "node": {
-            "nodeId": node_id,
-            "backendNodeId": node_id,
-            "nodeType": 1,
-            "nodeName": "BODY",
-            "localName": "body",
-            "nodeValue": "",
-            "childNodeCount": 0
+    let node_id = NodeId(node_id_val as usize);
+
+    let guard = ctx.session.read().await;
+    match guard.page() {
+        Some(page) => {
+            let document = page.root_frame().document();
+            match document.get_node(node_id) {
+                Some(node) => {
+                    let (node_type_num, node_name, local_name, node_value) = match &node.node_type {
+                        NodeType::Document => (9, "#document".to_string(), String::new(), String::new()),
+                        NodeType::Element { tag, .. } => (1, tag.to_uppercase(), tag.to_lowercase(), String::new()),
+                        NodeType::Text(text) => (3, "#text".to_string(), String::new(), text.clone()),
+                        NodeType::Comment(text) => (8, "#comment".to_string(), String::new(), text.clone()),
+                        NodeType::Doctype { name } => (10, "#doctype".to_string(), String::new(), name.clone()),
+                    };
+
+                    let child_count = document.tree().children(node_id).len();
+
+                    // Collect attribute pairs [name1, value1, name2, value2, ...]
+                    let attributes: Vec<Value> = if let NodeType::Element { attributes, .. } = &node.node_type {
+                        let mut attrs = Vec::new();
+                        for (k, v) in attributes {
+                            attrs.push(json!(k));
+                            attrs.push(json!(v));
+                        }
+                        attrs
+                    } else {
+                        Vec::new()
+                    };
+
+                    Ok(Some(json!({
+                        "node": {
+                            "nodeId": node_id.0,
+                            "backendNodeId": node_id.0,
+                            "nodeType": node_type_num,
+                            "nodeName": node_name,
+                            "localName": local_name,
+                            "nodeValue": node_value,
+                            "childNodeCount": child_count,
+                            "attributes": attributes,
+                        }
+                    })))
+                }
+                None => Err(CdpError {
+                    code: -32000,
+                    message: format!("Node not found: {}", node_id.0),
+                }),
+            }
         }
-    })))
+        None => Err(CdpError {
+            code: -32000,
+            message: "No active page".to_string(),
+        }),
+    }
 }
 
 /// DOM.resolveNode — resolves a DOM node to a JS remote object.
+///
+/// Uses deterministic objectId format "oxi-node-{nodeId}" so that
+/// Runtime.callFunctionOn can look up the node by its objectId.
 fn resolve_node(params: Option<Value>) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+    let node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0);
+    let object_id = format!("oxi-node-{}", node_id);
 
     Ok(Some(json!({
         "object": {
             "type": "object",
             "subtype": "node",
-            "className": "HTMLBodyElement",
-            "description": "body",
-            "objectId": format!("node-{}", uuid::Uuid::new_v4())
+            "className": "HTMLElement",
+            "description": format!("node#{}", node_id),
+            "objectId": object_id
         }
     })))
 }
@@ -195,6 +242,18 @@ fn build_cdp_node(
         NodeType::Doctype { name } => (10, "#doctype".to_string(), String::new(), name.clone()),
     };
 
+    // Collect attribute pairs [name1, value1, name2, value2, ...]
+    let attributes: Vec<Value> = if let NodeType::Element { attributes, .. } = &node.node_type {
+        let mut attrs = Vec::new();
+        for (k, v) in attributes {
+            attrs.push(json!(k));
+            attrs.push(json!(v));
+        }
+        attrs
+    } else {
+        Vec::new()
+    };
+
     let children: Vec<Value> = if depth < MAX_CDP_TREE_DEPTH {
         document
             .tree()
@@ -223,5 +282,6 @@ fn build_cdp_node(
         "nodeValue": node_value,
         "childNodeCount": children.len(),
         "children": children,
+        "attributes": attributes,
     })
 }
