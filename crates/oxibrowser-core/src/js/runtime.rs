@@ -2741,7 +2741,7 @@ fn register_document_object(
         .accessor(
             js_string!("cookie"),
             Some(cookie_getter_fn),
-            None,
+            Some(cookie_setter_fn),
             Attribute::all(),
         )
         .function(query_selector_fn, js_string!("querySelector"), 1)
