@@ -25,11 +25,13 @@ pub fn js_dispatch_mouse_event(
         "right" => 2,
         _ => 0,
     };
+    // event_type comes from CDP which defines fixed enum values, but escape anyway
+    let event_type_json = serde_json::to_string(event_type).unwrap_or_default();
     format!(
         r#"(function() {{
             var el = document.elementFromPoint({x}, {y});
             if (el) {{
-                el.dispatchEvent(new MouseEvent('{event_type}', {{
+                el.dispatchEvent(new MouseEvent({event_type_json}, {{
                     bubbles: true,
                     cancelable: true,
                     clientX: {x},
@@ -61,16 +63,21 @@ pub fn js_dispatch_key_event(
     let alt = (modifiers & 2) != 0;
     let meta = (modifiers & 16) != 0;
 
+    // Safely escape key/code/event_type using serde_json
+    let key_json = serde_json::to_string(key).unwrap_or_default();
+    let code_json = serde_json::to_string(code).unwrap_or_default();
+    let event_type_json = serde_json::to_string(event_type).unwrap_or_default();
+
     format!(
         r#"(function() {{
             var el = document.activeElement;
             var dispatched = false;
             if (el) {{
-                dispatched = el.dispatchEvent(new KeyboardEvent('{event_type}', {{
+                dispatched = el.dispatchEvent(new KeyboardEvent({event_type_json}, {{
                     bubbles: true,
                     cancelable: true,
-                    key: '{key}',
-                    code: '{code}',
+                    key: {key_json},
+                    code: {code_json},
                     shiftKey: {shift},
                     ctrlKey: {ctrl},
                     altKey: {alt},
@@ -79,11 +86,11 @@ pub fn js_dispatch_key_event(
                 }}));
 
                 // For printable char events, also update input values
-                if ('{event_type}' === 'char' && dispatched) {{
+                if ({event_type_json} === 'char' && dispatched) {{
                     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
                         var start = el.selectionStart || el.value.length;
                         var end = el.selectionEnd || el.value.length;
-                        el.value = el.value.substring(0, start) + '{key}' + el.value.substring(end);
+                        el.value = el.value.substring(0, start) + {key_json} + el.value.substring(end);
                         el.selectionStart = el.selectionEnd = start + 1;
                         el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         el.dispatchEvent(new Event('change', {{ bubbles: true }}));
@@ -92,7 +99,6 @@ pub fn js_dispatch_key_event(
             }}
             return el ? el.tagName : null;
         }})()"#,
-        key = key.replace('\'', "\\'"),
         shift = shift,
         ctrl = ctrl,
         alt = alt,
@@ -103,9 +109,10 @@ pub fn js_dispatch_key_event(
 
 /// Generate JS for Input.insertText — type text into the focused element.
 pub fn js_insert_text(text: &str) -> String {
-    // Escape backslashes FIRST, then quotes (order matters: escape backslashes
-    // before inserting quote escapes, so \' doesn't become \\') 
-    let escaped = text.replace('\\', "\\\\").replace('\'', "\\'");
+    // Safely escape text using serde_json (handles quotes, backslashes, etc.)
+    let text_json = serde_json::to_string(text).unwrap_or_default();
+    // Use character count, not byte length, for cursor positioning
+    let char_count = text.chars().count();
     format!(
         r#"(function() {{
             var el = document.activeElement;
@@ -113,16 +120,14 @@ pub fn js_insert_text(text: &str) -> String {
                 if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
                     var start = el.selectionStart || el.value.length;
                     var end = el.selectionEnd || el.value.length;
-                    el.value = el.value.substring(0, start) + '{text}' + el.value.substring(end);
-                    el.selectionStart = el.selectionEnd = start + {len};
+                    el.value = el.value.substring(0, start) + {text_json} + el.value.substring(end);
+                    el.selectionStart = el.selectionEnd = start + {char_count};
                     el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }}
             }}
             return el ? el.tagName : null;
         }})()"#,
-        text = escaped,
-        len = text.len()
     )
 }
 
@@ -152,8 +157,8 @@ mod tests {
         let js = js_dispatch_key_event("Enter", "Enter", "keyDown", 0, 0.0);
         assert!(js.contains("KeyboardEvent"));
         assert!(js.contains("keyDown"));
-        assert!(js.contains("key: 'Enter'"));
-        assert!(js.contains("code: 'Enter'"));
+        assert!(js.contains("key: \"Enter\""));
+        assert!(js.contains("code: \"Enter\""));
     }
 
     #[test]
@@ -183,9 +188,18 @@ mod tests {
 
     #[test]
     fn test_insert_text_escapes_quotes() {
-        // Single quotes must be escaped (for JS single-quoted string).
-        // Double quotes don't need escaping in single-quoted JS strings.
+        // Both single and double quotes must be properly escaped via serde_json
         let js = js_insert_text(r#"it's a "test""#);
-        assert!(js.contains(r#"it\'s a "test""#));
+        // serde_json will produce: "it's a \"test\""
+        assert!(js.contains("it's a \\\"test\\\""));
+    }
+
+    #[test]
+    fn test_insert_text_unicode_char_count() {
+        // Multi-byte UTF-8 character: é is 2 bytes but 1 character
+        let js = js_insert_text("é");
+        // Should use character count (1), not byte length (2)
+        assert!(js.contains("start + 1"), "Should use char count not byte length");
+        assert!(!js.contains("start + 2"), "Should NOT use byte length");
     }
 }

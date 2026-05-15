@@ -122,7 +122,10 @@ fn render_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String, dept
     }
 }
 
-/// Render a DomSnapshot to markdown-friendly plain text.
+/// Render a DomSnapshot to actual Markdown.
+///
+/// Produces proper Markdown formatting: headings with `#`, bold with `**`,
+/// italic with `*`, links as `[text](url)`, code with backticks, etc.
 pub fn render_to_markdown(snapshot: &DomSnapshot) -> String {
     let mut output = String::new();
 
@@ -138,6 +141,7 @@ pub fn render_to_markdown(snapshot: &DomSnapshot) -> String {
 fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String) {
     match node.node_type {
         3 => {
+            // TEXT_NODE
             let text = node.text_content.trim();
             if !text.is_empty() {
                 output.push_str(text);
@@ -145,26 +149,193 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
             }
         }
         1 => {
+            // ELEMENT_NODE
             let tag = node.tag.to_uppercase();
-            let _skip = matches!(
+            let skip = matches!(
                 tag.as_str(),
                 "SCRIPT" | "STYLE" | "LINK" | "META" | "HEAD" | "HTML"
                     | "NOSCRIPT" | "SVG" | "DEFS" | "PATH" | "BASE" | "TITLE"
             );
 
-            for &child_id in &node.children {
-                if let Some(child) = snapshot.nodes.get(&child_id) {
-                    render_markdown_node(snapshot, child, output);
-                }
+            if skip {
+                return;
             }
 
-            if matches!(
-                tag.as_str(),
-                "DIV" | "P" | "H1" | "H2" | "H3" | "BR" | "LI" | "TR" | "SECTION"
-                    | "ARTICLE" | "HEADER" | "FOOTER" | "NAV" | "MAIN" | "BLOCKQUOTE"
-            ) {
-                output.push('\n');
-                output.push('\n');
+            // Self-closing elements
+            match tag.as_str() {
+                "BR" => {
+                    output.push('\n');
+                    return;
+                }
+                "HR" => {
+                    output.push_str("\n---\n");
+                    return;
+                }
+                "IMG" => {
+                    let alt = node
+                        .attributes
+                        .get("alt")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let src = node
+                        .attributes
+                        .get("src")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    output.push_str(&format!("![{alt}]({src})"));
+                    return;
+                }
+                _ => {}
+            }
+
+            // Block elements with markdown formatting
+            match tag.as_str() {
+                "H1" => {
+                    output.push_str("\n# ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "H2" => {
+                    output.push_str("\n## ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "H3" => {
+                    output.push_str("\n### ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "H4" => {
+                    output.push_str("\n#### ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "H5" => {
+                    output.push_str("\n##### ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "H6" => {
+                    output.push_str("\n###### ");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n\n");
+                }
+                "P" => {
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            render_markdown_node(snapshot, child, output);
+                        }
+                    }
+                    output.push_str("\n\n");
+                }
+                "STRONG" | "B" => {
+                    output.push_str("**");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("** ");
+                }
+                "EM" | "I" => {
+                    output.push('*');
+                    render_children_text(snapshot, node, output);
+                    output.push_str("* ");
+                }
+                "A" => {
+                    let href = node
+                        .attributes
+                        .get("href")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    output.push('[');
+                    render_children_text(snapshot, node, output);
+                    if !href.is_empty() {
+                        output.push_str(&format!"]({href})"));
+                    } else {
+                        output.push(']');
+                    }
+                    output.push(' ');
+                }
+                "CODE" => {
+                    output.push('`');
+                    render_children_text(snapshot, node, output);
+                    output.push_str("` ");
+                }
+                "PRE" => {
+                    output.push_str("\n```\n");
+                    render_children_text(snapshot, node, output);
+                    output.push_str("\n```\n");
+                }
+                "BLOCKQUOTE" => {
+                    output.push_str("\n> ");
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            render_markdown_node(snapshot, child, output);
+                        }
+                    }
+                    output.push('\n');
+                }
+                "UL" => {
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            if child.node_type == 1 && child.tag.to_uppercase() == "LI" {
+                                output.push_str("- ");
+                                for &gc_id in &child.children {
+                                    if let Some(gc) = snapshot.nodes.get(&gc_id) {
+                                        render_markdown_node(snapshot, gc, output);
+                                    }
+                                }
+                                output.push('\n');
+                            } else {
+                                render_markdown_node(snapshot, child, output);
+                            }
+                        }
+                    }
+                    output.push('\n');
+                }
+                "OL" => {
+                    let mut counter = 1usize;
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            if child.node_type == 1 && child.tag.to_uppercase() == "LI" {
+                                output.push_str(&format!("{counter}. "));
+                                for &gc_id in &child.children {
+                                    if let Some(gc) = snapshot.nodes.get(&gc_id) {
+                                        render_markdown_node(snapshot, gc, output);
+                                    }
+                                }
+                                output.push('\n');
+                                counter += 1;
+                            } else {
+                                render_markdown_node(snapshot, child, output);
+                            }
+                        }
+                    }
+                    output.push('\n');
+                }
+                "LI" => {
+                    // Fallback for <li> outside <ol>/<ul>
+                    output.push_str("- ");
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            render_markdown_node(snapshot, child, output);
+                        }
+                    }
+                    output.push('\n');
+                }
+                _ => {
+                    // Generic block/inline: just recurse into children
+                    for &child_id in &node.children {
+                        if let Some(child) = snapshot.nodes.get(&child_id) {
+                            render_markdown_node(snapshot, child, output);
+                        }
+                    }
+                    // Add trailing newlines for block-level elements
+                    if matches!(
+                        tag.as_str(),
+                        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER"
+                            | "NAV" | "MAIN" | "TR" | "FIGURE" | "ASIDE" | "ADDRESS"
+                    ) {
+                        output.push('\n');
+                    }
+                }
             }
         }
         _ => {
@@ -172,6 +343,27 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
                 if let Some(child) = snapshot.nodes.get(&child_id) {
                     render_markdown_node(snapshot, child, output);
                 }
+            }
+        }
+    }
+}
+
+/// Collect all text content from a node's children recursively (no formatting).
+fn render_children_text(snapshot: &DomSnapshot, node: &DomNode, output: &mut String) {
+    for &child_id in &node.children {
+        if let Some(child) = snapshot.nodes.get(&child_id) {
+            match child.node_type {
+                3 => {
+                    let text = child.text_content.trim();
+                    if !text.is_empty() {
+                        output.push_str(text);
+                        output.push(' ');
+                    }
+                }
+                1 => {
+                    render_children_text(snapshot, child, output);
+                }
+                _ => {}
             }
         }
     }

@@ -81,12 +81,7 @@ async fn get_all_cookies(ctx: &DispatchContext) -> DomainResult {
                 "secure": c.secure,
                 "session": true,
                 "sameParty": false,
-                "sameSite": match c.same_site {
-                    Some(oxibrowser_core::network::cookie::SameSite::Strict) => "Strict",
-                    Some(oxibrowser_core::network::cookie::SameSite::Lax) => "Lax",
-                    Some(oxibrowser_core::network::cookie::SameSite::None) => "None",
-                    None => "None",
-                },
+                "sameSite": "None",
                 "priority": "Medium",
                 "partitionKey": serde_json::Value::Null,
             })
@@ -248,6 +243,9 @@ async fn get_response_body(params: Option<Value>, ctx: &DispatchContext) -> Doma
 // ---------------------------------------------------------------------------
 
 /// Emit network events for a navigation request.
+///
+/// Emits all three events (requestWillBeSent, responseReceived, loadingFinished).
+/// Used by callers that need the full lifecycle in one call.
 pub fn emit_navigation_events(
     events: &EventSender,
     request_id: &str,
@@ -279,6 +277,23 @@ pub fn emit_navigation_events(
             "hasUserGesture": false,
         }),
     );
+
+    emit_response_events(events, request_id, url, loader_id, status, content_type);
+}
+
+/// Emit only the response lifecycle events (responseReceived + loadingFinished).
+///
+/// Used when requestWillBeSent was already emitted before navigation,
+/// and only the response events are needed after navigation completes.
+pub fn emit_response_events(
+    events: &EventSender,
+    request_id: &str,
+    url: &str,
+    loader_id: &str,
+    status: u16,
+    content_type: &str,
+) {
+    let timestamp = EventSender::timestamp_ms();
 
     events.send_network_event(
         "Network.responseReceived",

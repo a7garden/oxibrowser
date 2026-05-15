@@ -45,12 +45,16 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
 // ---------------------------------------------------------------------------
 
 /// Fetch.enable — enables request interception with optional patterns.
+///
+/// If no patterns are provided (empty or missing `patterns` array), the
+/// domain is enabled but NO requests will be intercepted. This prevents
+/// accidentally intercepting all requests when the client just enables
+/// the domain without specifying patterns.
 fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
-    let mut patterns = vec![FetchPattern::default()];
+    let mut patterns = Vec::new();
 
     if let Some(p) = params {
         if let Some(arr) = p.get("patterns").and_then(|v| v.as_array()) {
-            patterns.clear();
             for item in arr {
                 if let Some(p) = parse_fetch_pattern(item) {
                     patterns.push(p);
@@ -59,9 +63,16 @@ fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
         }
     }
 
-    ctx.events.set_fetch_enabled(true);
+    // Only enable interception if patterns were explicitly provided.
+    // If patterns is empty, enable the domain but don't intercept anything.
+    let has_patterns = !patterns.is_empty();
+    ctx.events.set_fetch_enabled(has_patterns);
     ctx.events.set_fetch_patterns(patterns.clone());
-    tracing::info!("Fetch domain enabled with {} pattern(s)", patterns.len());
+    if has_patterns {
+        tracing::info!("Fetch domain enabled with {} pattern(s)", patterns.len());
+    } else {
+        tracing::info!("Fetch domain enabled (no patterns — interception disabled)");
+    }
     Ok(Some(json!({})))
 }
 

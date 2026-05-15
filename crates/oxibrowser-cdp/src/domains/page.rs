@@ -8,6 +8,15 @@
 //! - Page.frameNavigated
 //! - Page.domContentLoadedEventFired
 //! - Page.loadEventFired
+//!
+//! Network events are emitted in the correct order:
+//! 1. Network.requestWillBeSent (before navigation)
+//! 2. Navigation executes
+//! 3. Page.frameNavigated
+//! 4. Network.responseReceived
+//! 5. Network.loadingFinished
+//! 6. Page.domContentLoadedEventFired
+//! 7. Page.loadEventFired
 
 use crate::domains::network;
 use crate::domains::{DispatchContext, DomainResult};
@@ -60,10 +69,14 @@ fn set_lifecycle_events_enabled(params: Option<Value>, ctx: &DispatchContext) ->
 
 /// Page.navigate — navigates to a URL using the real browser session.
 ///
-/// After navigation completes, emits CDP events:
-/// - Page.frameNavigated
-/// - Page.domContentLoadedEventFired
-/// - Page.loadEventFired
+/// Emits events in correct CDP order:
+/// 1. Network.requestWillBeSent
+/// 2. Navigation executes
+/// 3. Page.frameNavigated
+/// 4. Network.responseReceived
+/// 5. Network.loadingFinished
+/// 6. Page.domContentLoadedEventFired
+/// 7. Page.loadEventFired
 async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let url = params
@@ -72,7 +85,33 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
         .unwrap_or("about:blank");
 
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
+    let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
 
+    // 1. Emit Network.requestWillBeSent FIRST (before navigation)
+    let pre_timestamp = EventSender::timestamp_ms();
+    ctx.events.send_network_event(
+        "Network.requestWillBeSent",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "documentURL": url,
+            "request": {
+                "url": url,
+                "method": "GET",
+                "headers": {},
+                "initialPriority": "VeryHigh",
+                "urlFragment": "",
+            },
+            "timestamp": pre_timestamp,
+            "wallTime": pre_timestamp / 1000.0,
+            "initiator": { "type": "other" },
+            "type": "Document",
+            "frameId": "main",
+            "hasUserGesture": false,
+        }),
+    );
+
+    // 2. Execute navigation
     let mut guard = ctx.session.write().await;
     match guard.navigate(url).await {
         Ok(()) => {
@@ -88,7 +127,7 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 .map(|u| u.to_string())
                 .unwrap_or_else(|| url.to_string());
 
-            // Emit CDP events
+            // 3. Emit Page.frameNavigated
             ctx.events.send_page_event(
                 "Page.frameNavigated",
                 json!({
@@ -107,17 +146,8 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 }),
             );
 
-            ctx.events.send_page_event(
-                "Page.domContentLoadedEventFired",
-                json!({ "timestamp": timestamp }),
-            );
-
-            ctx.events
-                .send_page_event("Page.loadEventFired", json!({ "timestamp": timestamp }));
-
-            // Emit network lifecycle events if Network domain is enabled
-            let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
-            network::emit_navigation_events(
+            // 4-5. Emit Network.responseReceived and Network.loadingFinished
+            network::emit_response_events(
                 &ctx.events,
                 &request_id,
                 &final_url,
@@ -125,6 +155,16 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 200,
                 "text/html",
             );
+
+            // 6. Emit Page.domContentLoadedEventFired
+            ctx.events.send_page_event(
+                "Page.domContentLoadedEventFired",
+                json!({ "timestamp": timestamp }),
+            );
+
+            // 7. Emit Page.loadEventFired
+            ctx.events
+                .send_page_event("Page.loadEventFired", json!({ "timestamp": timestamp }));
 
             // Fetch.requestPaused will be emitted from Session::navigate
             // once Fetch interception is fully integrated with the HTTP client
@@ -143,9 +183,44 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
 }
 
 /// Page.reload — reloads the current page and emits lifecycle events.
+///
+/// Emits events in the same order as navigate:
+/// 1. Network.requestWillBeSent
+/// 2. Reload executes
+/// 3. Page.frameNavigated
+/// 4. Network.responseReceived
+/// 5. Network.loadingFinished
+/// 6. Page.domContentLoadedEventFired
+/// 7. Page.loadEventFired
 async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
+    let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
 
+    // 1. Emit Network.requestWillBeSent FIRST
+    let pre_timestamp = EventSender::timestamp_ms();
+    ctx.events.send_network_event(
+        "Network.requestWillBeSent",
+        json!({
+            "requestId": request_id,
+            "loaderId": loader_id,
+            "documentURL": "",
+            "request": {
+                "url": "",
+                "method": "GET",
+                "headers": {},
+                "initialPriority": "VeryHigh",
+                "urlFragment": "",
+            },
+            "timestamp": pre_timestamp,
+            "wallTime": pre_timestamp / 1000.0,
+            "initiator": { "type": "other" },
+            "type": "Document",
+            "frameId": "main",
+            "hasUserGesture": false,
+        }),
+    );
+
+    // 2. Execute reload
     let mut guard = ctx.session.write().await;
     match guard.reload().await {
         Ok(()) => {
@@ -161,6 +236,7 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
                 .map(|u| u.to_string())
                 .unwrap_or_else(|| "about:blank".to_string());
 
+            // 3. Emit Page.frameNavigated
             ctx.events.send_page_event(
                 "Page.frameNavigated",
                 json!({
@@ -174,11 +250,23 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
                 }),
             );
 
+            // 4-5. Emit Network.responseReceived and Network.loadingFinished
+            network::emit_response_events(
+                &ctx.events,
+                &request_id,
+                &final_url,
+                &loader_id,
+                200,
+                "text/html",
+            );
+
+            // 6. Emit Page.domContentLoadedEventFired
             ctx.events.send_page_event(
                 "Page.domContentLoadedEventFired",
                 json!({ "timestamp": timestamp }),
             );
 
+            // 7. Emit Page.loadEventFired
             ctx.events
                 .send_page_event("Page.loadEventFired", json!({ "timestamp": timestamp }));
 

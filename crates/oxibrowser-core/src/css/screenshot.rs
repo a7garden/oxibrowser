@@ -8,6 +8,9 @@
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::io::Cursor;
 
+/// Maximum image height to prevent OOM on very large pages.
+const MAX_IMAGE_HEIGHT: u32 = 16384; // 16K pixels max
+
 /// The 8x16 bitmap font data for ASCII characters 32-126.
 /// Each glyph is 8 bytes, one bit per pixel (1=foreground, 0=transparent).
 /// Font data is from the classic X11 misc-fixed font (public domain).
@@ -24,8 +27,9 @@ const GLYPH_COUNT: usize = 95;
 ///
 /// The image has a white background with black monospace text,
 /// mimicking a terminal screenshot.
-pub fn text_to_png(text: &str, viewport_width: u32) -> Vec<u8> {
-    let lines: Vec<&str> = text.lines().collect();
+pub fn text_to_png(text: &str, viewport_width: u32) -> Result<Vec<u8>, String> {
+    let max_lines = (MAX_IMAGE_HEIGHT / CHAR_H) as usize;
+    let lines: Vec<&str> = text.lines().take(max_lines).collect();
     if lines.is_empty() {
         return transparent_png(1, 1);
     }
@@ -36,7 +40,10 @@ pub fn text_to_png(text: &str, viewport_width: u32) -> Vec<u8> {
     let margin = 4u32;
     let inner_w = viewport_width.saturating_sub(margin * 2).max(64);
     let chars_per_line = inner_w / CHAR_W;
-    let img_h = lines.len() as u32 * CHAR_H + margin * 2;
+    let img_h = std::cmp::min(
+        lines.len() as u32 * CHAR_H + margin * 2,
+        MAX_IMAGE_HEIGHT,
+    );
     let img_w = inner_w + margin * 2;
 
     // White background
@@ -85,16 +92,16 @@ fn draw_glyph(img: &mut RgbaImage, ch: char, px: usize, py: usize, color: Rgba<u
 }
 
 /// Encode an RGBA image as PNG bytes.
-fn encode_png(img: &RgbaImage) -> Vec<u8> {
+fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut png_bytes = Vec::new();
     let mut cursor = Cursor::new(&mut png_bytes);
     img.write_to(&mut cursor, image::ImageFormat::Png)
-        .expect("PNG encoding should not fail");
-    png_bytes
+        .map_err(|e| format!("PNG encoding failed: {}", e))?;
+    Ok(png_bytes)
 }
 
 /// Create a minimal transparent 1x1 PNG.
-fn transparent_png(w: u32, h: u32) -> Vec<u8> {
+fn transparent_png(w: u32, h: u32) -> Result<Vec<u8>, String> {
     let img: RgbaImage = ImageBuffer::from_pixel(w, h, Rgba([0u8, 0u8, 0u8, 0u8]));
     encode_png(&img)
 }
@@ -105,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_text_to_png_produces_valid_png() {
-        let png = text_to_png("Hello World", 640);
+        let png = text_to_png("Hello World", 640).expect("encoding should succeed");
         assert!(png.len() > 8);
         // PNG signature: 8 bytes starting with 0x89 0x50 0x4E 0x47
         assert_eq!(&png[0..4], b"\x89PNG");
@@ -113,14 +120,14 @@ mod tests {
 
     #[test]
     fn test_text_to_png_with_newlines() {
-        let png = text_to_png("Line 1\nLine 2\nLine 3", 640);
+        let png = text_to_png("Line 1\nLine 2\nLine 3", 640).expect("encoding should succeed");
         assert!(png.len() > 8);
         assert_eq!(&png[0..4], b"\x89PNG");
     }
 
     #[test]
     fn test_empty_text_produces_minimal_png() {
-        let png = text_to_png("", 640);
+        let png = text_to_png("", 640).expect("encoding should succeed");
         assert!(png.len() > 8);
         assert_eq!(&png[0..4], b"\x89PNG");
     }
@@ -128,7 +135,15 @@ mod tests {
     #[test]
     fn test_wide_char_truncated() {
         // Characters beyond ASCII should be skipped (no font data)
-        let png = text_to_png("Hello🪿World", 640);
+        let png = text_to_png("Hello🪿World", 640).expect("encoding should succeed");
+        assert!(png.len() > 8);
+    }
+
+    #[test]
+    fn test_oom_protection() {
+        // Very large input should be truncated to max lines, not panic
+        let big_text: String = (0..200_000).map(|i| format!("Line {i}\n")).collect();
+        let png = text_to_png(&big_text, 640).expect("encoding should succeed");
         assert!(png.len() > 8);
     }
 }

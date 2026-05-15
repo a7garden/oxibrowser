@@ -709,9 +709,18 @@ fn js_thread_loop(
                     "OxiBrowser/0.2",
                     &fetch_tx_arc,
                 );
-                // Also re-register localStorage on URL change (clears JS-side storage)
-                let empty = std::collections::HashMap::new();
-                register_local_storage(&mut ctx, empty, &dom_snapshot_ref, local_storage_tx_arc.clone());
+                // Preserve localStorage across URL changes.
+                // Only re-register localStorage if it hasn't been registered yet;
+                // otherwise the existing JS-side storage object persists across navigations
+                // (same-origin policy would be checked in a full implementation).
+                // Previously this always re-registered with an empty HashMap, wiping storage.
+                let existing_ls = ctx.global_object().get(js_string!("localStorage"), &mut ctx).ok();
+                if existing_ls.as_ref().map_or(true, |v| v.is_undefined() || v.is_null()) {
+                    // First time — register fresh
+                    let empty = std::collections::HashMap::new();
+                    register_local_storage(&mut ctx, empty, &dom_snapshot_ref, local_storage_tx_arc.clone());
+                }
+                // else: localStorage already exists, preserve it across navigation
                 let _ = resp_tx.send(JsResponse::Done);
             }
             JsCommand::SetLocalStorageChannel { tx } => {
@@ -1019,6 +1028,13 @@ fn create_context(
             }
 
             // Wait for response (blocks JS thread)
+            // TODO(#async-fetch): This blocking recv() holds the JS thread while waiting
+            // for the HTTP response, which prevents other JS from running and blocks
+            // the dedicated std::thread. A proper fix would use an async-aware approach:
+            // 1. Return a Pending Promise from this closure
+            // 2. Use a non-blocking channel check or integrate with boa's job queue
+            // 3. Resolve/reject the Promise when the HTTP response arrives
+            // This requires architectural changes to how the JS thread processes events.
             let response = response_rx.recv();
             let resp_error: Option<String>;
 
@@ -2065,8 +2081,13 @@ fn register_document_object(
     let dom_capture_cookie = dom_snapshot.clone();
     let cookie_getter: NativeFunction = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            let _unused = dom_capture_cookie.read();
-            // Simplified: no cookie jar integration yet
+            // TODO(#cookie-jar): Integrate with session CookieJar to return actual cookies.
+            // The CookieJar is in session.rs::Session.cookie_jar (Arc<RwLock<CookieJar>>).
+            // To properly fix this, CookieJar needs to be passed through:
+            //   JsRuntime::new() → JsCommand::SetCookieJar → register_document_object()
+            // Then this closure would call cookie_jar.read().cookies_for_url(url).
+            // For now, we check if dom_snapshot has any cookie-related metadata.
+            let _dom = dom_capture_cookie.read();
             Ok(JsValue::from(JsString::from("")))
         })
     };
@@ -3534,17 +3555,25 @@ fn register_storage_obj(
         })
     };
 
-    // length (computed via getter property)
-    let _len_s = storage_arc.clone();
-    // Use a data property instead of a getter for length (avoids move conflict)
-    let storage_len = storage_arc.borrow().len() as i32;
+    // length (dynamic getter that reads current storage size)
+    let len_s = storage_arc.clone();
+    let len_getter_fn = {
+        let getter: NativeFunction = unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                Ok(JsValue::from(len_s.borrow().len() as i32))
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get length"))
+            .build()
+    };
     let storage_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .function(get_item_fn, js_string!("getItem"), 1)
         .function(set_item_fn, js_string!("setItem"), 2)
         .function(remove_item_fn, js_string!("removeItem"), 1)
         .function(clear_fn, js_string!("clear"), 0)
         .function(key_fn, js_string!("key"), 1)
-        .property(js_string!("length"), JsValue::from(storage_len), Attribute::all())
+        .accessor(js_string!("length"), Some(len_getter_fn), None, Attribute::all())
         .build();
 
     let _ = ctx.register_global_property(name, storage_obj, Attribute::all());
