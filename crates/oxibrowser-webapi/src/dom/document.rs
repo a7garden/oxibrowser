@@ -401,6 +401,10 @@ impl Document {
                 }
                 NodeType::Element { tag, .. } => {
                     let tag_lower = tag.to_lowercase();
+                    // Skip invisible elements
+                    if matches!(tag_lower.as_str(), "script" | "style" | "link" | "meta" | "noscript") {
+                        return;
+                    }
                     match tag_lower.as_str() {
                         "h1" => {
                             md.push_str("\n# ");

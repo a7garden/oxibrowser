@@ -97,7 +97,9 @@ impl Drop for TestHttpServer {
 async fn start_cdp_server() -> (Arc<CdpServer>, SocketAddr) {
     let port = find_available_port();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let config = oxibrowser_core::BrowserConfig::headless();
+    let mut config = oxibrowser_core::BrowserConfig::headless();
+    // Disable SSRF filter for tests — need to connect to local test server
+    config.enable_ssrf_filter = false;
     let browser = Arc::new(Browser::new(config).await.unwrap());
     let server = Arc::new(CdpServer::new(addr, browser));
 

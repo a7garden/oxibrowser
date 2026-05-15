@@ -33,6 +33,11 @@ pub struct BrowserConfig {
     /// Accept invalid TLS certificates.
     pub accept_invalid_certs: bool,
 
+    /// Enable SSRF protection (IP filter for private/internal IPs).
+    /// Defaults to `true`. Set to `false` for testing or when CDP clients
+    /// need to navigate to local services.
+    pub enable_ssrf_filter: bool,
+
     /// JS execution timeout in milliseconds.
     /// A single `evaluate()` call that runs longer than this will be aborted
     /// and the JS context will be reset.
@@ -70,6 +75,7 @@ impl Default for BrowserConfig {
             enable_rendering: false,
             connection_pool_size: 10,
             accept_invalid_certs: false,
+            enable_ssrf_filter: true,
             js_timeout_ms: 5000,
             js_max_recursion: 100,
             js_max_loop_iterations: 100_000,

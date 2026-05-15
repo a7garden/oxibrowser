@@ -46,7 +46,11 @@ impl HttpClient {
     /// policy mitigates the most common SSRF-via-redirect attack vector. For
     /// full TOCTOU protection, a custom hyper connector would be needed.
     pub fn new(config: &BrowserConfig, cookie_jar: Arc<RwLock<CookieJar>>) -> Result<Self> {
-        let ip_filter = Arc::new(IpFilter::block_private());
+        let ip_filter = if config.enable_ssrf_filter {
+            Arc::new(IpFilter::block_private())
+        } else {
+            Arc::new(IpFilter::new())
+        };
         let redirect_filter = ip_filter.clone();
 
         let mut builder = Client::builder()

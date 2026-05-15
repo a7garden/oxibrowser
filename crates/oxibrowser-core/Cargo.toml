@@ -36,7 +36,7 @@ boa_engine = { workspace = true }
 boa_gc = { workspace = true }
 pollster = "0.4"
 
-oxibrowser-webapi = "0.6.0"
+oxibrowser-webapi = { version = "0.6.0", path = "../oxibrowser-webapi" }
 getrandom = { workspace = true }
 
 [dev-dependencies]

@@ -94,6 +94,17 @@ pub struct IpFilter {
 }
 
 impl IpFilter {
+    /// Create an empty IP filter that allows all connections.
+    pub fn new() -> Self {
+        Self {
+            blocked: vec![],
+            allowed: vec![],
+            blocked_v6: vec![],
+            allowed_v6: vec![],
+            fail_closed: false,
+        }
+    }
+
     /// Create an IP filter that blocks private/special IP ranges (IPv4 + IPv6).
     pub fn block_private() -> Self {
         Self {

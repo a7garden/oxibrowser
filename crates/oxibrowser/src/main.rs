@@ -564,6 +564,8 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> Result<(
     if let Some(path) = cookie_file {
         config.cookie_file = Some(std::path::PathBuf::from(path));
     }
+    // Disable SSRF filter for CDP server mode — clients navigate to arbitrary URLs
+    config.enable_ssrf_filter = false;
     let browser = Arc::new(oxibrowser_core::Browser::new(config).await?);
 
     let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr, browser.clone()));
