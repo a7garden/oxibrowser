@@ -196,16 +196,24 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let loader_id = format!("LID-{}", uuid::Uuid::new_v4().as_simple());
     let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
 
-    // 1. Emit Network.requestWillBeSent FIRST
+    // 1. Capture current URL before emitting events (read lock)
+    let current_url = {
+        let guard = ctx.session.read().await;
+        guard.current_url()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "about:blank".to_string())
+    };
+
+    // 2. Emit Network.requestWillBeSent FIRST with the current URL
     let pre_timestamp = EventSender::timestamp_ms();
     ctx.events.send_network_event(
         "Network.requestWillBeSent",
         json!({
             "requestId": request_id,
             "loaderId": loader_id,
-            "documentURL": "",
+            "documentURL": current_url,
             "request": {
-                "url": "",
+                "url": current_url,
                 "method": "GET",
                 "headers": {},
                 "initialPriority": "VeryHigh",
@@ -220,7 +228,7 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
         }),
     );
 
-    // 2. Execute reload
+    // 3. Execute reload
     let mut guard = ctx.session.write().await;
     match guard.reload().await {
         Ok(()) => {

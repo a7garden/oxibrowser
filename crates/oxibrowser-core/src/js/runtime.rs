@@ -41,6 +41,7 @@ use base64::Engine;
 
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
+use crate::network::cookie::CookieJar;
 use crate::js::job_queue::TokioJobQueue;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -144,6 +145,8 @@ enum JsCommand {
     SetFetchChannel { tx: std::sync::mpsc::Sender<FetchRequestMsg> },
     /// Set the localStorage sync channel so JS operations propagate to Session.
     SetLocalStorageChannel { tx: std::sync::mpsc::Sender<LocalStorageMsg> },
+    /// Set the CookieJar so document.cookie can read/write real cookies.
+    SetCookieJar { jar: Arc<RwLock<CookieJar>> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -503,6 +506,23 @@ impl JsRuntime {
         let _ = resp;
     }
 
+    /// Set the CookieJar so document.cookie reads/writes real cookies.
+    pub fn set_cookie_jar(&mut self, jar: Arc<RwLock<CookieJar>>) -> Result<()> {
+        self.cmd_tx
+            .send(JsCommand::SetCookieJar { jar })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = self
+            .resp_rx
+            .lock()
+            .expect("resp_rx lock poisoned")
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Done => Ok(()),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
     /// Update the page URL (used for window.location).
     pub fn set_page_url(&mut self, url: &str) {
         self.cmd_tx
@@ -557,6 +577,7 @@ fn js_thread_loop(
         Arc::new(RwLock::new(None));
     let local_storage_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<LocalStorageMsg>>>> =
         Arc::new(RwLock::new(None));
+    let cookie_jar_arc: Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>> = Arc::new(RwLock::new(None));
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
     let (mut ctx, mut job_queue) = create_context(
         &console_output,
@@ -566,6 +587,7 @@ fn js_thread_loop(
         "",
         "OxiBrowser/0.2",
         &fetch_tx_arc,
+        &cookie_jar_arc,
     );
 
     while let Ok(cmd) = cmd_rx.recv() {
@@ -620,6 +642,7 @@ fn js_thread_loop(
                         "",
                         "OxiBrowser/0.2",
                         &fetch_tx_arc,
+                        &cookie_jar_arc,
                     );
                     ctx = new_ctx;
                     job_queue = new_queue;
@@ -710,6 +733,10 @@ fn js_thread_loop(
                     &fetch_tx_arc,
                 );
                 // Preserve localStorage across URL changes.
+                // TODO(#sop): Check same-origin before preserving localStorage.
+                // Currently preserves across all navigations, including cross-origin.
+                // In a production browser, localStorage should be scoped per-origin.
+                //
                 // Only re-register localStorage if it hasn't been registered yet;
                 // otherwise the existing JS-side storage object persists across navigations
                 // (same-origin policy would be checked in a full implementation).
@@ -729,6 +756,10 @@ fn js_thread_loop(
             }
             JsCommand::SetFetchChannel { tx } => {
                 *fetch_tx_arc.write() = Some(tx);
+                let _ = resp_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetCookieJar { jar } => {
+                *cookie_jar_arc.write() = Some(jar);
                 let _ = resp_tx.send(JsResponse::Done);
             }
             JsCommand::Shutdown => {
@@ -794,6 +825,7 @@ fn create_context(
     page_url: &str,
     user_agent: &str,
     fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
+    cookie_jar_arc: &Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>>,
 ) -> (Context, Rc<TokioJobQueue>) {
     let job_queue = Rc::new(TokioJobQueue::new());
     let mut context = Context::builder()
@@ -1452,7 +1484,7 @@ fn create_context(
 
     // --- Document object ---
 
-    register_document_object(&mut context, dom_snapshot, mutations);
+    register_document_object(&mut context, dom_snapshot, mutations, cookie_jar_arc);
 
     // --- Window global ---
 
@@ -2047,6 +2079,7 @@ fn register_document_object(
     ctx: &mut Context,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
     mutations: &Arc<RwLock<Vec<DomMutation>>>,
+    cookie_jar_arc: &Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>>,
 ) {
     let dom_capture_title = dom_snapshot.clone();
     let title_getter = unsafe {
@@ -2078,21 +2111,48 @@ fn register_document_object(
         .name(js_string!("get URL"))
         .build();
 
-    let dom_capture_cookie = dom_snapshot.clone();
+    let cookie_jar_for_get = cookie_jar_arc.clone();
+    let dom_for_cookie = dom_snapshot.clone();
     let cookie_getter: NativeFunction = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            // TODO(#cookie-jar): Integrate with session CookieJar to return actual cookies.
-            // The CookieJar is in session.rs::Session.cookie_jar (Arc<RwLock<CookieJar>>).
-            // To properly fix this, CookieJar needs to be passed through:
-            //   JsRuntime::new() → JsCommand::SetCookieJar → register_document_object()
-            // Then this closure would call cookie_jar.read().cookies_for_url(url).
-            // For now, we check if dom_snapshot has any cookie-related metadata.
-            let _dom = dom_capture_cookie.read();
+            let dom = dom_for_cookie.read();
+            if let Some(ref s) = *dom {
+                if let Ok(url) = url::Url::parse(&s.url) {
+                    let guard = cookie_jar_for_get.read();
+                    if let Some(ref jar) = *guard {
+                        let cookies = jar.read().cookies_for_url(&url);
+                        return Ok(JsValue::from(JsString::from(cookies.as_str())));
+                    }
+                }
+            }
             Ok(JsValue::from(JsString::from("")))
         })
     };
     let cookie_getter_fn = FunctionObjectBuilder::new(ctx.realm(), cookie_getter)
         .name(js_string!("get cookie"))
+        .build();
+
+    let cookie_jar_for_set = cookie_jar_arc.clone();
+    let dom_for_cookie_set = dom_snapshot.clone();
+    let cookie_setter: NativeFunction = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(cookie_str) = args.first().and_then(|v| v.as_string()) {
+                let cookie_string = cookie_str.to_std_string_escaped();
+                let dom = dom_for_cookie_set.read();
+                if let Some(ref s) = *dom {
+                    if let Ok(url) = url::Url::parse(&s.url) {
+                        let guard = cookie_jar_for_set.read();
+                        if let Some(ref jar) = *guard {
+                            jar.write().store(&url, &cookie_string);
+                        }
+                    }
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let cookie_setter_fn = FunctionObjectBuilder::new(ctx.realm(), cookie_setter)
+        .name(js_string!("set cookie"))
         .build();
 
     // querySelector(selector)
@@ -2743,7 +2803,14 @@ fn register_document_object(
                 let dom_efp = dom_snapshot.clone();
                 unsafe {
                     let fn_ptr: NativeFunction = NativeFunction::from_closure(move |_this, args, ctx| {
-                        let _x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
+                        // elementFromPoint(x, y) — approximate element lookup.
+                        //
+                        // Since there is no real layout engine, we estimate Y positions
+                        // from DOM order using tag-based height heuristics. X is used to
+                        // narrow down among children at a given depth: if a parent element
+                        // has multiple visible children at the estimated Y band, we pick
+                        // the child whose index corresponds to X / (viewport_width / num_children).
+                        let x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
                         let y = args.get(1).and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
                         let snap = snap_efp.read();
                         if let Some(ref s) = *snap {
@@ -2751,15 +2818,47 @@ fn register_document_object(
                                 if let Some(body) = s.nodes.get(&bid) {
                                     // Walk body children in order, estimate Y positions
                                     let mut estimated_y = 0.0;
+                                    let mut last_visible_el: Option<&DomNode> = None;
                                     for &child_id in &body.children {
                                         if let Some(el) = s.nodes.get(&child_id) {
                                             let el_h = estimate_element_height(el);
+                                            if el_h <= 0.0 {
+                                                continue; // skip invisible elements
+                                            }
                                             if y >= estimated_y && y < estimated_y + el_h {
-                                                // Found approximate match
+                                                // Found the approximate Y band.
+                                                // If this element has visible children, try to
+                                                // narrow down using X coordinate.
+                                                let visible_children: Vec<u32> = el.children.iter().filter(|&&cid| {
+                                                    s.nodes.get(&cid)
+                                                        .map(|c| estimate_element_height(c) > 0.0)
+                                                        .unwrap_or(false)
+                                                }).copied().collect();
+
+                                                if !visible_children.is_empty() {
+                                                    // Estimate viewport width (fallback 1280).
+                                                    // TODO: pass actual viewport from the runtime config.
+                                                    let vp_w: f64 = 1280.0;
+                                                    // Pick child based on X position
+                                                    let idx = ((x / vp_w) * visible_children.len() as f64).floor() as usize;
+                                                    let idx = idx.min(visible_children.len() - 1);
+                                                    if let Some(&picked_id) = visible_children.get(idx) {
+                                                        if let Some(picked) = s.nodes.get(&picked_id) {
+                                                            return Ok(create_element_object(s, picked, ctx, &mutations_efp, &dom_efp));
+                                                        }
+                                                    }
+                                                }
+
+                                                // No suitable children — return this element
                                                 return Ok(create_element_object(s, el, ctx, &mutations_efp, &dom_efp));
                                             }
                                             estimated_y += el_h;
+                                            last_visible_el = Some(el);
                                         }
+                                    }
+                                    // If y exceeds all estimated heights, return the last visible element
+                                    if let Some(el) = last_visible_el {
+                                        return Ok(create_element_object(s, el, ctx, &mutations_efp, &dom_efp));
                                     }
                                     // Fallback: return body itself
                                     return Ok(create_element_object(s, body, ctx, &mutations_efp, &dom_efp));
@@ -2801,8 +2900,18 @@ fn create_element_object(
         .unwrap_or("");
     let src_val = node.attributes.get("src").map(|s| s.as_str()).unwrap_or("");
 
+    // Inject data-oxi-node-id into attributes so that
+    // Runtime.callFunctionOn can resolve nodes via querySelector.
+    // We add it to the cloned attribute map so getAttribute/hasAttribute
+    // can also see it.
+    let mut enriched_attrs: HashMap<String, String> = node.attributes.clone();
+    enriched_attrs.insert(
+        "data-oxi-node-id".to_string(),
+        node.id.to_string(),
+    );
+
     // getAttribute(name)
-    let attrs_clone: HashMap<String, String> = node.attributes.clone();
+    let attrs_clone: HashMap<String, String> = enriched_attrs.clone();
     let get_attribute_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let name = args
@@ -2818,7 +2927,7 @@ fn create_element_object(
     };
 
     // hasAttribute(name)
-    let attrs_clone2: HashMap<String, String> = node.attributes.clone();
+    let attrs_clone2: HashMap<String, String> = enriched_attrs.clone();
     let has_attribute_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let name = args

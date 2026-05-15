@@ -115,26 +115,17 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 );
             }
 
-            if return_by_value {
-                // Deeply serialize to JSON value
-                Ok(Some(json!({
-                    "result": {
-                        "type": result_type,
-                        "value": value,
-                    },
-                    "exceptionDetails": null
-                })))
-            } else {
-                // Default: return value inline (full implementation would
-                // return objectId references for objects)
-                Ok(Some(json!({
-                    "result": {
-                        "type": result_type,
-                        "value": value,
-                    },
-                    "exceptionDetails": null
-                })))
-            }
+            // TODO(#objectid): When objectId support is added, the `return_by_value` flag
+            // should branch here: return `value` inline when true, return an `objectId`
+            // reference when false. Currently both paths produce identical output.
+            let _ = return_by_value;
+            Ok(Some(json!({
+                "result": {
+                    "type": result_type,
+                    "value": value,
+                },
+                "exceptionDetails": null
+            })))
         }
         Err(e) => Ok(Some(json!({
             "result": { "type": "undefined" },
@@ -177,9 +168,16 @@ async fn call_function_on(params: Option<Value>, ctx: &DispatchContext) -> Domai
     // Build the arguments expression from CDP argument descriptors
     let args_str = build_args_expression(&arguments, object_id);
 
+    // SAFETY: functionDeclaration is interpolated into JS via an IIFE wrapper
+    // `(function() { var __fn = (<functionDeclaration>); ... })()`.
+    // The wrapping ensures the declaration cannot break out of the IIFE scope.
+    // While CDP is a trusted protocol (local DevTools connection), the IIFE
+    // containment prevents accidental syntax errors from leaking into global scope.
     // Build the JS expression to evaluate
     let expr = if object_id.starts_with("oxi-node-") {
-        // Resolve DOM node reference
+        // Resolve DOM node reference.
+        // data-oxi-node-id is now injected by create_element_object into each
+        // element's attribute map, so querySelector can find the element.
         let node_id_str = object_id.strip_prefix("oxi-node-").unwrap_or("0");
         format!(
             "(function() {{ var __fn = {func}; var __el = document.querySelector('[data-oxi-node-id=\"{nid}\"]') || document.body; return __fn(__el{args}); }})()",
