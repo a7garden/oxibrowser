@@ -222,15 +222,80 @@ impl DomSnapshot {
     }
 
     /// Check if a node matches a CSS selector.
+    ///
+    /// Supports:
+    /// - Universal selector `*`
+    /// - Multiple selectors `a, b` (comma-separated)
+    /// - Descendant combinator `a b` (space-separated)
+    /// - Attribute selectors `[attr]`, `[attr=val]`, `tag[attr]`
+    /// - Tag name, `.class`, `#id`, `tag.class`, `tag#id`
     fn node_matches_selector(&self, node: &DomNode, selector: &str) -> bool {
         if node.node_type != 1 {
             return false;
         }
 
-        // Check for attribute selector: "a[href]" or "[href]"
-        let selector = selector.trim();
+        // Handle comma-separated selectors: match any
+        for single_sel in selector.split(',') {
+            let single_sel = single_sel.trim();
+            if self.node_matches_single(node, single_sel) {
+                return true;
+            }
+        }
+        false
+    }
 
-        // Extract attribute part if present
+    /// Check a single selector (no commas) against a node.
+    fn node_matches_single(&self, node: &DomNode, selector: &str) -> bool {
+        // Universal selector
+        if selector == "*" {
+            return true;
+        }
+
+        // Descendant combinator: split on whitespace
+        let parts: Vec<&str> = selector.split_whitespace().collect();
+        if parts.len() > 1 {
+            // Last part must match this node
+            if !self.matches_simple(node, parts[parts.len() - 1]) {
+                return false;
+            }
+            // Walk ancestors for preceding parts
+            let ancestor_parts = &parts[..parts.len() - 1];
+            let mut current = node.parent;
+            let mut idx = ancestor_parts.len();
+            while let Some(parent_id) = current {
+                if idx == 0 {
+                    return true;
+                }
+                if let Some(ancestor) = self.nodes.get(&parent_id) {
+                    if self.matches_simple(ancestor, ancestor_parts[idx - 1]) {
+                        idx -= 1;
+                    }
+                }
+                current = ancestor.and_then(|a: &DomNode| a.parent);
+                if let Some(ancestor) = self.nodes.get(&parent_id) {
+                    current = ancestor.parent;
+                } else {
+                    break;
+                }
+            }
+            return idx == 0;
+        }
+
+        self.matches_simple(node, selector)
+    }
+
+    /// Match a simple selector (no commas, no descendant) against a node.
+    fn matches_simple(&self, node: &DomNode, selector: &str) -> bool {
+        if node.node_type != 1 {
+            return false;
+        }
+
+        // Universal selector
+        if selector == "*" {
+            return true;
+        }
+
+        // Check for attribute selector: "a[href]" or "[href]"
         if let Some(bracket_start) = selector.find('[') {
             if let Some(bracket_end) = selector.find(']') {
                 if bracket_start < bracket_end {
@@ -243,26 +308,17 @@ impl DomSnapshot {
                     }
 
                     // Check attribute: "href" or "href=value" or "href='value'"
-                    let attr_name;
-                    let attr_value;
-                    if let Some(eq_pos) = attr_part.find('=') {
-                        attr_name = &attr_part[..eq_pos];
-                        let val = &attr_part[eq_pos + 1..];
-                        // Strip quotes
-                        attr_value = val.trim_matches('\'').trim_matches('"');
+                    return if let Some(eq_pos) = attr_part.find('=') {
+                        let attr_name = &attr_part[..eq_pos];
+                        let val = attr_part[eq_pos + 1..]
+                            .trim_matches('\'')
+                            .trim_matches('"');
+                        let has_attr = node.attributes.contains_key(attr_name);
+                        has_attr
+                            && node.attributes.get(attr_name).map(|s| s.as_str()) == Some(val)
                     } else {
-                        attr_name = attr_part;
-                        attr_value = "";
-                    }
-
-                    let has_attr = node.attributes.contains_key(attr_name);
-                    if attr_value.is_empty() {
-                        return has_attr;
-                    } else {
-                        return has_attr
-                            && node.attributes.get(attr_name).map(|s| s.as_str())
-                                == Some(attr_value);
-                    }
+                        node.attributes.contains_key(attr_part)
+                    };
                 }
             }
         }

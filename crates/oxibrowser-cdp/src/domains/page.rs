@@ -357,9 +357,12 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
         .unwrap_or(1280.0) as u32;
 
     let guard = ctx.session.read().await;
-    let png_bytes = match guard.page() {
-        Some(page) => page.to_screenshot_png(viewport_width.max(64)),
-        None => oxibrowser_core::css::text_to_png("", viewport_width.max(64)),
+    let png_bytes: Vec<u8> = match guard.page() {
+        Some(page) => page
+            .to_screenshot_png(viewport_width.max(64))
+            .unwrap_or_default(),
+        None => oxibrowser_core::css::text_to_png("", viewport_width.max(64))
+            .unwrap_or_default(),
     };
 
     use base64::Engine;

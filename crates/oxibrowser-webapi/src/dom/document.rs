@@ -87,7 +87,7 @@ impl Document {
         }
 
         if let Some(node) = self.nodes.get(&current) {
-            if self.node_matches_selector(node, selector) {
+            if self.node_matches_selector(current, selector) {
                 *result = Some(current);
                 return;
             }
@@ -98,42 +98,149 @@ impl Document {
         }
     }
 
-    fn node_matches_selector(&self, node: &Node, selector: &str) -> bool {
+    /// Check if a node matches a CSS selector.
+    ///
+    /// Supports:
+    /// - Universal selector `*`
+    /// - Multiple selectors `a, b` (comma-separated)
+    /// - Descendant combinator `a b` (space-separated)
+    /// - Attribute selectors `[attr]`, `[attr=val]`, `tag[attr]`
+    /// - Tag name, `.class`, `#id`, `tag.class`, `tag#id`
+    fn node_matches_selector(&self, node_id: NodeId, selector: &str) -> bool {
+        let node = match self.nodes.get(&node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+
         if let NodeType::Element { tag, attributes } = &node.node_type {
-            // ID selector: #foo
-            if let Some(id) = selector.strip_prefix('#') {
-                return attributes.iter().any(|(k, v)| k == "id" && v == id);
+            // Handle comma-separated selectors: match any
+            for single_sel in selector.split(',') {
+                let single_sel = single_sel.trim();
+                if self.node_matches_single(node_id, tag, attributes, single_sel) {
+                    return true;
+                }
             }
-
-            // Class selector: .foo
-            if let Some(class) = selector.strip_prefix('.') {
-                return attributes
-                    .iter()
-                    .any(|(k, v)| k == "class" && v.split_whitespace().any(|c| c == class));
-            }
-
-            // Tag with class: tag.class
-            if let Some(dot_pos) = selector.find('.') {
-                let tag_part = &selector[..dot_pos];
-                let class_part = &selector[dot_pos + 1..];
-                return tag.eq_ignore_ascii_case(tag_part)
-                    && attributes.iter().any(|(k, v)| {
-                        k == "class" && v.split_whitespace().any(|c| c == class_part)
-                    });
-            }
-
-            // Tag with ID: tag#id
-            if let Some(hash_pos) = selector.find('#') {
-                let tag_part = &selector[..hash_pos];
-                let id_part = &selector[hash_pos + 1..];
-                return tag.eq_ignore_ascii_case(tag_part)
-                    && attributes.iter().any(|(k, v)| k == "id" && v == id_part);
-            }
-
-            // Simple tag name
-            return tag.eq_ignore_ascii_case(selector);
         }
         false
+    }
+
+    /// Check a single selector (no commas) against a node.
+    fn node_matches_single(
+        &self,
+        node_id: NodeId,
+        tag: &str,
+        attributes: &[(String, String)],
+        selector: &str,
+    ) -> bool {
+        // Universal selector
+        if selector == "*" {
+            return true;
+        }
+
+        // Descendant combinator: split on whitespace
+        let parts: Vec<&str> = selector.split_whitespace().collect();
+        if parts.len() > 1 {
+            // Last part must match this node
+            if !self.matches_simple(tag, attributes, parts[parts.len() - 1]) {
+                return false;
+            }
+            // Walk ancestors for preceding parts
+            let ancestor_parts = &parts[..parts.len() - 1];
+            let mut current = self.tree.parent(node_id);
+            let mut idx = ancestor_parts.len();
+            while let Some(ancestor_id) = current {
+                if idx == 0 {
+                    return true;
+                }
+                if let Some(ancestor) = self.nodes.get(&ancestor_id) {
+                    if let NodeType::Element {
+                        tag: a_tag,
+                        attributes: a_attrs,
+                    } = &ancestor.node_type
+                    {
+                        if self.matches_simple(a_tag, a_attrs, ancestor_parts[idx - 1]) {
+                            idx -= 1;
+                        }
+                    }
+                }
+                current = self.tree.parent(ancestor_id);
+            }
+            return idx == 0;
+        }
+
+        self.matches_simple(tag, attributes, selector)
+    }
+
+    /// Match a simple selector (no commas, no descendant) against tag/attributes.
+    fn matches_simple(
+        &self,
+        tag: &str,
+        attributes: &[(String, String)],
+        selector: &str,
+    ) -> bool {
+        // Universal selector
+        if selector == "*" {
+            return true;
+        }
+
+        // Check for attribute selector: "a[href]" or "[href]"
+        if let Some(bracket_start) = selector.find('[') {
+            if let Some(bracket_end) = selector.find(']') {
+                if bracket_start < bracket_end {
+                    let tag_part = &selector[..bracket_start];
+                    let attr_part = &selector[bracket_start + 1..bracket_end];
+
+                    if !tag_part.is_empty() && !tag.eq_ignore_ascii_case(tag_part) {
+                        return false;
+                    }
+
+                    return if let Some(eq_pos) = attr_part.find('=') {
+                        let attr_name = &attr_part[..eq_pos];
+                        let val = attr_part[eq_pos + 1..]
+                            .trim_matches('\'')
+                            .trim_matches('"');
+                        attributes.iter().any(|(k, v)| {
+                            k == attr_name && v == val
+                        })
+                    } else {
+                        attributes.iter().any(|(k, _)| k == attr_part)
+                    };
+                }
+            }
+        }
+
+        // ID selector: #foo
+        if let Some(id) = selector.strip_prefix('#') {
+            return attributes.iter().any(|(k, v)| k == "id" && v == id);
+        }
+
+        // Class selector: .foo
+        if let Some(class) = selector.strip_prefix('.') {
+            return attributes
+                .iter()
+                .any(|(k, v)| k == "class" && v.split_whitespace().any(|c| c == class));
+        }
+
+        // Tag with class: tag.class
+        if let Some(dot_pos) = selector.find('.') {
+            let tag_part = &selector[..dot_pos];
+            let class_part = &selector[dot_pos + 1..];
+            return tag.eq_ignore_ascii_case(tag_part)
+                && attributes.iter().any(|(k, v)| {
+                    k == "class" && v.split_whitespace().any(|c| c == class_part)
+                });
+        }
+
+        // Tag with ID: tag#id
+        if let Some(hash_pos) = selector.find('#') {
+            let tag_part = &selector[..hash_pos];
+            let id_part = &selector[hash_pos + 1..];
+            return tag.eq_ignore_ascii_case(tag_part)
+                && attributes.iter().any(|(k, v)| k == "id" && v == id_part);
+        }
+
+        // Simple tag name
+        tag.eq_ignore_ascii_case(selector)
     }
 
     /// Query all matching nodes.
@@ -146,10 +253,8 @@ impl Document {
     }
 
     fn query_all_recursive(&self, current: NodeId, selector: &str, results: &mut Vec<NodeId>) {
-        if let Some(node) = self.nodes.get(&current) {
-            if self.node_matches_selector(node, selector) {
-                results.push(current);
-            }
+        if self.node_matches_selector(current, selector) {
+            results.push(current);
         }
         for &child in self.tree.children(current) {
             self.query_all_recursive(child, selector, results);
@@ -312,8 +417,18 @@ impl Document {
                             self.write_children_text(node_id, md);
                             md.push_str("\n\n");
                         }
-                        "h4" | "h5" | "h6" => {
+                        "h4" => {
                             md.push_str("\n#### ");
+                            self.write_children_text(node_id, md);
+                            md.push_str("\n\n");
+                        }
+                        "h5" => {
+                            md.push_str("\n##### ");
+                            self.write_children_text(node_id, md);
+                            md.push_str("\n\n");
+                        }
+                        "h6" => {
+                            md.push_str("\n###### ");
                             self.write_children_text(node_id, md);
                             md.push_str("\n\n");
                         }
@@ -325,12 +440,55 @@ impl Document {
                         }
                         "a" => {
                             let href = node.get_attribute("href").unwrap_or("").to_string();
+                            md.push('[');
                             self.write_children_text(node_id, md);
                             if !href.is_empty() {
-                                md.push_str(&format!("({href})"));
+                                md.push_str(&format!("]({href})"));
+                            } else {
+                                md.push(']');
                             }
+                            md.push(' ');
+                        }
+                        "ul" => {
+                            for &child in self.tree.children(node_id) {
+                                if let Some(child_node) = self.nodes.get(&child) {
+                                    if child_node.is_element()
+                                        && child_node.tag_name() == Some("li")
+                                    {
+                                        md.push_str("- ");
+                                        for &gc in self.tree.children(child) {
+                                            self.node_to_markdown(gc, md, depth + 1);
+                                        }
+                                        md.push('\n');
+                                    } else {
+                                        self.node_to_markdown(child, md, depth);
+                                    }
+                                }
+                            }
+                            md.push('\n');
+                        }
+                        "ol" => {
+                            let mut counter = 1usize;
+                            for &child in self.tree.children(node_id) {
+                                if let Some(child_node) = self.nodes.get(&child) {
+                                    if child_node.is_element()
+                                        && child_node.tag_name() == Some("li")
+                                    {
+                                        md.push_str(&format!("{counter}. "));
+                                        for &gc in self.tree.children(child) {
+                                            self.node_to_markdown(gc, md, depth + 1);
+                                        }
+                                        md.push('\n');
+                                        counter += 1;
+                                    } else {
+                                        self.node_to_markdown(child, md, depth);
+                                    }
+                                }
+                            }
+                            md.push('\n');
                         }
                         "li" => {
+                            // Fallback for <li> outside <ol>/<ul>
                             md.push_str("- ");
                             for &child in self.tree.children(node_id) {
                                 self.node_to_markdown(child, md, depth + 1);
