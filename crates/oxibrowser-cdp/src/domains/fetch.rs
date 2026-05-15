@@ -101,15 +101,16 @@ async fn continue_request(params: Option<Value>, ctx: &DispatchContext) -> Domai
         .unwrap_or_default();
 
     // Look up in registry
-    let request = ctx.fetch_registry.take(request_id);
-    if request.is_none() {
-        tracing::warn!("continueRequest: unknown requestId={}", request_id);
-        return Err(CdpError {
-            code: -32601,
-            message: format!("requestId not found: {}", request_id),
-        });
+    let request = match ctx.fetch_registry.take(request_id) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("continueRequest: unknown requestId={}", request_id);
+            return Err(CdpError {
+                code: -32601,
+                message: format!("requestId not found: {}", request_id),
+            });
+        }
     };
-    let request = request.unwrap();
 
     // Build headers
     let mut headers = request.headers.clone();
@@ -167,15 +168,16 @@ async fn fail_request(params: Option<Value>, ctx: &DispatchContext) -> DomainRes
         .and_then(|v| v.as_str())
         .unwrap_or("Failed");
 
-    let request = ctx.fetch_registry.take(request_id);
-    if request.is_none() {
-        tracing::warn!("failRequest: unknown requestId={}", request_id);
-        return Err(CdpError {
-            code: -32601,
-            message: format!("requestId not found: {}", request_id),
-        });
+    let request = match ctx.fetch_registry.take(request_id) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("failRequest: unknown requestId={}", request_id);
+            return Err(CdpError {
+                code: -32601,
+                message: format!("requestId not found: {}", request_id),
+            });
+        }
     };
-    let request = request.unwrap();
 
     let action = build_fail(error_reason.to_string());
     let _ = request.tx.send(action);
@@ -239,15 +241,16 @@ async fn fulfill_request(params: Option<Value>, ctx: &DispatchContext) -> Domain
     let body_size = body_bytes.len();
     let headers_count = headers.len();
 
-    let request = ctx.fetch_registry.take(request_id);
-    if request.is_none() {
-        tracing::warn!("fulfillRequest: unknown requestId={}", request_id);
-        return Err(CdpError {
-            code: -32601,
-            message: format!("requestId not found: {}", request_id),
-        });
+    let request = match ctx.fetch_registry.take(request_id) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("fulfillRequest: unknown requestId={}", request_id);
+            return Err(CdpError {
+                code: -32601,
+                message: format!("requestId not found: {}", request_id),
+            });
+        }
     };
-    let request = request.unwrap();
 
     let action = build_fulfill(status_code, status_text.to_string(), headers, body_bytes);
     let _ = request.tx.send(action);
@@ -275,14 +278,15 @@ async fn continue_response(params: Option<Value>, ctx: &DispatchContext) -> Doma
         .and_then(|v| v.as_str())
         .unwrap_or_default();
 
-    let request = ctx.fetch_registry.take(request_id);
-    if request.is_none() {
-        return Err(CdpError {
-            code: -32601,
-            message: format!("requestId not found: {}", request_id),
-        });
+    let request = match ctx.fetch_registry.take(request_id) {
+        Some(r) => r,
+        None => {
+            return Err(CdpError {
+                code: -32601,
+                message: format!("requestId not found: {}", request_id),
+            });
+        }
     };
-    let request = request.unwrap();
 
     let action = InterceptAction::Continue {
         url: None,

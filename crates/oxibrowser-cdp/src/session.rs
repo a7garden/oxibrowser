@@ -97,7 +97,7 @@ impl CdpSession {
         let mut event_rx = self
             .event_receiver
             .take()
-            .expect("event_receiver must be present at session start");
+            .ok_or_else(|| anyhow::anyhow!("event_receiver must be present at session start"))?;
 
         loop {
             tokio::select! {

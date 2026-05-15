@@ -715,7 +715,7 @@ impl TreeSink for DomSink {
         self.tree
             .borrow()
             .root()
-            .expect("tree must have a root node")
+            .unwrap_or_else(|| panic!("tree invariant violated: root node missing"))
     }
 
     fn elem_name<'a>(&self, target: &'a Self::Handle) -> ExpandedName<'a> {

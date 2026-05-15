@@ -93,10 +93,16 @@ fn handle_fetch_requests(
     http_client: Arc<HttpClient>,
     _cookie_jar: Arc<RwLock<CookieJar>>,
 ) {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("failed to create tokio runtime for fetch");
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("failed to create tokio runtime for fetch: {}", e);
+            return;
+        }
+    };
 
     rt.block_on(async {
         loop {
@@ -223,9 +229,9 @@ impl Session {
         let (ls_tx, ls_rx) = std::sync::mpsc::channel::<LocalStorageMsg>();
 
         // Create JS runtime and wire up fetch channel
-        let mut js_runtime = JsRuntime::with_config(js_config);
-        js_runtime.set_fetch_channel(fetch_tx);
-        js_runtime.set_local_storage_channel(ls_tx);
+        let mut js_runtime = JsRuntime::with_config(js_config)?;
+        js_runtime.set_fetch_channel(fetch_tx)?;
+        js_runtime.set_local_storage_channel(ls_tx)?;
 
         // Spawn fetch handler on a blocking thread
         let http_client_clone = http_client.clone();
@@ -357,7 +363,7 @@ impl Session {
             }
         }
 
-        Err(last_error.expect("at least one retry attempt must have occurred"))
+        Err(last_error.unwrap_or_else(|| CoreError::NavigationFailed("no retry attempts were made".into())))
     }
     pub async fn go_back(&mut self) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
@@ -596,9 +602,13 @@ impl Session {
                 .map(|u| u.as_str())
                 .unwrap_or("")
                 .to_string();
-            self.js_runtime.set_dom_snapshot(Some(snapshot));
+            self.js_runtime.set_dom_snapshot(Some(snapshot)).unwrap_or_else(|e| {
+                tracing::warn!("failed to inject DOM snapshot: {}", e);
+            });
             // Update page URL for window.location
-            self.js_runtime.set_page_url(&url);
+            self.js_runtime.set_page_url(&url).unwrap_or_else(|e| {
+                tracing::warn!("failed to set page URL: {}", e);
+            });
         }
     }
 
