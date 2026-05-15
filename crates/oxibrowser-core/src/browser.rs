@@ -101,22 +101,26 @@ impl Browser {
     pub async fn new_session(&self) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         self.ensure_open()?;
 
-        if self.sessions.read().len() >= self.config.max_sessions {
-            return Err(CoreError::SessionError(
-                "maximum number of sessions reached".into(),
-            ));
-        }
+        let session = {
+            let mut sessions = self.sessions.write();
+            if sessions.len() >= self.config.max_sessions {
+                return Err(CoreError::SessionError(
+                    "maximum number of sessions reached".into(),
+                ));
+            }
 
-        let session = Session::new(
-            self.id,
-            self.config.clone(),
-            self.http_client.clone(),
-            self.cookie_jar.clone(),
-        )
-        .await?;
+            let session = Session::new(
+                self.id,
+                self.config.clone(),
+                self.http_client.clone(),
+                self.cookie_jar.clone(),
+            )
+            .await?;
 
-        let session = Arc::new(tokio::sync::RwLock::new(session));
-        self.sessions.write().push(session.clone());
+            let session = Arc::new(tokio::sync::RwLock::new(session));
+            sessions.push(session.clone());
+            session
+        };
 
         info!(
             session_count = self.sessions.read().len(),

@@ -1904,6 +1904,7 @@ dependencies = [
  "criterion",
  "encoding_rs",
  "futures",
+ "getrandom 0.3.4",
  "html5ever",
  "image",
  "markup5ever",

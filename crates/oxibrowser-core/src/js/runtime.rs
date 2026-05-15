@@ -29,6 +29,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use boa_engine::object::builtins::JsArray;
@@ -43,6 +44,10 @@ use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// Global counter for unique node IDs, avoids collisions in tight loops.
+/// Starts at 1_000_000 to stay above any parsed DOM snapshot IDs.
+static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1_000_000);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1004,9 +1009,10 @@ fn create_context(
 
             if let Err(e) = tx.send(request) {
                 // Channel error — return rejected Promise
+                let err_json = serde_json::to_string(&e.to_string()).unwrap_or_else(|_| "\"fetch channel error\"".to_string());
                 let reject_code = format!(
-                    "Promise.reject(new Error('fetch channel error: {}'))",
-                    e
+                    "Promise.reject(new Error({}))",
+                    err_json
                 );
                 let result = ctx.eval(Source::from_bytes(reject_code.trim()));
                 return result;
@@ -1080,9 +1086,11 @@ fn create_context(
 
 
             // Return rejected Promise on error
+            let err_msg = resp_error.unwrap_or_else(|| "fetch failed".to_string());
+            let err_json = serde_json::to_string(&err_msg).unwrap_or_else(|_| "\"fetch failed\"".to_string());
             let reject_code = format!(
-                "Promise.reject(new Error('{}'))",
-                resp_error.unwrap_or_else(|| "fetch failed".to_string())
+                "Promise.reject(new Error({}))",
+                err_json
             );
             let result = ctx.eval(Source::from_bytes(reject_code.trim()));
             result
@@ -1773,13 +1781,97 @@ fn create_context(
                 })
             };
 
-            // searchParams getter (returns URLSearchParams instance)
+            // searchParams getter (returns URLSearchParams-like object)
             let sp_storage = us_storage7.clone();
             let sp_fn = unsafe {
-                NativeFunction::from_closure(move |_this, _args, _ctx| {
+                NativeFunction::from_closure(move |_this, _args, ctx| {
                     let search = sp_storage.borrow().get("search").cloned().unwrap_or_default();
-                    let _query = search.trim_start_matches('?').to_string();
-                    Ok(JsValue::undefined())
+                    let query = search.trim_start_matches('?').to_string();
+
+                    // Parse query string into key-value pairs
+                    let params: Vec<(String, String)> = if query.is_empty() {
+                        Vec::new()
+                    } else {
+                        query.split('&').filter_map(|pair| {
+                            let mut kv = pair.splitn(2, '=');
+                            let key = kv.next().unwrap_or("").to_string();
+                            let val = kv.next().unwrap_or("").to_string();
+                            if !key.is_empty() {
+                                Some((key, val))
+                            } else {
+                                None
+                            }
+                        }).collect()
+                    };
+
+                    // Build a JS object that acts like URLSearchParams
+                    let sp_get_fn = unsafe {
+                        NativeFunction::from_closure(move |_this, args, _ctx| {
+                            Ok(JsValue::undefined())
+                        })
+                    };
+
+                    // Store params in an array for methods to use
+                    let params_arr = JsArray::new(ctx);
+                    for (k, v) in &params {
+                        let entry = boa_engine::object::ObjectInitializer::new(ctx)
+                            .property(js_string!("0"), JsValue::from(JsString::from(k.as_str())), Attribute::all())
+                            .property(js_string!("1"), JsValue::from(JsString::from(v.as_str())), Attribute::all())
+                            .build();
+                        let _ = params_arr.push(JsValue::from(entry), ctx);
+                    }
+
+                    // get(name) — returns first value for the key
+                    let get_params = params.clone();
+                    let sp_get = unsafe {
+                        NativeFunction::from_closure(move |_this, args, _ctx| {
+                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                            for (k, v) in &get_params {
+                                if k == &key {
+                                    return Ok(JsValue::from(JsString::from(v.as_str())));
+                                }
+                            }
+                            Ok(JsValue::null())
+                        })
+                    };
+
+                    // has(name)
+                    let has_params = params.clone();
+                    let sp_has = unsafe {
+                        NativeFunction::from_closure(move |_this, args, _ctx| {
+                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                            Ok(JsValue::from(has_params.iter().any(|(k, _)| k == &key)))
+                        })
+                    };
+
+                    // toString()
+                    let to_str_query = query.clone();
+                    let sp_to_string = unsafe {
+                        NativeFunction::from_closure(move |_this, _args, _ctx| {
+                            Ok(JsValue::from(JsString::from(to_str_query.as_str())))
+                        })
+                    };
+
+                    // getAll(name)
+                    let getall_params = params.clone();
+                    let sp_get_all = unsafe {
+                        NativeFunction::from_closure(move |_this, args, ctx2| {
+                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                            let vals: Vec<JsValue> = getall_params.iter()
+                                .filter(|(k, _)| k == &key)
+                                .map(|(_, v)| JsValue::from(JsString::from(v.as_str())))
+                                .collect();
+                            Ok(JsValue::from(JsArray::from_iter(vals, ctx2)))
+                        })
+                    };
+
+                    let sp_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                        .function(sp_get, js_string!("get"), 1)
+                        .function(sp_has, js_string!("has"), 1)
+                        .function(sp_get_all, js_string!("getAll"), 1)
+                        .function(sp_to_string, js_string!("toString"), 0)
+                        .build();
+                    Ok(JsValue::from(sp_obj))
                 })
             };
 
@@ -1809,16 +1901,19 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("URL"), 1, url_ctor);
 
-    // --- crypto.getRandomValues ---
+    // --- crypto.getRandomValues (CSPRNG) ---
     let get_random_values_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let arr = args.first().cloned().unwrap_or(JsValue::undefined());
             if let Some(arr_obj) = arr.as_object() {
                 if let Ok(js_arr) = JsArray::from_object(arr_obj.clone()) {
                     if let Ok(len) = js_arr.length(ctx) {
-                        for i in 0..len.min(65536) {
-                            let val = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u8).wrapping_add(i as u8);
-                            let _ = js_arr.set(i, JsValue::from(val), true, ctx);
+                        let arr_len = len.min(65536) as usize;
+                        let mut buf = vec![0u8; arr_len];
+                        // Use real CSPRNG instead of predictable time-based PRNG
+                        let _ = getrandom::fill(&mut buf);
+                        for (i, val) in buf.iter().enumerate().take(arr_len) {
+                            let _ = js_arr.set(i as u32, JsValue::from(*val as i32), true, ctx);
                         }
                     }
                 }
@@ -2383,17 +2478,8 @@ fn register_document_object(
                 return Ok(JsValue::undefined());
             }
 
-            // Generate a new node ID (use a large number to avoid collision with parsed nodes)
-            let new_id = {
-                let dom = dom_snap_ce.read();
-                let max_id = dom.as_ref()
-                    .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
-                    .unwrap_or(0);
-                max_id + 1 + std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() % 10000
-            };
+            // Generate a unique node ID using an atomic counter (avoids collisions in tight loops)
+            let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
 
             let tag_upper = tag.to_uppercase();
 
@@ -2423,28 +2509,33 @@ fn register_document_object(
             // Build a JS element object
             let tag_for_obj = tag_upper.clone();
             let id_for_obj = new_id;
-            let mut attrs_map: HashMap<String, String> = HashMap::new();
+            // Shared attribute map so getAttribute sees setAttribute mutations
+            let attrs_map: Arc<parking_lot::RwLock<HashMap<String, String>>> =
+                Arc::new(parking_lot::RwLock::new(HashMap::new()));
             let dom_snap_el = dom_snap_ce.clone();
             let mutations_el = mutations_ce.clone();
 
             // setAttribute for this element
             let mut_set_attr = mutations_el.clone();
             let mut_set_id = id_for_obj;
+            let attrs_for_set = attrs_map.clone();
             let set_attr_fn = unsafe {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                     let value = args.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    // Update shared attribute map so getAttribute sees the change
+                    attrs_for_set.write().insert(name.clone(), value.clone());
                     mut_set_attr.write().push(DomMutation::SetAttribute { node_id: mut_set_id, name, value });
                     Ok(JsValue::undefined())
                 })
             };
 
-            // getAttribute for this element
+            // getAttribute for this element — reads from shared Arc<RwLock<HashMap>>
             let attrs_for_get = attrs_map.clone();
             let get_attr_fn = unsafe {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                    match attrs_for_get.get(&name) {
+                    match attrs_for_get.read().get(&name) {
                         Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
                         None => Ok(JsValue::null()),
                     }
@@ -2520,16 +2611,7 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            let new_id = {
-                let dom = dom_snap_ct.read();
-                let max_id = dom.as_ref()
-                    .map(|s| s.nodes.keys().max().copied().unwrap_or(0))
-                .unwrap_or(0);
-                max_id + 1 + std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() % 10000
-            };
+            let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
 
             {
                 let mut dom = dom_snap_ct.write();

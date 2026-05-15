@@ -439,9 +439,9 @@ mod tests {
         let ct = "text/html; charset=iso-8859-1";
         let result = decode_html(utf8_bytes, Some(ct));
         // The UTF-8 bytes for é (0xC3 0xA9) decoded as ISO-8859-1 produce "Ã©"
-        assert!(
-            !result.contains("café"),
-            "header charset should take priority over actual encoding"
+        assert_eq!(
+            result, "cafÃ©",
+            "header charset (ISO-8859-1) should be used to decode the UTF-8 bytes"
         );
     }
 

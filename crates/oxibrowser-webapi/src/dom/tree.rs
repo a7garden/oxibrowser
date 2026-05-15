@@ -35,7 +35,18 @@ impl Tree {
     }
 
     /// Add a child node to a parent.
+    ///
+    /// If the child already has a different parent, it is removed from the
+    /// old parent's children list first (reparenting).
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
+        // Remove from old parent if reparenting
+        if let Some(old_parent) = self.parents.get(&child).copied() {
+            if old_parent != parent {
+                if let Some(children) = self.children.get_mut(&old_parent) {
+                    children.retain(|&c| c != child);
+                }
+            }
+        }
         self.parents.insert(child, parent);
         self.children.entry(parent).or_default().push(child);
     }
@@ -43,6 +54,16 @@ impl Tree {
     /// Get the parent of a node.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.parents.get(&id).copied()
+    }
+
+    /// Remove the parent association for a node (detach from parent).
+    pub fn remove_parent(&mut self, id: NodeId) {
+        self.parents.remove(&id);
+    }
+
+    /// Get a mutable reference to the children of a node.
+    pub fn children_mut(&mut self, id: NodeId) -> Option<&mut Vec<NodeId>> {
+        self.children.get_mut(&id)
     }
 
     /// Get the children of a node.
@@ -73,17 +94,18 @@ impl Tree {
         }
     }
 
-    /// Traverse the tree breadth-first.
+    /// Traverse the tree breadth-first using a FIFO queue (VecDeque).
     pub fn traverse_bfs<F>(&self, start: NodeId, visitor: &mut F)
     where
         F: FnMut(NodeId),
     {
-        let mut queue = vec![start];
-        while let Some(current) = queue.pop() {
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start);
+        while let Some(current) = queue.pop_front() {
             visitor(current);
             if let Some(children) = self.children.get(&current) {
-                for &child in children.iter().rev() {
-                    queue.push(child);
+                for &child in children {
+                    queue.push_back(child);
                 }
             }
         }
@@ -160,12 +182,11 @@ mod tests {
         let mut order = Vec::new();
         tree.traverse_bfs(root, &mut |id| order.push(id.0));
 
-        // traverse_bfs uses a stack-based approach (pop from end + reversed children)
-        // which produces the same order as DFS pre-order: 0, 1, 3, 4, 2
+        // BFS should visit level by level: 0, 1, 2, 3, 4
         assert_eq!(
             order,
-            vec![0, 1, 3, 4, 2],
-            "BFS implementation visits in pre-order (stack-based)"
+            vec![0, 1, 2, 3, 4],
+            "BFS should visit in breadth-first order (level by level)"
         );
     }
 

@@ -37,6 +37,7 @@ boa_gc = { workspace = true }
 pollster = "0.4"
 
 oxibrowser-webapi = "0.6.0"
+getrandom = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

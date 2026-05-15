@@ -9,6 +9,7 @@ use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::network::cookie::CookieJar;
 use crate::network::intercept::{InterceptAction, InterceptedBody, InterceptedResponse};
+use crate::network::ip_filter::IpFilter;
 use parking_lot::RwLock;
 use reqwest::{Client, Response};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub struct HttpClient {
     #[allow(dead_code)]
     config: BrowserConfig,
     cookie_jar: Arc<RwLock<CookieJar>>,
+    ip_filter: IpFilter,
 }
 
 impl HttpClient {
@@ -43,11 +45,36 @@ impl HttpClient {
             client,
             config: config.clone(),
             cookie_jar,
+            ip_filter: IpFilter::block_private(),
         })
+    }
+
+    /// Check if a URL's resolved IP is allowed by the SSRF filter.
+    fn check_ssrf(&self, url: &Url) -> Result<()> {
+        if let Some(host) = url.host_str() {
+            if !self.ip_filter.is_hostname_allowed(host) {
+                return Err(CoreError::NetworkError(format!(
+                    "SSRF blocked: hostname {} resolves to a blocked IP address",
+                    host
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Store all Set-Cookie headers from a response.
+    fn store_response_cookies(&self, url: &Url, response: &Response) {
+        for val in response.headers().get_all("set-cookie").iter() {
+            if let Ok(cookie_str) = val.to_str() {
+                self.cookie_jar.write().store(url, cookie_str);
+            }
+        }
     }
 
     /// Fetch a URL and return the response.
     pub async fn fetch(&self, url: &Url) -> Result<Response> {
+        self.check_ssrf(url)?;
+
         let cookies = self.cookie_jar.read().cookies_for_url(url);
 
         let mut request = self.client.get(url.as_str());
@@ -60,12 +87,8 @@ impl HttpClient {
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-        // Store response cookies
-        if let Some(set_cookie) = response.headers().get("set-cookie") {
-            if let Ok(val) = set_cookie.to_str() {
-                self.cookie_jar.write().store(url, val);
-            }
-        }
+        // Store response cookies (handle multiple Set-Cookie headers)
+        self.store_response_cookies(url, &response);
 
         Ok(response)
     }
@@ -90,8 +113,10 @@ impl HttpClient {
                 let effective_url = url_mod.as_ref().and_then(|u| Url::parse(u).ok()).unwrap_or_else(|| url.clone());
                 let effective_method = method_mod.as_deref().unwrap_or("GET");
                 let effective_post = post_data_mod.as_deref();
-                let cookies = self.cookie_jar.read().cookies_for_url(&effective_url);
 
+                self.check_ssrf(&effective_url)?;
+
+                let cookies = self.cookie_jar.read().cookies_for_url(&effective_url);
 
                 let mut req_builder = if effective_method == "POST" {
                     let body = effective_post.unwrap_or_default();
@@ -118,11 +143,7 @@ impl HttpClient {
                     .await
                     .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-                if let Some(set_cookie) = response.headers().get("set-cookie") {
-                    if let Ok(val) = set_cookie.to_str() {
-                        self.cookie_jar.write().store(&effective_url, val);
-                    }
-                }
+                self.store_response_cookies(&effective_url, &response);
                 Ok(response)
             }
             InterceptAction::Fail { error_reason } => {
@@ -165,6 +186,8 @@ impl HttpClient {
 
     /// Send a POST request with a raw body.
     pub async fn post(&self, url: &Url, body: impl Into<reqwest::Body>) -> Result<Response> {
+        self.check_ssrf(url)?;
+
         let response = self
             .client
             .post(url.as_str())
@@ -173,18 +196,15 @@ impl HttpClient {
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-        // Store response cookies
-        if let Some(set_cookie) = response.headers().get("set-cookie") {
-            if let Ok(val) = set_cookie.to_str() {
-                self.cookie_jar.write().store(url, val);
-            }
-        }
+        self.store_response_cookies(url, &response);
 
         Ok(response)
     }
 
     /// Send a POST request with a JSON body.
     pub async fn post_json(&self, url: &Url, json: &serde_json::Value) -> Result<Response> {
+        self.check_ssrf(url)?;
+
         let response = self
             .client
             .post(url.as_str())
@@ -193,18 +213,15 @@ impl HttpClient {
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-        // Store response cookies
-        if let Some(set_cookie) = response.headers().get("set-cookie") {
-            if let Ok(val) = set_cookie.to_str() {
-                self.cookie_jar.write().store(url, val);
-            }
-        }
+        self.store_response_cookies(url, &response);
 
         Ok(response)
     }
 
     /// Send a POST request with URL-encoded form data.
     pub async fn post_form(&self, url: &Url, form: &[(&str, &str)]) -> Result<Response> {
+        self.check_ssrf(url)?;
+
         let response = self
             .client
             .post(url.as_str())
@@ -213,12 +230,7 @@ impl HttpClient {
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
 
-        // Store response cookies
-        if let Some(set_cookie) = response.headers().get("set-cookie") {
-            if let Ok(val) = set_cookie.to_str() {
-                self.cookie_jar.write().store(url, val);
-            }
-        }
+        self.store_response_cookies(url, &response);
 
         Ok(response)
     }

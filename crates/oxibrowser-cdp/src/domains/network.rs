@@ -81,7 +81,12 @@ async fn get_all_cookies(ctx: &DispatchContext) -> DomainResult {
                 "secure": c.secure,
                 "session": true,
                 "sameParty": false,
-                "sameSite": if c.http_only { "Strict" } else { "Lax" },
+                "sameSite": match c.same_site {
+                    Some(oxibrowser_core::network::cookie::SameSite::Strict) => "Strict",
+                    Some(oxibrowser_core::network::cookie::SameSite::Lax) => "Lax",
+                    Some(oxibrowser_core::network::cookie::SameSite::None) => "None",
+                    None => "None",
+                },
                 "priority": "Medium",
                 "partitionKey": serde_json::Value::Null,
             })

@@ -48,6 +48,7 @@ sha1 = "0.10"
 base64 = "0.22"
 boa_engine = "0.20"
 boa_gc = "0.20"
+getrandom = "0.3"
 
 [workspace.metadata.release]
 version = "0.6.0"

@@ -10,8 +10,15 @@ pub struct RobotStore {
     sitemaps: HashMap<String, Vec<String>>,
 }
 
+/// Per-domain rules with per-agent allow/disallow lists.
 #[derive(Debug, Default)]
 struct RobotRules {
+    /// Per user-agent allow/disallow lists.
+    agent_rules: HashMap<String, AgentRules>,
+}
+
+#[derive(Debug, Default)]
+struct AgentRules {
     allow: Vec<String>,
     disallow: Vec<String>,
 }
@@ -43,13 +50,13 @@ impl RobotStore {
                     }
                     "allow" => {
                         for agent in &current_agents {
-                            let r = rules_for_agent(&mut rules, agent);
+                            let r = rules.agent_rules.entry(agent.clone()).or_default();
                             r.allow.push(value.to_string());
                         }
                     }
                     "disallow" => {
                         for agent in &current_agents {
-                            let r = rules_for_agent(&mut rules, agent);
+                            let r = rules.agent_rules.entry(agent.clone()).or_default();
                             r.disallow.push(value.to_string());
                         }
                     }
@@ -64,31 +71,79 @@ impl RobotStore {
     /// Check if a URL is allowed for a user-agent.
     pub fn is_allowed(&self, url: &str, user_agent: &str) -> bool {
         let path = extract_path(url);
-        let ua_lower = user_agent.to_lowercase();
+        let domain = extract_domain(url);
 
-        // Find matching rules
-        for agent in [&ua_lower, &String::from("*")] {
-            if let Some(rules) = self.rules.get(agent) {
-                if !rules.disallow.is_empty() || !rules.allow.is_empty() {
-                    // Disallow takes priority
-                    for rule in &rules.disallow {
-                        if path_matches(rule, &path) {
-                            return false;
-                        }
+        let rules = match self.rules.get(&domain) {
+            Some(r) => r,
+            None => return true, // No rules for this domain = allowed
+        };
+
+        // Collect the best-matching rule (longest pattern wins per RFC 9309)
+        let mut best_match_allow = (0usize, true);   // (pattern_len, is_allowed)
+        let mut best_match_disallow = (0usize, false);
+
+        // Check wildcard agent rules first
+        if let Some(agent_rules) = rules.agent_rules.get("*") {
+            for rule in &agent_rules.allow {
+                if path_matches(rule, &path) {
+                    let len = rule.len();
+                    if len > best_match_allow.0 {
+                        best_match_allow = (len, true);
                     }
-                    return true;
+                }
+            }
+            for rule in &agent_rules.disallow {
+                if path_matches(rule, &path) {
+                    let len = rule.len();
+                    if len > best_match_disallow.0 {
+                        best_match_disallow = (len, false);
+                    }
                 }
             }
         }
 
-        true // No rules = allowed
+        // Check specific agent rules (override wildcard)
+        let ua_lower = user_agent.to_lowercase();
+        if let Some(agent_rules) = rules.agent_rules.get(&ua_lower) {
+            for rule in &agent_rules.allow {
+                if path_matches(rule, &path) {
+                    let len = rule.len();
+                    if len > best_match_allow.0 {
+                        best_match_allow = (len, true);
+                    }
+                }
+            }
+            for rule in &agent_rules.disallow {
+                if path_matches(rule, &path) {
+                    let len = rule.len();
+                    if len > best_match_disallow.0 {
+                        best_match_disallow = (len, false);
+                    }
+                }
+            }
+        }
+
+        // RFC 9309 §2.3.2: longest pattern wins; allow wins ties
+        if best_match_allow.0 >= best_match_disallow.0 {
+            true
+        } else {
+            false
+        }
     }
 }
 
-fn rules_for_agent<'a>(rules: &'a mut RobotRules, _agent: &str) -> &'a mut RobotRules {
-    // For simplicity, we use a single shared ruleset per domain
-    // Full RFC 9309 would need per-agent rules
-    rules
+fn extract_domain(url: &str) -> String {
+    if let Some(start) = url.find("://") {
+        let after = &url[start + 3..];
+        let host_end = after.find('/').unwrap_or(after.len());
+        let host = &after[..host_end];
+        // Strip port if present
+        let host = host.split(':').next().unwrap_or(host);
+        host.to_lowercase()
+    } else {
+        // Might be a relative URL or just a path — no domain info
+        String::new()
+    }
 }
 
 fn extract_path(url: &str) -> String {

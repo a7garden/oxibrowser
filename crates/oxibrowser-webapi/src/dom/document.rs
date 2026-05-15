@@ -502,10 +502,10 @@ type DomHandle = NodeId;
 struct DomSink {
     /// All nodes indexed by ID.
     nodes: RefCell<HashMap<NodeId, Node>>,
-    /// Element QualNames — leaked to provide 'static references for elem_name.
-    /// This is a small memory leak acceptable for the parser lifetime,
-    /// following the same pattern as html5ever's own noop-tree-builder example.
-    elem_names: RefCell<HashMap<NodeId, &'static QualName>>,
+    /// Element QualNames — stored as `Box<QualName>` so they have stable addresses.
+    /// References are valid as long as the HashMap entry exists, satisfying the
+    /// `ExpandedName` lifetime returned by `elem_name`.
+    elem_names: RefCell<HashMap<NodeId, Box<QualName>>>,
     /// Tree structure (parent/child relationships).
     tree: RefCell<Tree>,
     /// Next node ID.
@@ -561,14 +561,17 @@ impl TreeSink for DomSink {
     }
 
     fn elem_name<'a>(&self, target: &'a Self::Handle) -> ExpandedName<'a> {
-        // The QualNames are 'static (leaked), so we can safely drop the Ref
-        // after extracting the reference.
-        let qname = {
-            let names = self.elem_names.borrow();
-            names.get(target).copied()
-        };
-        if let Some(qname) = qname {
-            return qname.expanded();
+        // The QualNames are stored as Box<QualName> with stable addresses
+        // for the lifetime of the DomSink, so references are valid.
+        // We transmute the lifetime because the TreeSink trait requires
+        // ExpandedName<'a> but our data lives as long as self.
+        let names = self.elem_names.borrow();
+        if let Some(qname) = names.get(target) {
+            // Safety: The Box<QualName> in elem_names lives as long as the DomSink.
+            // The TreeSink contract guarantees elem_name is only called during parsing,
+            // and into_document() consumes self (preventing further use).
+            let ptr: *const QualName = &**qname;
+            return unsafe { (&*ptr).expanded() };
         }
         // Fallback — should not be reached in normal parsing
         static FALLBACK: std::sync::OnceLock<QualName> = std::sync::OnceLock::new();
@@ -593,10 +596,9 @@ impl TreeSink for DomSink {
             .map(|a| (a.name.local.to_string(), a.value.to_string()))
             .collect();
 
-        // Leak the QualName so we can return 'static references from elem_name.
-        // This follows the same pattern as html5ever's noop-tree-builder example.
-        let static_name: &'static QualName = Box::leak(Box::new(name));
-        self.elem_names.borrow_mut().insert(id, static_name);
+        // Store the QualName in a Box — the Box has a stable address for the
+        // lifetime of the DomSink, and is properly freed in into_document().
+        self.elem_names.borrow_mut().insert(id, Box::new(name));
 
         self.nodes
             .borrow_mut()
@@ -669,12 +671,24 @@ impl TreeSink for DomSink {
         }
     }
 
-    fn remove_from_parent(&self, _target: &Self::Handle) {
-        // Simplified: no-op
+    fn remove_from_parent(&self, target: &Self::Handle) {
+        let child = *target;
+        let old_parent = self.tree.borrow().parent(child);
+        if let Some(old_parent) = old_parent {
+            self.tree
+                .borrow_mut()
+                .children_mut(old_parent)
+                .map(|c| c.retain(|&id| id != child));
+        }
+        self.tree.borrow_mut().remove_parent(child);
     }
 
-    fn reparent_children(&self, _parent: &Self::Handle, _new_parent: &Self::Handle) {
-        // Simplified: no-op
+    fn reparent_children(&self, parent: &Self::Handle, new_parent: &Self::Handle) {
+        let children: Vec<NodeId> =
+            self.tree.borrow().children(*parent).to_vec();
+        for child in children {
+            self.tree.borrow_mut().append_child(*new_parent, child);
+        }
     }
 
     fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<Attribute>) {

@@ -15,7 +15,7 @@ use crate::network::HttpClient;
 use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::page::Page;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::info;
 use url::Url;
@@ -79,7 +79,7 @@ pub struct Session {
     #[allow(dead_code)]
     local_storage_task: Option<std::thread::JoinHandle<()>>,
     /// Whether the session has been closed.
-    closed: bool,
+    closed: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,13 +255,13 @@ impl Session {
             js_runtime,
             fetch_task,
             local_storage_task,
-            closed: false,
+            closed: AtomicBool::new(false),
         })
     }
 
     /// Navigate to a URL.
     pub async fn navigate(&mut self, url: &str) -> Result<()> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
         }
 
@@ -360,6 +360,9 @@ impl Session {
         Err(last_error.expect("at least one retry attempt must have occurred"))
     }
     pub async fn go_back(&mut self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(CoreError::SessionClosed);
+        }
         if self.history_index > 0 {
             self.history_index -= 1;
             let url = self.history[self.history_index].clone();
@@ -387,6 +390,9 @@ impl Session {
 
     /// Navigate forward in history.
     pub async fn go_forward(&mut self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(CoreError::SessionClosed);
+        }
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             let url = self.history[self.history_index].clone();
@@ -413,6 +419,9 @@ impl Session {
 
     /// Reload the current page.
     pub async fn reload(&mut self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(CoreError::SessionClosed);
+        }
         if let Some(url) = self.current_url() {
             let response = self.http_client.fetch(url).await?;
             let ct_header = response
@@ -441,6 +450,9 @@ impl Session {
     /// - `"application/x-www-form-urlencoded"` — body is parsed as `key=value&key2=value2` form data
     /// - Any other value — body is sent as raw bytes
     pub async fn post(&mut self, url: &str, body: &str, content_type: &str) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(CoreError::SessionClosed);
+        }
         let parsed = Url::parse(url)?;
 
         info!(url = %parsed, content_type, "POST request");
@@ -512,7 +524,7 @@ impl Session {
         &mut self,
         expression: &str,
     ) -> Result<crate::js::runtime::JsEvalResult> {
-        if self.closed {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
         }
         let result = self.js_runtime.evaluate(expression).await?;
@@ -677,11 +689,10 @@ impl Session {
 
     /// Close the session.
     pub async fn close(&mut self) -> Result<()> {
-        if self.closed {
+        if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
         info!(id = %self.id, "session closed");
-        self.closed = true;
         self.active_page = None;
         self.history.clear();
         self.local_storage.write().clear();
@@ -690,7 +701,7 @@ impl Session {
 
     /// Whether the session has been closed.
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// Fetch sub-resources (JS, CSS, images) referenced by the current page.
