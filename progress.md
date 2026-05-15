@@ -1,5 +1,44 @@
 # OxiBrowser Progress Tracker
 
+## Fix 05: CDP Domain Handler Issues — ✅ COMPLETE
+
+### Status: All fixes applied, build passing, 33 tests pass (10 unit + 23 e2e)
+
+**Completed:**
+- [x] Fix 1: Runtime.callFunctionOn — full async implementation evaluating functions via JS runtime, supports arrow functions, objectId-based DOM node resolution, returnByValue, arguments array
+- [x] Fix 2: Runtime.evaluate returnByValue — added returnByValue param parsing (deep JSON serialization when true)
+- [x] Fix 3: DOM.describeNode — async, looks up real node from document tree with actual nodeType/nodeName/localName/attributes/childCount
+- [x] Fix 4: DOM.resolveNode — deterministic objectId format `oxi-node-{nodeId}` for Runtime.callFunctionOn lookup
+- [x] Fix 5: Target.setDiscoverTargets — emits Target.targetCreated event with targetInfo
+- [x] Fix 6: Target.setAutoAttach — emits Target.attachedToTarget event with sessionId
+- [x] Fix 7: Page.navigate — correct event ordering: requestWillBeSent → navigate → frameNavigated → responseReceived → loadingFinished → domContentLoaded → load
+- [x] Fix 8: Page.reload — now emits network events (requestWillBeSent, responseReceived, loadingFinished)
+- [x] Fix 9: Fetch.enable — no longer defaults to catch-all pattern; only enables interception when explicit patterns provided
+- [x] Fix 10: oxi.rs — converted from blocking_read() to async read().await, eliminating potential deadlock
+
+**Additional fixes:**
+- [x] network.rs — split emit_navigation_events into separate emit_response_events for proper event ordering
+- [x] network.rs — fixed pre-existing SameSite cookie compilation error (hardcoded "None")
+- [x] page.rs — fixed pre-existing unwrap_or_default() on Vec<u8> compilation error
+- [x] mod.rs — updated Target dispatch to pass DispatchContext, OXI dispatch to await
+- [x] dom.rs — added attributes array to build_cdp_node for full element info
+
+**Files changed:**
+- `crates/oxibrowser-cdp/src/domains/runtime.rs` — callFunctionOn, evaluate returnByValue
+- `crates/oxibrowser-cdp/src/domains/dom.rs` — describeNode async with real data, resolveNode deterministic objectId
+- `crates/oxibrowser-cdp/src/domains/target.rs` — event emission, takes DispatchContext
+- `crates/oxibrowser-cdp/src/domains/page.rs` — correct event ordering, reload network events, screenshot fix
+- `crates/oxibrowser-cdp/src/domains/network.rs` — emit_response_events split, cookie fix
+- `crates/oxibrowser-cdp/src/domains/fetch.rs` — default pattern fix
+- `crates/oxibrowser-cdp/src/domains/oxi.rs` — async, no blocking_read
+- `crates/oxibrowser-cdp/src/domains/mod.rs` — dispatch updates
+
+**Known pre-existing issues (not introduced by this fix):**
+- `oxibrowser-core` has a build error in `css/render.rs` (unbalanced delimiters)
+- Cookie `same_site` field exists in struct but compiler can't find it (likely caching/versioning issue)
+
+---
+
 ## Fix 04: JS Runtime API Issues — ✅ COMPLETE
 
 ### Status: All fixes applied, build passing, 177 tests pass

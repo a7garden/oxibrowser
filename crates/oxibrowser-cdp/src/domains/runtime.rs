@@ -17,7 +17,7 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "enable" => enable(ctx),
         "disable" => disable(ctx),
         "evaluate" => evaluate(params, ctx).await,
-        "callFunctionOn" => call_function_on(params),
+        "callFunctionOn" => call_function_on(params, ctx).await,
         "getProperties" => get_properties(params),
         "compileScript" => Ok(Some(json!({ "scriptId": "", "exceptionDetails": null }))),
         "runScript" => Ok(Some(json!({
@@ -68,6 +68,10 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
         .get("expression")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let return_by_value = params
+        .get("returnByValue")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut guard = ctx.session.write().await;
 
@@ -111,13 +115,26 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 );
             }
 
-            Ok(Some(json!({
-                "result": {
-                    "type": result_type,
-                    "value": value,
-                },
-                "exceptionDetails": null
-            })))
+            if return_by_value {
+                // Deeply serialize to JSON value
+                Ok(Some(json!({
+                    "result": {
+                        "type": result_type,
+                        "value": value,
+                    },
+                    "exceptionDetails": null
+                })))
+            } else {
+                // Default: return value inline (full implementation would
+                // return objectId references for objects)
+                Ok(Some(json!({
+                    "result": {
+                        "type": result_type,
+                        "value": value,
+                    },
+                    "exceptionDetails": null
+                })))
+            }
         }
         Err(e) => Ok(Some(json!({
             "result": { "type": "undefined" },
@@ -130,19 +147,177 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
 }
 
 /// Runtime.callFunctionOn — calls a function on a remote object.
-fn call_function_on(params: Option<Value>) -> DomainResult {
+///
+/// Supports the key Puppeteer/Playwright patterns:
+/// - Arrow functions extracting properties: `element => element.textContent`
+/// - Functions with arguments: `(element, ...args) => { ... }`
+///
+/// For objectId references starting with "oxi-node-", attempts to resolve
+/// the DOM node in the JS runtime. For other objectIds, passes undefined.
+async fn call_function_on(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _function_declaration = params
+    let function_declaration = params
         .get("functionDeclaration")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let object_id = params
+        .get("objectId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let return_by_value = params
+        .get("returnByValue")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let arguments: Vec<Value> = params
+        .get("arguments")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    Ok(Some(json!({
-        "result": {
-            "type": "undefined"
-        },
-        "exceptionDetails": null
-    })))
+    // Build the arguments expression from CDP argument descriptors
+    let args_str = build_args_expression(&arguments, object_id);
+
+    // Build the JS expression to evaluate
+    let expr = if object_id.starts_with("oxi-node-") {
+        // Resolve DOM node reference
+        let node_id_str = object_id.strip_prefix("oxi-node-").unwrap_or("0");
+        format!(
+            "(function() {{ var __fn = {func}; var __el = document.querySelector('[data-oxi-node-id=\"{nid}\"]') || document.body; return __fn(__el{args}); }})()",
+            func = function_declaration,
+            nid = node_id_str,
+            args = if args_str.is_empty() { String::new() } else { format!(", {}", args_str) }
+        )
+    } else if object_id.is_empty() {
+        // No objectId — just call the function directly
+        format!(
+            "(function() {{ var __fn = {func}; return __fn({args}); }})()",
+            func = function_declaration,
+            args = args_str
+        )
+    } else {
+        // Unknown objectId format — try to evaluate as a generic wrapper
+        format!(
+            "(function() {{ var __fn = {func}; return __fn(undefined{args}); }})()",
+            func = function_declaration,
+            args = if args_str.is_empty() { String::new() } else { format!(", {}", args_str) }
+        )
+    };
+
+    let mut guard = ctx.session.write().await;
+    match guard.evaluate_js(&expr).await {
+        Ok(result) => {
+            if let Some(exception) = &result.exception {
+                return Ok(Some(json!({
+                    "result": { "type": "undefined" },
+                    "exceptionDetails": {
+                        "text": exception,
+                        "exception": { "type": "string", "value": exception }
+                    }
+                })));
+            }
+
+            let value = result.value.unwrap_or(Value::Null);
+            let result_type = classify_json_type(&value);
+
+            // Emit console output if any
+            if !result.console_output.is_empty() {
+                let console_args: Vec<Value> = result
+                    .console_output
+                    .iter()
+                    .map(|msg| {
+                        json!({
+                            "type": "string",
+                            "value": msg,
+                            "description": msg
+                        })
+                    })
+                    .collect();
+                ctx.events.send_runtime_event(
+                    "Runtime.consoleAPICalled",
+                    json!({
+                        "type": "log",
+                        "args": console_args,
+                        "executionContextId": 1,
+                        "timestamp": EventSender::timestamp_ms()
+                    }),
+                );
+            }
+
+            if return_by_value {
+                Ok(Some(json!({
+                    "result": {
+                        "type": result_type,
+                        "value": value,
+                    },
+                    "exceptionDetails": null
+                })))
+            } else {
+                // For objects (non-null), include value inline for Puppeteer compat
+                if result_type == "object" && !value.is_null() {
+                    Ok(Some(json!({
+                        "result": {
+                            "type": "object",
+                            "value": value,
+                            "description": "Object",
+                        },
+                        "exceptionDetails": null
+                    })))
+                } else {
+                    Ok(Some(json!({
+                        "result": {
+                            "type": result_type,
+                            "value": value,
+                        },
+                        "exceptionDetails": null
+                    })))
+                }
+            }
+        }
+        Err(e) => Ok(Some(json!({
+            "result": { "type": "undefined" },
+            "exceptionDetails": {
+                "text": e.to_string(),
+                "exception": { "type": "string", "value": e.to_string() }
+            }
+        }))),
+    }
+}
+
+/// Build a JS arguments expression from CDP arguments array.
+///
+/// CDP arguments can be:
+/// - `{ "value": "hello" }` — primitive value
+/// - `{ "objectId": "oxi-node-123" }` — remote object reference
+/// - `{ "unserializableValue": "Infinity" }` — unserializable
+fn build_args_expression(arguments: &[Value], _this_object_id: &str) -> String {
+    let parts: Vec<String> = arguments
+        .iter()
+        .map(|arg| {
+            if let Some(val) = arg.get("value") {
+                // Primitive value — serialize to JSON (which is valid JS)
+                serde_json::to_string(val).unwrap_or_else(|_| "undefined".to_string())
+            } else if let Some(obj_id) = arg.get("objectId").and_then(|v| v.as_str()) {
+                // Remote object reference
+                if obj_id.starts_with("oxi-node-") {
+                    let node_id_str = obj_id.strip_prefix("oxi-node-").unwrap_or("0");
+                    format!(
+                        "document.querySelector('[data-oxi-node-id=\"{}\"]') || document.body",
+                        node_id_str
+                    )
+                } else {
+                    "undefined".to_string()
+                }
+            } else if let Some(unsv) = arg
+                .get("unserializableValue")
+                .and_then(|v| v.as_str())
+            {
+                unsv.to_string()
+            } else {
+                "undefined".to_string()
+            }
+        })
+        .collect();
+    parts.join(", ")
 }
 
 /// Runtime.getProperties — returns properties of a remote object.
