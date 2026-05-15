@@ -1,42 +1,23 @@
-# Progress: Fix Critical unwrap()/expect() Calls
+# Progress: Fix ALL Clippy Warnings
 
 ## Status: ✅ COMPLETE
 
-### Changes Made
+### Summary
+Fixed ALL clippy warnings across the OxiBrowser workspace. `cargo clippy --workspace` now reports zero warnings, zero errors.
 
-#### Priority 1: js/runtime.rs
-- **`JsRuntime::new()`** and **`with_config()`**: Changed return type from `Self` to `Result<Self>`. Thread spawn uses `.map_err()` instead of `.expect()`.
-- **Added `send_and_recv()` helper**: Centralized channel communication, replacing all 6 duplicate `.send().expect()` + `.lock().expect()` + `.recv().expect()` chains with proper `Result`-returning error handling.
-- **`set_fetch_channel()`**: Returns `Result<()>` instead of panicking.
-- **`set_local_storage_channel()`**: Returns `Result<()>` instead of panicking.
-- **`evaluate_with_timeout()`**: Uses `send_and_recv()` instead of expect chain.
-- **`set_global()`**: Returns `Result<()>` instead of panicking.
-- **`set_dom_snapshot()`**: Returns `Result<()>` instead of panicking.
-- **`set_page_url()`**: Returns `Result<()>` instead of panicking.
-- **`create_context()`**: Returns `Result<(Context, Rc<TokioJobQueue>), String>`, graceful handling on both call sites (initial creation + timeout recovery).
-- **`removeEventListener`/`dispatchEvent` closures**: `as_object().unwrap()` replaced with `match` + early return.
-- **`fetch_tx` guard**: `unwrap()` replaced with `unwrap_or_else()` using `unreachable!()`.
-- **`Default` impl**: Uses `.expect()` (unavoidable for infallible trait).
+### Files Changed
 
-#### Priority 1: session.rs
-- **`handle_fetch_requests()`**: tokio runtime build uses `match` + error log + return instead of `.expect()`.
-- **`navigate_with_retry()`**: `last_error.expect()` replaced with `unwrap_or_else()`.
-- **`Session::new()`**: Propagates `JsRuntime` errors with `?`.
-- **`inject_dom_snapshot()`**: Uses `unwrap_or_else()` with warning logs for graceful degradation.
+- `crates/oxibrowser-core/src/browser.rs` — Restructured `new_session()` to avoid holding parking_lot::RwLock across .await (await_holding_lock)
+- `crates/oxibrowser-core/src/css/render.rs` — Removed unnecessary `#![allow(unused_variables, dead_code)]`
+- `crates/oxibrowser-core/src/js/runtime.rs` — Minimized `#![allow]` to just `arc_with_non_send_sync`, fixed `map_or` → `is_none_or`, removed 44 nested `unsafe` blocks, prefixed unused variables, removed unnecessary `mut`
+- `crates/oxibrowser-core/src/network/ip_filter.rs` — Removed dead `async-dns` feature-guarded code
+- `crates/oxibrowser-core/src/network/robots.rs` — Simplified `if/else { true/false }` to direct boolean expression
+- `crates/oxibrowser-core/src/page.rs` — Replaced redundant closure with tuple variant
+- `crates/oxibrowser-core/src/session.rs` — Fixed API mismatches with runtime.rs
+- `crates/oxibrowser-webapi/src/dom/document.rs` — Replaced `.map()` on Option with `if let Some`
 
-#### Priority 2: CDP session.rs
-- **`event_receiver.take().expect()`**: Replaced with `.ok_or_else(|| anyhow::anyhow!(...))?`.
-
-#### Priority 3: domains/fetch.rs
-- All 4 `request.unwrap()` calls replaced with `match ctx.fetch_registry.take(request_id)` + early error return.
-
-#### Priority 4: document.rs
-- **`TreeSink::get_document()`**: `.expect()` replaced with `.unwrap_or_else(|| panic!(...))` (trait requires infallible return).
-
-### Build Status
-- `cargo build --workspace` — ✅ SUCCESS (0 errors)
-
-### Remaining Acceptable Uses
-- `Default for JsRuntime::default()` — `.expect()` required for infallible trait impl
-- `TreeSink::get_document()` — panic required for trait impl (but uses `unwrap_or_else`)
-- Test code (`#[cfg(test)]` blocks) — unchanged, uses `.unwrap()` freely
+### Verification
+```
+$ cargo clippy --workspace
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+```

@@ -133,11 +133,112 @@ impl Page {
     /// Renders the DOM text content as a PNG image using a monospace bitmap font.
     pub fn to_screenshot_png(&self, viewport_width: u32) -> Result<Vec<u8>> {
         let text = self.to_text_screenshot();
-        crate::css::text_to_png(&text, viewport_width).map_err(|e| CoreError::ScreenshotError(e))
+        crate::css::text_to_png(&text, viewport_width).map_err(CoreError::ScreenshotError)
     }
 
     /// Get the page ID.
     pub fn id(&self) -> PageId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::resource::ResourceType;
+    use bytes::Bytes;
+
+    fn make_test_html(title: &str) -> String {
+        format!(
+            "<!DOCTYPE html><html><head><title>{title}</title></head><body><p>Hello</p></body></html>"
+        )
+    }
+
+    #[tokio::test]
+    async fn test_page_from_html_extracts_title() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = make_test_html("Test Page Title");
+        let page = Page::from_html(url, &html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(page.title(), Some("Test Page Title"));
+    }
+
+    #[tokio::test]
+    async fn test_page_content_returns_html() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = make_test_html("Content Test");
+        let page = Page::from_html(url, &html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+
+        let content = page.content();
+        assert!(content.contains("Hello"), "content should contain body text");
+        assert!(
+            content.contains("<html"),
+            "content should contain HTML tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_page_to_text_screenshot_non_empty() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = make_test_html("Screenshot Test");
+        let page = Page::from_html(url, &html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+
+        let text = page.to_text_screenshot();
+        assert!(!text.is_empty(), "text screenshot should not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_page_to_screenshot_png_valid_header() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let html =
+            "<!DOCTYPE html><html><head><title>PNG</title></head><body><p>X</p></body></html>";
+        let page = Page::from_html(url, html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+
+        let png = page
+            .to_screenshot_png(800)
+            .expect("PNG generation should succeed");
+        // PNG magic header: 137 80 78 71 13 10 26 10
+        assert!(png.len() > 8, "PNG data should be more than 8 bytes");
+        assert_eq!(
+            &png[0..4],
+            &[0x89, 0x50, 0x4E, 0x47],
+            "should start with PNG magic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_page_add_resource_tracks_resources() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = make_test_html("Resource Test");
+        let mut page = Page::from_html(url, &html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+
+        assert!(page.resources().is_empty(), "initially no resources");
+
+        let resource = Resource {
+            url: "https://example.com/style.css".to_string(),
+            resource_type: ResourceType::Stylesheet,
+            status: 200,
+            mime_type: "text/css".to_string(),
+            body: Bytes::from_static(b"body { color: red; }"),
+            loaded_at: std::time::Instant::now(),
+        };
+
+        page.add_resource(resource);
+        assert_eq!(page.resources().len(), 1);
+        assert_eq!(page.resources()[0].url, "https://example.com/style.css");
+        assert_eq!(
+            page.resources()[0].resource_type,
+            ResourceType::Stylesheet
+        );
     }
 }

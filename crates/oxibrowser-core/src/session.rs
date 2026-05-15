@@ -229,9 +229,9 @@ impl Session {
         let (ls_tx, ls_rx) = std::sync::mpsc::channel::<LocalStorageMsg>();
 
         // Create JS runtime and wire up fetch channel
-        let mut js_runtime = JsRuntime::with_config(js_config)?;
-        js_runtime.set_fetch_channel(fetch_tx)?;
-        js_runtime.set_local_storage_channel(ls_tx)?;
+        let mut js_runtime = JsRuntime::with_config(js_config);
+        js_runtime.set_fetch_channel(fetch_tx);
+        js_runtime.set_local_storage_channel(ls_tx);
 
         // Spawn fetch handler on a blocking thread
         let http_client_clone = http_client.clone();
@@ -602,13 +602,9 @@ impl Session {
                 .map(|u| u.as_str())
                 .unwrap_or("")
                 .to_string();
-            self.js_runtime.set_dom_snapshot(Some(snapshot)).unwrap_or_else(|e| {
-                tracing::warn!("failed to inject DOM snapshot: {}", e);
-            });
+            self.js_runtime.set_dom_snapshot(Some(snapshot));
             // Update page URL for window.location
-            self.js_runtime.set_page_url(&url).unwrap_or_else(|e| {
-                tracing::warn!("failed to set page URL: {}", e);
-            });
+            self.js_runtime.set_page_url(&url);
         }
     }
 

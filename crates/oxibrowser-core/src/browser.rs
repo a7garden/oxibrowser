@@ -101,26 +101,27 @@ impl Browser {
     pub async fn new_session(&self) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         self.ensure_open()?;
 
-        let session = {
-            let mut sessions = self.sessions.write();
+        // Check capacity under a short-lived read lock, then create the session
+        // *outside* any lock to avoid holding a parking_lot::RwLock across .await.
+        {
+            let sessions = self.sessions.read();
             if sessions.len() >= self.config.max_sessions {
                 return Err(CoreError::SessionError(
                     "maximum number of sessions reached".into(),
                 ));
             }
+        }
 
-            let session = Session::new(
-                self.id,
-                self.config.clone(),
-                self.http_client.clone(),
-                self.cookie_jar.clone(),
-            )
-            .await?;
+        let session = Session::new(
+            self.id,
+            self.config.clone(),
+            self.http_client.clone(),
+            self.cookie_jar.clone(),
+        )
+        .await?;
 
-            let session = Arc::new(tokio::sync::RwLock::new(session));
-            sessions.push(session.clone());
-            session
-        };
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        self.sessions.write().push(session.clone());
 
         info!(
             session_count = self.sessions.read().len(),
@@ -223,5 +224,85 @@ impl Drop for Browser {
         if !self.closed.load(Ordering::SeqCst) {
             warn!("browser dropped without explicit close");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_browser_new_default_config() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await;
+        assert!(
+            browser.is_ok(),
+            "Browser::new() with headless config should succeed"
+        );
+        let browser = browser.unwrap();
+        assert!(browser.is_open());
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_session_creates_session() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        let session = browser.new_session().await;
+        assert!(session.is_ok(), "new_session() should create a session");
+        assert_eq!(browser.sessions().read().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_session_respects_max_sessions() {
+        let mut config = BrowserConfig::headless();
+        config.max_sessions = 2;
+        let browser = Browser::new(config).await.unwrap();
+
+        let _s1 = browser.new_session().await.unwrap();
+        let _s2 = browser.new_session().await.unwrap();
+        let s3 = browser.new_session().await;
+
+        assert!(s3.is_err(), "exceeding max_sessions should return error");
+        let err_msg = s3.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("maximum number of sessions"),
+            "error should mention max sessions, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_close_marks_closed() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        assert!(browser.is_open());
+
+        browser.close().await.unwrap();
+        assert!(!browser.is_open(), "browser should be closed after close()");
+    }
+
+    #[tokio::test]
+    async fn test_browser_close_twice_no_panic() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+
+        browser.close().await.unwrap();
+        // Second close should succeed without panicking
+        browser.close().await.unwrap();
+        assert!(!browser.is_open());
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_session_after_close_returns_error() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        browser.close().await.unwrap();
+
+        let result = browser.new_session().await;
+        assert!(result.is_err(), "new_session() after close should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CoreError::BrowserClosed),
+            "error should be BrowserClosed, got: {err:?}"
+        );
     }
 }

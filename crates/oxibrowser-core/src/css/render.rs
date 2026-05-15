@@ -1,4 +1,3 @@
-#![allow(unused_variables, dead_code)]
 //! Simple text-based DOM renderer.
 //!
 //! Renders the DOM tree as ASCII/Unicode text for terminal output.

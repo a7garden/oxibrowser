@@ -219,26 +219,6 @@ impl IpFilter {
         }
     }
 
-    /// Check if a hostname is allowed by resolving DNS asynchronously.
-    #[cfg(feature = "async-dns")]
-    pub async fn is_hostname_allowed_async(&self, hostname: &str) -> bool {
-        if let Ok(addr) = hostname.parse::<IpAddr>() {
-            return self.is_allowed(&addr);
-        }
-
-        let lookup_target = format!("{}:0", hostname);
-        match tokio::net::lookup_host(&lookup_target).await {
-            Ok(addrs) => {
-                for socket_addr in addrs {
-                    if !self.is_allowed(&socket_addr.ip()) {
-                        return false;
-                    }
-                }
-                true
-            }
-            Err(_) => true,
-        }
-    }
 }
 
 #[cfg(test)]

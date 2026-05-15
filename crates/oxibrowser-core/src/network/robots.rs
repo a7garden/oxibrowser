@@ -124,11 +124,7 @@ impl RobotStore {
         }
 
         // RFC 9309 §2.3.2: longest pattern wins; allow wins ties
-        if best_match_allow.0 >= best_match_disallow.0 {
-            true
-        } else {
-            false
-        }
+        best_match_allow.0 >= best_match_disallow.0
     }
 }
 

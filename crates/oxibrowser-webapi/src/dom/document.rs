@@ -833,10 +833,12 @@ impl TreeSink for DomSink {
         let child = *target;
         let old_parent = self.tree.borrow().parent(child);
         if let Some(old_parent) = old_parent {
-            self.tree
+            if let Some(c) = self.tree
                 .borrow_mut()
                 .children_mut(old_parent)
-                .map(|c| c.retain(|&id| id != child));
+            {
+                c.retain(|&id| id != child);
+            }
         }
         self.tree.borrow_mut().remove_parent(child);
     }
