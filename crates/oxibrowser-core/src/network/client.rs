@@ -240,3 +240,71 @@ impl HttpClient {
         &self.client
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::cookie::CookieJar;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_client() -> HttpClient {
+        let config = BrowserConfig::headless();
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        HttpClient::new(&config, jar).unwrap()
+    }
+
+    #[test]
+    fn test_http_client_new_default_config() {
+        let client = make_client();
+        // Verify the client was created and has a reqwest::Client internally
+        let _ = client.raw_client();
+    }
+
+    #[test]
+    fn test_cookie_jar_empty_initially() {
+        let config = BrowserConfig::headless();
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let _client = HttpClient::new(&config, jar.clone());
+
+        let url = Url::parse("https://example.com/").unwrap();
+        let cookies = jar.read().cookies_for_url(&url);
+        assert!(cookies.is_empty(), "new jar should have no cookies");
+    }
+
+    #[test]
+    fn test_ip_filter_integration() {
+        let client = make_client();
+        // Verify the client was created with the default block_private filter.
+        // The SSRF filter is private, so we just confirm construction succeeds.
+        let _ = client.raw_client();
+    }
+
+    #[tokio::test]
+    #[ignore = "makes real HTTP request"]
+    async fn test_http_client_fetch_real() {
+        let client = make_client();
+        let url = Url::parse("https://httpbin.org/get").unwrap();
+        let result = client.fetch(&url).await;
+        assert!(result.is_ok(), "fetch to httpbin should succeed");
+    }
+
+    #[tokio::test]
+    #[ignore = "makes real HTTP requests"]
+    async fn test_http_client_fetch_stores_cookies() {
+        let config = BrowserConfig::headless();
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar.clone()).unwrap();
+
+        let url =
+            Url::parse("https://httpbin.org/cookies/set?test_cookie=test_value").unwrap();
+        let _ = client.fetch(&url).await;
+
+        let cookies =
+            jar.read().cookies_for_url(&Url::parse("https://httpbin.org/").unwrap());
+        assert!(
+            !cookies.is_empty(),
+            "cookies should be stored after fetch"
+        );
+    }
+}

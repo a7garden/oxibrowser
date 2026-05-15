@@ -170,3 +170,116 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     }
     path.starts_with(pattern)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_robots() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "User-agent: *\nDisallow: /admin/\nAllow: /public/\n",
+        );
+
+        assert!(!store.is_allowed("https://example.com/admin/secret", "MyBot"));
+        assert!(store.is_allowed("https://example.com/public/page", "MyBot"));
+        assert!(store.is_allowed("https://example.com/other", "MyBot"));
+    }
+
+    #[test]
+    fn test_is_allowed_allowed_path() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "User-agent: *\nAllow: /public/\nDisallow: /private/\n",
+        );
+
+        assert!(
+            store.is_allowed("https://example.com/public/page", "Bot"),
+            "/public/ should be allowed"
+        );
+        assert!(
+            store.is_allowed("https://example.com/anything", "Bot"),
+            "unlisted path should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_is_allowed_disallowed_path() {
+        let mut store = RobotStore::new();
+        store.add("example.com", "User-agent: *\nDisallow: /private/\n");
+
+        assert!(
+            !store.is_allowed("https://example.com/private/secret", "Bot"),
+            "/private/ should be disallowed"
+        );
+    }
+
+    #[test]
+    fn test_per_agent_rules_isolation() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "User-agent: *\nDisallow: /\n\nUser-agent: Googlebot\nAllow: /\n",
+        );
+
+        // Wildcard agent: disallowed
+        assert!(!store.is_allowed("https://example.com/page", "RandomBot"));
+        // Googlebot: allowed
+        assert!(store.is_allowed("https://example.com/page", "Googlebot"));
+    }
+
+    #[test]
+    fn test_allow_overrides_disallow_longest_wins() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "User-agent: *\nDisallow: /admin/\nAllow: /admin/public/\n",
+        );
+
+        assert!(
+            store.is_allowed("https://example.com/admin/public/file", "Bot"),
+            "/admin/public/ should be allowed (longer Allow pattern)"
+        );
+        assert!(
+            !store.is_allowed("https://example.com/admin/other", "Bot"),
+            "/admin/other should be disallowed"
+        );
+    }
+
+    #[test]
+    fn test_wildcard_matching() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "User-agent: *\nDisallow: /secret*\nDisallow: /files/*\n",
+        );
+
+        assert!(!store.is_allowed("https://example.com/secret_stuff", "Bot"));
+        assert!(!store.is_allowed("https://example.com/files/", "Bot"));
+        assert!(store.is_allowed("https://example.com/public", "Bot"));
+    }
+
+    #[test]
+    fn test_no_rules_means_allowed() {
+        let store = RobotStore::new();
+        assert!(
+            store.is_allowed("https://unknown.com/page", "Bot"),
+            "no rules for domain should mean allowed"
+        );
+    }
+
+    #[test]
+    fn test_comments_and_blank_lines_ignored() {
+        let mut store = RobotStore::new();
+        store.add(
+            "example.com",
+            "# This is a comment\n\nUser-agent: *\n# Another comment\nDisallow: /admin/\n\n",
+        );
+
+        assert!(!store.is_allowed("https://example.com/admin/page", "Bot"));
+        assert!(store.is_allowed("https://example.com/public", "Bot"));
+    }
+}

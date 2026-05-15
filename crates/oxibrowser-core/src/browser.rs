@@ -263,11 +263,14 @@ mod tests {
         let s3 = browser.new_session().await;
 
         assert!(s3.is_err(), "exceeding max_sessions should return error");
-        let err_msg = s3.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("maximum number of sessions"),
-            "error should mention max sessions, got: {err_msg}"
-        );
+        match s3 {
+            Err(CoreError::SessionError(msg)) => {
+                assert!(msg.contains("maximum number of sessions"),
+                    "error should mention max sessions, got: {msg}");
+            }
+            Err(e) => panic!("wrong error type: {e:?}"),
+            Ok(_) => panic!("should have failed"),
+        }
     }
 
     #[tokio::test]
@@ -299,10 +302,9 @@ mod tests {
 
         let result = browser.new_session().await;
         assert!(result.is_err(), "new_session() after close should fail");
-        let err = result.unwrap_err();
         assert!(
-            matches!(err, CoreError::BrowserClosed),
-            "error should be BrowserClosed, got: {err:?}"
+            matches!(result, Err(CoreError::BrowserClosed)),
+            "error should be BrowserClosed"
         );
     }
 }
