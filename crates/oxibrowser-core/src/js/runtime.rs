@@ -1,4 +1,4 @@
-#![allow(unused_unsafe, unused_variables, unused_mut, unused_imports, clippy::clone_on_copy, clippy::arc_with_non_send_sync)]
+#![allow(clippy::arc_with_non_send_sync)]
 //! JavaScript runtime using boa_engine with a persistent context.
 //!
 //! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
@@ -551,7 +551,7 @@ fn js_thread_loop(
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
-    fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
+    _fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
 ) {
     let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>> =
         Arc::new(RwLock::new(None));
@@ -715,7 +715,7 @@ fn js_thread_loop(
                 // (same-origin policy would be checked in a full implementation).
                 // Previously this always re-registered with an empty HashMap, wiping storage.
                 let existing_ls = ctx.global_object().get(js_string!("localStorage"), &mut ctx).ok();
-                if existing_ls.as_ref().map_or(true, |v| v.is_undefined() || v.is_null()) {
+                if existing_ls.as_ref().is_none_or(|v| v.is_undefined() || v.is_null()) {
                     // First time — register fresh
                     let empty = std::collections::HashMap::new();
                     register_local_storage(&mut ctx, empty, &dom_snapshot_ref, local_storage_tx_arc.clone());
@@ -954,7 +954,7 @@ fn create_context(
 
             // Extract method and options from second argument
             let mut method = String::from("GET");
-            let mut headers: Vec<(String, String)> = Vec::new();
+            let headers: Vec<(String, String)> = Vec::new();
             let mut body: Option<String> = None;
             let mut _timeout_ms: Option<u64> = None;
 
@@ -1044,7 +1044,7 @@ fn create_context(
                         resp_error = Some(err);
                     } else {
                         let text_fn_body = resp.body.clone();
-                        let text_fn = unsafe {
+                        let text_fn = {
                             NativeFunction::from_closure(move |_this, _args, ctx| {
                                 let body_json = serde_json::to_string(&text_fn_body)
                                     .unwrap_or_else(|_| String::from("\"\""));
@@ -1054,7 +1054,7 @@ fn create_context(
                         };
 
                         let json_fn_body = resp.body.clone();
-                        let json_fn = unsafe {
+                        let json_fn = {
                             NativeFunction::from_closure(move |_this, _args, ctx| {
                                 let body_json = serde_json::to_string(&json_fn_body)
                                     .unwrap_or_else(|_| String::from("null"));
@@ -1134,7 +1134,7 @@ fn create_context(
 
             // onload setter
             let onload_set = onload_cb.clone();
-            let onload_setter = unsafe {
+            let onload_setter = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     if let Some(v) = args.first() {
                         *onload_set.write() = Some(v.clone());
@@ -1147,7 +1147,7 @@ fn create_context(
 
             // onerror setter
             let onerror_set = onerror_cb.clone();
-            let onerror_setter = unsafe {
+            let onerror_setter = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     if let Some(v) = args.first() {
                         *onerror_set.write() = Some(v.clone());
@@ -1160,7 +1160,7 @@ fn create_context(
 
             // onreadystatechange setter
             let onrsc_set = onreadystatechange_cb.clone();
-            let onrsc_setter = unsafe {
+            let onrsc_setter = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     if let Some(v) = args.first() {
                         *onrsc_set.write() = Some(v.clone());
@@ -1176,7 +1176,7 @@ fn create_context(
             let ou = open_url.clone();
             let oa = open_async.clone();
             let rs = ready_state.clone();
-            let open_fn = unsafe {
+            let open_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let method = args.first()
                         .and_then(|v| v.to_string(ctx).ok())
@@ -1209,14 +1209,14 @@ fn create_context(
             let send_onerror = onerror_cb.clone();
             let send_onrsc = onreadystatechange_cb.clone();
             let send_tx = xhr_fetch_tx.clone();
-            let send_fn = unsafe {
+            let send_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let body = args.first()
                         .and_then(|v| v.as_string())
                         .map(|s| s.to_std_string_escaped());
                     let method = send_method.read().clone();
                     let url = send_url.read().clone();
-                    let is_async = *send_async.read();
+                    let _is_async = *send_async.read();
 
                     *send_rs.write() = 2.0; // HEADERS_RECEIVED
 
@@ -1284,7 +1284,7 @@ fn create_context(
             };
 
             // .setRequestHeader(name, value) — noop for now
-            let set_req_header_fn = unsafe {
+            let set_req_header_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(JsValue::undefined())
                 })
@@ -1292,7 +1292,7 @@ fn create_context(
 
             // .getResponseHeader(name)
             let get_hdr_rs = response_headers.clone();
-            let get_header_fn = unsafe {
+            let get_header_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let name = args.first()
                         .and_then(|v| v.to_string(ctx).ok())
@@ -1313,7 +1313,7 @@ fn create_context(
 
             // .abort() — reset state
             let abort_rs = ready_state.clone();
-            let abort_fn = unsafe {
+            let abort_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     *abort_rs.write() = 0.0;
                     Ok(JsValue::undefined())
@@ -1322,7 +1322,7 @@ fn create_context(
 
             // Build object
             let rs_clone = ready_state.clone();
-            let rs_getter = unsafe {
+            let rs_getter = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(JsValue::from(*rs_clone.read()))
                 })
@@ -1331,7 +1331,7 @@ fn create_context(
                 .name(js_string!("get readyState")).build();
 
             let st_clone = status_val.clone();
-            let st_getter = unsafe {
+            let st_getter = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(JsValue::from(*st_clone.read()))
                 })
@@ -1340,7 +1340,7 @@ fn create_context(
                 .name(js_string!("get status")).build();
 
             let rt_clone = response_text.clone();
-            let rt_getter = unsafe {
+            let rt_getter = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(JsValue::from(JsString::from(rt_clone.read().as_str())))
                 })
@@ -1349,7 +1349,7 @@ fn create_context(
                 .name(js_string!("get responseText")).build();
 
             let ol_clone = onload_cb.clone();
-            let ol_getter = unsafe {
+            let ol_getter = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(ol_clone.read().clone().unwrap_or(JsValue::null()))
                 })
@@ -1358,7 +1358,7 @@ fn create_context(
                 .name(js_string!("get onload")).build();
 
             let oe_clone = onerror_cb.clone();
-            let oe_getter = unsafe {
+            let oe_getter = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     Ok(oe_clone.read().clone().unwrap_or(JsValue::null()))
                 })
@@ -1398,7 +1398,7 @@ fn create_context(
             // __observing: boolean flag
             // __records: array of MutationRecord objects
 
-            let disconnect_fn = unsafe {
+            let disconnect_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     if let Some(obj) = _this.as_object() {
                         let _ = obj.set(js_string!("__observing"), JsValue::from(false), true, ctx);
@@ -1409,7 +1409,7 @@ fn create_context(
                 })
             };
 
-            let observe_fn = unsafe {
+            let observe_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let _target = args.first();
                     let _options = args.get(1);
@@ -1421,7 +1421,7 @@ fn create_context(
                 })
             };
 
-            let take_records_fn = unsafe {
+            let take_records_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     if let Some(obj) = _this.as_object() {
                         let records = obj.get(js_string!("__records"), ctx).unwrap_or(JsValue::Null);
@@ -1526,7 +1526,7 @@ fn create_context(
             // Parse query string into HashMap
             let map: std::collections::HashMap<String, Vec<String>> =
                 std::collections::HashMap::new();
-            let mut storage = std::cell::RefCell::new(map);
+            let storage = std::cell::RefCell::new(map);
 
             for pair in query_string.split('&') {
                 if let Some(eq) = pair.find('=') {
@@ -1545,7 +1545,7 @@ fn create_context(
 
             // --- get ---
             let get_sp = storage_arc.clone();
-            let get_fn = unsafe {
+            let get_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let key = _args
                         .first()
@@ -1564,7 +1564,7 @@ fn create_context(
 
             // --- set ---
             let set_sp = storage_arc.clone();
-            let set_fn = unsafe {
+            let set_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let key = _args
                         .first()
@@ -1583,7 +1583,7 @@ fn create_context(
 
             // --- append ---
             let app_sp = storage_arc.clone();
-            let app_fn = unsafe {
+            let app_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let key = _args
                         .first()
@@ -1602,7 +1602,7 @@ fn create_context(
 
             // --- delete ---
             let del_sp = storage_arc.clone();
-            let del_fn = unsafe {
+            let del_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let key = _args
                         .first()
@@ -1616,7 +1616,7 @@ fn create_context(
 
             // --- has ---
             let has_sp = storage_arc.clone();
-            let has_fn = unsafe {
+            let has_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let key = _args
                         .first()
@@ -1630,7 +1630,7 @@ fn create_context(
 
             // --- forEach ---
             let foreach_sp = storage_arc.clone();
-            let foreach_fn = unsafe {
+            let foreach_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     if let Some(callback) = _args.first() {
                         if let Some(cb_obj) = callback.as_object() {
@@ -1654,7 +1654,7 @@ fn create_context(
 
             // --- toString ---
             let str_sp = storage_arc.clone();
-            let str_fn = unsafe {
+            let str_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let mut parts = Vec::new();
                     for (key, values) in str_sp.borrow().iter() {
@@ -1742,7 +1742,7 @@ fn create_context(
             let _us_storage8 = url_storage.clone();
 
             // href getter
-            let href_fn = unsafe {
+            let href_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let href = href_storage.borrow().get("href").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(href.as_str())))
@@ -1750,7 +1750,7 @@ fn create_context(
             };
 
             // origin getter
-            let origin_fn = unsafe {
+            let origin_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let origin = us_storage.borrow().get("origin").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(origin.as_str())))
@@ -1758,7 +1758,7 @@ fn create_context(
             };
 
             // protocol getter
-            let proto_fn = unsafe {
+            let proto_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let proto = us_storage2.borrow().get("protocol").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(proto.as_str())))
@@ -1766,7 +1766,7 @@ fn create_context(
             };
 
             // host getter
-            let host_fn = unsafe {
+            let host_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let host = us_storage3.borrow().get("host").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(host.as_str())))
@@ -1774,7 +1774,7 @@ fn create_context(
             };
 
             // pathname getter
-            let path_fn = unsafe {
+            let path_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let path = us_storage4.borrow().get("pathname").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(path.as_str())))
@@ -1782,7 +1782,7 @@ fn create_context(
             };
 
             // search getter
-            let search_fn = unsafe {
+            let search_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let search = us_storage5.borrow().get("search").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(search.as_str())))
@@ -1790,7 +1790,7 @@ fn create_context(
             };
 
             // hash getter
-            let hash_fn = unsafe {
+            let hash_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     let hash = us_storage6.borrow().get("hash").cloned().unwrap_or_default();
                     Ok(JsValue::from(JsString::from(hash.as_str())))
@@ -1799,7 +1799,7 @@ fn create_context(
 
             // searchParams getter (returns URLSearchParams-like object)
             let sp_storage = us_storage7.clone();
-            let sp_fn = unsafe {
+            let sp_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     let search = sp_storage.borrow().get("search").cloned().unwrap_or_default();
                     let query = search.trim_start_matches('?').to_string();
@@ -1821,8 +1821,8 @@ fn create_context(
                     };
 
                     // Build a JS object that acts like URLSearchParams
-                    let sp_get_fn = unsafe {
-                        NativeFunction::from_closure(move |_this, args, _ctx| {
+                    let _sp_get_fn = {
+                        NativeFunction::from_closure(move |_this, _args, _ctx| {
                             Ok(JsValue::undefined())
                         })
                     };
@@ -1839,7 +1839,7 @@ fn create_context(
 
                     // get(name) — returns first value for the key
                     let get_params = params.clone();
-                    let sp_get = unsafe {
+                    let sp_get = {
                         NativeFunction::from_closure(move |_this, args, _ctx| {
                             let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                             for (k, v) in &get_params {
@@ -1853,7 +1853,7 @@ fn create_context(
 
                     // has(name)
                     let has_params = params.clone();
-                    let sp_has = unsafe {
+                    let sp_has = {
                         NativeFunction::from_closure(move |_this, args, _ctx| {
                             let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                             Ok(JsValue::from(has_params.iter().any(|(k, _)| k == &key)))
@@ -1862,7 +1862,7 @@ fn create_context(
 
                     // toString()
                     let to_str_query = query.clone();
-                    let sp_to_string = unsafe {
+                    let sp_to_string = {
                         NativeFunction::from_closure(move |_this, _args, _ctx| {
                             Ok(JsValue::from(JsString::from(to_str_query.as_str())))
                         })
@@ -1870,7 +1870,7 @@ fn create_context(
 
                     // getAll(name)
                     let getall_params = params.clone();
-                    let sp_get_all = unsafe {
+                    let sp_get_all = {
                         NativeFunction::from_closure(move |_this, args, ctx2| {
                             let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                             let vals: Vec<JsValue> = getall_params.iter()
@@ -1972,7 +1972,7 @@ fn create_context(
     // Avoid recursive closure — use a simpler approach
     let te_ctor = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
-            let encode_fn = unsafe {
+            let encode_fn = {
                 NativeFunction::from_closure(move |_this2, args2, ctx2| {
                     let input = args2
                         .first()
@@ -1999,7 +1999,7 @@ fn create_context(
     // --- TextDecoder ---
     let td_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
-            let decode_fn = unsafe {
+            let decode_fn = {
                 NativeFunction::from_closure(move |_this2, args2, ctx2| {
                     // Decode buffer/array back to string
                     let input = args2.first().cloned().unwrap_or(JsValue::undefined());
@@ -2540,7 +2540,7 @@ fn register_document_object(
             let mut_set_attr = mutations_el.clone();
             let mut_set_id = id_for_obj;
             let attrs_for_set = attrs_map.clone();
-            let set_attr_fn = unsafe {
+            let set_attr_fn = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                     let value = args.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
@@ -2553,7 +2553,7 @@ fn register_document_object(
 
             // getAttribute for this element — reads from shared Arc<RwLock<HashMap>>
             let attrs_for_get = attrs_map.clone();
-            let get_attr_fn = unsafe {
+            let get_attr_fn = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                     match attrs_for_get.read().get(&name) {
@@ -2566,7 +2566,7 @@ fn register_document_object(
             // click for this element
             let mut_click = mutations_el.clone();
             let click_id = id_for_obj;
-            let click_fn = unsafe {
+            let click_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
                     mut_click.write().push(DomMutation::ClickElement { node_id: click_id });
                     Ok(JsValue::undefined())
@@ -2576,7 +2576,7 @@ fn register_document_object(
             // appendChild for this element
             let dom_snap_ac = dom_snap_el.clone();
             let parent_id_ac = id_for_obj;
-            let append_child_fn = unsafe {
+            let append_child_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let child = args.first().cloned().unwrap_or(JsValue::undefined());
                     let child_id = child.as_object()
@@ -2743,7 +2743,7 @@ fn register_document_object(
                 let dom_efp = dom_snapshot.clone();
                 unsafe {
                     let fn_ptr: NativeFunction = NativeFunction::from_closure(move |_this, args, ctx| {
-                        let x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
+                        let _x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
                         let y = args.get(1).and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
                         let snap = snap_efp.read();
                         if let Some(ref s) = *snap {
