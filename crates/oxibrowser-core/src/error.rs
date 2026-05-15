@@ -68,6 +68,9 @@ pub enum CoreError {
     /// Intercepted response from Fetch.fulfillRequest (synthetic response).
     #[error("intercepted response")]
     InterceptedResponse(InterceptedResponse),
+
+    #[error("screenshot error: {0}")]
+    ScreenshotError(String),
 }
 
 /// Convenience Result alias.

@@ -3,7 +3,7 @@
 //! Mirrors Lightpanda's `Page.zig`: owns the DOM factory, JS identity map,
 //! and frame tree. A Page is created on navigation and holds the root Frame.
 
-use crate::error::Result;
+use crate::error::{Result, CoreError};
 use crate::frame::Frame;
 use crate::network::resource::Resource;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -131,9 +131,9 @@ impl Page {
     /// Render the page as a PNG screenshot.
     ///
     /// Renders the DOM text content as a PNG image using a monospace bitmap font.
-    pub fn to_screenshot_png(&self, viewport_width: u32) -> Result<Vec<u8>, String> {
+    pub fn to_screenshot_png(&self, viewport_width: u32) -> Result<Vec<u8>> {
         let text = self.to_text_screenshot();
-        crate::css::text_to_png(&text, viewport_width)
+        crate::css::text_to_png(&text, viewport_width).map_err(|e| CoreError::ScreenshotError(e))
     }
 
     /// Get the page ID.

@@ -266,17 +266,14 @@ impl DomSnapshot {
                 if idx == 0 {
                     return true;
                 }
-                if let Some(ancestor) = self.nodes.get(&parent_id) {
-                    if self.matches_simple(ancestor, ancestor_parts[idx - 1]) {
-                        idx -= 1;
-                    }
+                let ancestor = match self.nodes.get(&parent_id) {
+                    Some(a) => a,
+                    None => break,
+                };
+                if self.matches_simple(ancestor, ancestor_parts[idx - 1]) {
+                    idx -= 1;
                 }
-                current = ancestor.and_then(|a: &DomNode| a.parent);
-                if let Some(ancestor) = self.nodes.get(&parent_id) {
-                    current = ancestor.parent;
-                } else {
-                    break;
-                }
+                current = ancestor.parent;
             }
             return idx == 0;
         }

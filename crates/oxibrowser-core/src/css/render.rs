@@ -247,7 +247,7 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
                     output.push('[');
                     render_children_text(snapshot, node, output);
                     if !href.is_empty() {
-                        output.push_str(&format!"]({href})"));
+                        output.push_str(&format!("]({href})"));
                     } else {
                         output.push(']');
                     }

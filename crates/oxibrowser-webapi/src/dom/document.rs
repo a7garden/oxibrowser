@@ -86,7 +86,7 @@ impl Document {
             return;
         }
 
-        if let Some(node) = self.nodes.get(&current) {
+        if let Some(_node) = self.nodes.get(&current) {
             if self.node_matches_selector(current, selector) {
                 *result = Some(current);
                 return;
