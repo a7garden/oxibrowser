@@ -15,23 +15,55 @@ use reqwest::{Client, Response};
 use std::sync::Arc;
 use url::Url;
 
+/// Check if a URL is allowed by the SSRF filter.
+/// This is a standalone function so it can be used both for initial requests
+/// and inside the redirect policy closure.
+fn check_url_ssrf(url: &Url, filter: &IpFilter) -> bool {
+    if let Some(host) = url.host_str() {
+        return filter.is_hostname_allowed(host);
+    }
+    true
+}
+
 /// HTTP client wrapper with cookie support and configurable defaults.
 pub struct HttpClient {
     client: Client,
     #[allow(dead_code)]
     config: BrowserConfig,
     cookie_jar: Arc<RwLock<CookieJar>>,
-    ip_filter: IpFilter,
+    ip_filter: Arc<IpFilter>,
 }
 
 impl HttpClient {
     /// Build a new HTTP client from browser config.
+    ///
+    /// The client uses a custom redirect policy that validates every redirect
+    /// target against the SSRF IP filter. This prevents attackers from using
+    /// open redirects to reach internal network resources.
+    ///
+    /// **TOCTOU limitation:** reqwest performs its own DNS resolution after the
+    /// SSRF check. This creates a time-of-check-time-of-use window. The redirect
+    /// policy mitigates the most common SSRF-via-redirect attack vector. For
+    /// full TOCTOU protection, a custom hyper connector would be needed.
     pub fn new(config: &BrowserConfig, cookie_jar: Arc<RwLock<CookieJar>>) -> Result<Self> {
+        let ip_filter = Arc::new(IpFilter::block_private());
+        let redirect_filter = ip_filter.clone();
+
         let mut builder = Client::builder()
             .user_agent(&config.user_agent)
             .pool_max_idle_per_host(config.connection_pool_size)
             .timeout(config.default_timeout)
-            .redirect(reqwest::redirect::Policy::limited(10));
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let url = attempt.url();
+                if !check_url_ssrf(url, &redirect_filter) {
+                    tracing::warn!(
+                        "SSRF blocked: redirect to {} rejected (blocked IP)",
+                        url
+                    );
+                    return attempt.stop();
+                }
+                attempt.follow()
+            }));
 
         if config.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
@@ -45,14 +77,14 @@ impl HttpClient {
             client,
             config: config.clone(),
             cookie_jar,
-            ip_filter: IpFilter::block_private(),
+            ip_filter,
         })
     }
 
     /// Check if a URL's resolved IP is allowed by the SSRF filter.
     fn check_ssrf(&self, url: &Url) -> Result<()> {
-        if let Some(host) = url.host_str() {
-            if !self.ip_filter.is_hostname_allowed(host) {
+        if !check_url_ssrf(url, &self.ip_filter) {
+            if let Some(host) = url.host_str() {
                 return Err(CoreError::NetworkError(format!(
                     "SSRF blocked: hostname {} resolves to a blocked IP address",
                     host
@@ -306,5 +338,27 @@ mod tests {
             !cookies.is_empty(),
             "cookies should be stored after fetch"
         );
+    }
+
+    #[test]
+    fn test_check_url_ssrf_blocks_loopback() {
+        let filter = IpFilter::block_private();
+        let url = Url::parse("http://127.0.0.1/admin").unwrap();
+        assert!(!check_url_ssrf(&url, &filter));
+    }
+
+    #[test]
+    fn test_check_url_ssrf_allows_public() {
+        let filter = IpFilter::block_private();
+        let url = Url::parse("http://93.184.216.34/").unwrap();
+        assert!(check_url_ssrf(&url, &filter));
+    }
+
+    #[test]
+    fn test_check_url_ssrf_no_host() {
+        let filter = IpFilter::block_private();
+        // data: URLs have no host
+        let url = Url::parse("data:text/plain,hello").unwrap();
+        assert!(check_url_ssrf(&url, &filter));
     }
 }

@@ -247,6 +247,10 @@ impl Session {
             handle_local_storage_sync(ls_rx, ls_arc_clone);
         }));
 
+        if let Err(e) = js_runtime.set_cookie_jar(cookie_jar.clone()) {
+            tracing::warn!("failed to set cookie jar: {}", e);
+        }
+
         Ok(Self {
             id: SessionId::next(),
             browser_id,

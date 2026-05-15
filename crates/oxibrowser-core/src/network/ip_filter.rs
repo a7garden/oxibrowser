@@ -87,6 +87,10 @@ pub struct IpFilter {
     blocked_v6: Vec<CidrRangeV6>,
     allowed: Vec<CidrRange>,
     allowed_v6: Vec<CidrRangeV6>,
+    /// When `true`, DNS resolution failures cause the check to return `false`
+    /// (fail-closed). When `false` (default), DNS failures return `true`
+    /// (fail-open) to avoid breaking legitimate requests on transient errors.
+    fail_closed: bool,
 }
 
 impl IpFilter {
@@ -124,9 +128,18 @@ impl IpFilter {
                 CidrRangeV6::v6("fe80::/10"),
                 // IPv4-mapped IPv6 addresses ::ffff:0:0/96
                 CidrRangeV6::v6("::ffff:0.0.0.0/96"),
+                // IPv6 multicast ff00::/8
+                CidrRangeV6::v6("ff00::/8"),
+                // Unspecified address :: (equivalent of 0.0.0.0)
+                CidrRangeV6::v6("::/128"),
+                // Discard prefix RFC 6666
+                CidrRangeV6::v6("100::/64"),
+                // NAT64 well-known prefix
+                CidrRangeV6::v6("64:ff9b::/96"),
             ],
             allowed: vec![],
             allowed_v6: vec![],
+            fail_closed: false,
         }
     }
 
@@ -137,6 +150,7 @@ impl IpFilter {
             blocked_v6: vec![],
             allowed: vec![],
             allowed_v6: vec![],
+            fail_closed: false,
         }
     }
 
@@ -145,9 +159,30 @@ impl IpFilter {
         self.blocked.push(CidrRange::v4(cidr));
     }
 
+    /// Add an IPv6 CIDR range to the block list.
+    pub fn add_block_v6(&mut self, cidr: &str) {
+        self.blocked_v6.push(CidrRangeV6::v6(cidr));
+    }
+
     /// Add an IPv4 CIDR range to the allow list.
     pub fn add_allow(&mut self, cidr: &str) {
         self.allowed.push(CidrRange::v4(cidr));
+    }
+
+    /// Add an IPv6 CIDR range to the allow list.
+    pub fn add_allow_v6(&mut self, cidr: &str) {
+        self.allowed_v6.push(CidrRangeV6::v6(cidr));
+    }
+
+    /// Set whether DNS resolution failures should fail-closed (block) or
+    /// fail-open (allow, default).
+    pub fn set_fail_closed(&mut self, fail_closed: bool) {
+        self.fail_closed = fail_closed;
+    }
+
+    /// Returns `true` if the filter is in fail-closed mode.
+    pub fn is_fail_closed(&self) -> bool {
+        self.fail_closed
     }
 
     /// Check if an IP address is allowed.
@@ -191,9 +226,16 @@ impl IpFilter {
 
     /// Check if a hostname is allowed by resolving DNS and checking all IPs.
     /// Returns `false` if any resolved IP is blocked.
-    /// Returns `true` if DNS resolution fails (fail-open) or all IPs are allowed.
     ///
-    /// This is a synchronous version. For async, use `is_hostname_allowed_async`.
+    /// - If `fail_closed` is `true`, DNS resolution failures return `false`.
+    /// - If `fail_closed` is `false` (default), DNS resolution failures return
+    ///   `true` (fail-open) to avoid breaking legitimate requests on transient
+    ///   DNS errors.
+    ///
+    /// **TOCTOU note:** reqwest performs its own DNS resolution internally after
+    /// this check passes. This means there is a time-of-check-time-of-use window
+    /// where DNS could change. For strict environments, enable `fail_closed` and
+    /// consider using a custom connector that pins the resolved IP.
     pub fn is_hostname_allowed(&self, hostname: &str) -> bool {
         // Try to parse as IP first (no DNS needed)
         if let Ok(addr) = hostname.parse::<IpAddr>() {
@@ -205,20 +247,30 @@ impl IpFilter {
         let lookup_target = format!("{}:0", hostname);
         match std::net::ToSocketAddrs::to_socket_addrs(&lookup_target as &str) {
             Ok(addrs) => {
+                let mut any_resolved = false;
                 for socket_addr in addrs {
+                    any_resolved = true;
                     if !self.is_allowed(&socket_addr.ip()) {
                         return false;
                     }
                 }
+                // If no addresses were resolved, treat as DNS failure
+                if !any_resolved {
+                    return !self.fail_closed;
+                }
                 true
             }
             Err(_) => {
-                // DNS resolution failed — fail open (log in production)
-                true
+                // DNS resolution failed
+                if self.fail_closed {
+                    false
+                } else {
+                    // Fail open (log in production)
+                    true
+                }
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -326,5 +378,63 @@ mod tests {
         let f = IpFilter::block_private();
         assert!(!f.is_hostname_allowed("127.0.0.1"));
         assert!(f.is_hostname_allowed("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_ipv6_multicast_blocked() {
+        let f = IpFilter::block_private();
+        assert!(!f.is_allowed(&"ff02::1".parse::<IpAddr>().unwrap()));
+        assert!(!f.is_allowed(&"ff0e::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_ipv6_unspecified_blocked() {
+        let f = IpFilter::block_private();
+        assert!(!f.is_allowed(&"::".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_ipv6_discard_prefix_blocked() {
+        let f = IpFilter::block_private();
+        assert!(!f.is_allowed(&"100::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_ipv6_nat64_prefix_blocked() {
+        let f = IpFilter::block_private();
+        assert!(!f.is_allowed(&"64:ff9b::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_add_block_v6() {
+        let mut f = IpFilter::empty();
+        f.add_block_v6("2001:db8::/32");
+        assert!(!f.is_allowed(&"2001:db8::1".parse::<IpAddr>().unwrap()));
+        assert!(f.is_allowed(&"2001:4860:4860::8888".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn test_add_allow_v6() {
+        let mut f = IpFilter::block_private();
+        f.add_allow_v6("::1/128");
+        // After explicitly allowing ::1, it should pass
+        assert!(f.is_allowed(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_fail_closed_dns() {
+        let mut f = IpFilter::block_private();
+        f.set_fail_closed(true);
+        assert!(f.is_fail_closed());
+        // A non-existent hostname should fail-closed
+        assert!(!f.is_hostname_allowed("this-domain-definitely-does-not-exist-xyz.invalid"));
+    }
+
+    #[test]
+    fn test_fail_open_dns() {
+        let f = IpFilter::block_private();
+        assert!(!f.is_fail_closed());
+        // A non-existent hostname should fail-open (allowed)
+        assert!(f.is_hostname_allowed("this-domain-definitely-does-not-exist-xyz.invalid"));
     }
 }
