@@ -817,6 +817,7 @@ fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_context(
     output: &Arc<RwLock<Vec<String>>>,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
