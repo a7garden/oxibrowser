@@ -22,7 +22,7 @@
 //!
 //! See `types.rs` for the full list of step types and their YAML representation.
 
-use super::types::{ErrorAction, ScriptConfig, Step};
+use super::types::ScriptConfig;
 
 use std::path::Path;
 
@@ -75,6 +75,7 @@ impl std::error::Error for ScriptError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::{ErrorAction, Step};
 
     #[test]
     fn test_parse_minimal_script() {
