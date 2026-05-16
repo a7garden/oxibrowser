@@ -3029,6 +3029,15 @@ fn register_document_object(
                 })
             };
 
+            // 생성된 노드를 snapshot에서 찾아 create_element_object로 완전한 요소 생성
+            // 이렇게 하면 새 요소도 style, classList, cloneNode, remove 등 모든 메서드를 가짐
+            let dom = dom_snap_ce.read();
+            if let Some(ref snap) = *dom {
+                if let Some(new_node) = snap.nodes.get(&new_id) {
+                    return Ok(create_element_object(snap, new_node, ctx, &mutations_ce, &dom_snap_ce));
+                }
+            }
+            // fallback: snapshot에서 못 찾으면 기본 객체 반환
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
                 .property(js_string!("tagName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
                 .property(js_string!("nodeName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
@@ -3041,7 +3050,6 @@ fn register_document_object(
                 .function(click_fn, js_string!("click"), 0)
                 .function(append_child_fn, js_string!("appendChild"), 1)
                 .build();
-
             Ok(JsValue::from(obj))
         })
     };
@@ -3276,7 +3284,9 @@ fn create_element_object(
     );
 
     // getAttribute(name)
-    let attrs_clone: HashMap<String, String> = enriched_attrs.clone();
+    // getAttribute(name) — reads from live snapshot (reflects setAttribute mutations)
+    let dom_snap_ga = dom_snapshot_arc.clone();
+    let node_id_ga = node.id;
     let get_attribute_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let name = args
@@ -3284,15 +3294,22 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            match attrs_clone.get(&name) {
-                Some(val) => Ok(JsValue::from(JsString::from(val.as_str()))),
-                None => Ok(JsValue::null()),
+            // 읽기 전용 snapshot에서 attribute 조회 (setAttribute가 snapshot에 반영됨)
+            let dom = dom_snap_ga.read();
+            if let Some(ref snap) = *dom {
+                if let Some(n) = snap.nodes.get(&node_id_ga) {
+                    if let Some(val) = n.attributes.get(&name) {
+                        return Ok(JsValue::from(JsString::from(val.as_str())));
+                    }
+                }
             }
+            Ok(JsValue::null())
         })
     };
 
-    // hasAttribute(name)
-    let attrs_clone2: HashMap<String, String> = enriched_attrs.clone();
+    // hasAttribute(name) — reads from live snapshot
+    let dom_snap_ha = dom_snapshot_arc.clone();
+    let node_id_ha = node.id;
     let has_attribute_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let name = args
@@ -3300,7 +3317,13 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            Ok(JsValue::from(attrs_clone2.contains_key(&name)))
+            let dom = dom_snap_ha.read();
+            if let Some(ref snap) = *dom {
+                if let Some(n) = snap.nodes.get(&node_id_ha) {
+                    return Ok(JsValue::from(n.attributes.contains_key(&name)));
+                }
+            }
+            Ok(JsValue::from(false))
         })
     };
 
@@ -3424,14 +3447,42 @@ fn create_element_object(
         })
     };
 
-    // click() → records DomMutation::ClickElement
+    // click() → fires JS event handlers + records DomMutation::ClickElement
     let node_id_click = node.id;
     let mutations_click = mutations.clone();
     let click_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // 1. mutation 기록
             mutations_click.write().push(DomMutation::ClickElement {
                 node_id: node_id_click,
             });
+            // 2. __listeners에서 click 핸들러 찾아서 실행
+            if let Some(this_obj) = _this.as_object() {
+                if let Ok(listeners_val) = this_obj.get(js_string!("__listeners"), ctx) {
+                    if let Some(listeners_obj) = listeners_val.as_object() {
+                        if let Ok(arr_val) = listeners_obj.get(js_string!("click"), ctx) {
+                            if let Some(arr_js) = arr_val.as_object() {
+                                if let Ok(arr) = JsArray::from_object(arr_js.clone()) {
+                                    let len = arr.length(ctx).unwrap_or(0) as usize;
+                                    let event_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                                        .property(js_string!("type"), JsValue::from(JsString::from("click")), Attribute::all())
+                                        .property(js_string!("target"), _this.clone(), Attribute::all())
+                                        .property(js_string!("currentTarget"), _this.clone(), Attribute::all())
+                                        .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
+                                        .build();
+                                    for i in 0..len {
+                                        if let Ok(cb) = arr.get(i as u64, ctx) {
+                                            if let Some(cb_obj) = cb.as_object() {
+                                                let _ = cb_obj.call(_this, &[JsValue::from(event_obj.clone())], ctx);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(JsValue::undefined())
         })
     };
@@ -4086,24 +4137,30 @@ fn create_element_object(
     };
 
     // value getter
-    let value_val = node
-        .attributes
-        .get("value")
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+    // value getter — reads from live snapshot (reflects value setter)
+    let dom_snap_vg = dom_snapshot_arc.clone();
+    let node_id_vg = node.id;
     let value_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::from(JsString::from(value_val.as_str())))
+            let dom = dom_snap_vg.read();
+            if let Some(ref snap) = *dom {
+                if let Some(n) = snap.nodes.get(&node_id_vg) {
+                    return Ok(JsValue::from(JsString::from(
+                        n.attributes.get("value").map(|s| s.as_str()).unwrap_or("")
+                    )));
+                }
+            }
+            Ok(JsValue::from(JsString::from("")))
         })
     };
     let value_getter_fn = FunctionObjectBuilder::new(ctx.realm(), value_getter)
         .name(js_string!("get value"))
         .build();
 
-    // value setter → records DomMutation::InputElement
+    // value setter → updates snapshot + records DomMutation::InputElement
     let node_id_vs = node.id;
     let mutations_vs = mutations.clone();
+    let dom_snap_vs = dom_snapshot_arc.clone();
     let value_setter = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let val = args
@@ -4111,6 +4168,15 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            // snapshot에 value attribute 업데이트 (getter가 즉시 반영)
+            {
+                let mut dom = dom_snap_vs.write();
+                if let Some(ref mut snap) = *dom {
+                    if let Some(n) = snap.nodes.get_mut(&node_id_vs) {
+                        n.attributes.insert("value".to_string(), val.clone());
+                    }
+                }
+            }
             mutations_vs.write().push(DomMutation::InputElement {
                 node_id: node_id_vs,
                 value: val,
