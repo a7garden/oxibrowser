@@ -35,6 +35,9 @@ string_cache = { workspace = true }
 boa_engine = { workspace = true }
 boa_gc = { workspace = true }
 pollster = "0.4"
+serde_yaml = "0.9"
+regex = "1.10"
+chrono = "0.4"
 
 oxibrowser-webapi = { version = "0.8.0", path = "../oxibrowser-webapi" }
 getrandom = { workspace = true }

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-16
+
+### Added
+- **ScriptRunner module**: New `oxibrowser-core/src/script/` module for YAML-based browser automation:
+  - `parser.rs`: YAML parsing to `ScriptConfig` (serde_yaml)
+  - `runner.rs`: Step-by-step script execution on `Tab` with variable interpolation
+  - `types.rs`: Step enum with 30+ step types (navigation, interaction, content, flow control)
+  - Supports goto, click, fill, type, wait, evaluate, extract, screenshot, set, echo, sleep, if, retry
+- **`oxibrowser run` CLI command**: Run YAML scripts from the CLI (`oxibrowser run <script.yaml>`)
+- **Variable interpolation**: `${var}` substitution in step fields, `$$` for literal `$`
+- **Error handling**: `on_error.action: abort | continue` with optional screenshot on error
+
+### Changed
+- CLI enhanced with `run` subcommand (developer tool only)
+
+### Architecture
+- ScriptRunner shared between CLI and future BrowserTool in agent contexts
+- No `.programs/oxibrowser` registration needed — agents use BrowserTool directly
+
 ## [0.7.0] - 2026-05-16
 
 ### Added

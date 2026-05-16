@@ -155,6 +155,15 @@ enum Commands {
         timeout: u64,
     },
 
+    /// Run a YAML script on a Tab.
+    Run {
+        /// Path to the YAML script file or inline YAML.
+        script: String,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
     /// Print version information.
     Version,
 }
@@ -291,6 +300,19 @@ async fn main() -> Result<()> {
                 _ = &mut ctrlc => {
                     // Ctrl+C is handled inside run_serve via its own ctrl_c listener.
                     // This branch is a fallback.
+                }
+            }
+        }
+        Commands::Run {
+            script,
+            timeout,
+        } => {
+            let op = run_script(&script, timeout);
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    eprintln!("\nInterrupted.");
+                    std::process::exit(130);
                 }
             }
         }
@@ -793,5 +815,48 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> Result<(
     server.shutdown();
     browser.close().await?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// run script
+// ---------------------------------------------------------------------------
+
+use oxibrowser_core::script::{parse_script, ScriptRunner};
+
+/// Run a YAML script on a new Tab.
+async fn run_script(script_path_or_yaml: &str, timeout: u64) -> Result<()> {
+    info!(script = %script_path_or_yaml, timeout, "running script");
+
+    let script_config = if std::path::Path::new(script_path_or_yaml).exists() {
+        parse_script(&std::fs::read_to_string(script_path_or_yaml)?)
+            .map_err(|e| anyhow::anyhow!("failed to parse script: {e}"))?
+    } else {
+        parse_script(script_path_or_yaml)
+            .map_err(|e| anyhow::anyhow!("failed to parse script: {e}"))?
+    };
+
+    // Create a browser and a tab for the script
+    let mut browser_config = oxibrowser_core::BrowserConfig::headless();
+    browser_config.enable_ssrf_filter = false; // Allow script to navigate anywhere
+    let browser = oxibrowser_core::Browser::new(browser_config).await?;
+
+    // Create a tab for the script
+    let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!("failed to create tab: {e}"))?;
+
+    // Run the script
+    let mut runner = ScriptRunner::new(&tab);
+    let result = runner.run_config(&script_config).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Print the result
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+
+    if result.success {
+        info!("script completed successfully");
+    } else {
+        eprintln!("script completed with errors");
+    }
+
+    browser.close().await?;
     Ok(())
 }

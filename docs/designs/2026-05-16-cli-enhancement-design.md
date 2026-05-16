@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-16
 **Author**: AI agent
-**Status**: Draft
+**Status**: ✅ Implemented (v0.8.0)
 
 ## Problem Statement
 

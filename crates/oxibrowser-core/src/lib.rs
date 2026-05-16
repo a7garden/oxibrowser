@@ -9,6 +9,7 @@ pub mod config;
 pub mod css;
 pub mod frame;
 pub mod page;
+pub mod script;
 pub mod session;
 pub mod tab;
 
