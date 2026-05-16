@@ -5,7 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2025-05-14
+## [0.7.0] - 2026-05-16
+
+### Added
+- **Mutation persistence**: `createElement`, `createTextNode`, `appendChild`, `removeChild`, `insertBefore`, `setInnerHtml` now apply to webapi DOM — elements survive across `evaluate()` calls and are discoverable via `querySelector`
+- **`element.style` as property**: `el.style` is now a CSSStyleDeclaration-like object (not a function) with `getPropertyValue()`, `setProperty()`, `removeProperty()`
+- **`element.classList` as property**: `el.classList` is now a DOMTokenList-like object (not a function) with `add()`, `remove()`, `toggle()`, `contains()`
+- **`element.textContent` setter**: Read/write — `el.textContent = 'new'` updates live snapshot + records mutation for webapi DOM
+- **`element.innerHTML` setter**: Read/write — `el.innerHTML = 'html'` updates live snapshot + records mutation
+- **`data-oxi-text` bridge**: Snapshot regeneration reads `data-oxi-text` attribute as fallback for text content set via JS
+- **14 new DOM APIs** in `create_element_object()`:
+  - Tree traversal (accessors): `firstChild`, `lastChild`, `nextSibling`, `previousSibling`
+  - Tree manipulation (methods): `insertBefore`, `replaceChild`, `removeAttribute`, `cloneNode`, `remove()`
+  - Style/Class (methods): `style()`, `classList()`
+  - Focus/Form (noop): `focus()`, `blur()`, `submit()`
+
+### Fixed
+- **`getAttribute` / `hasAttribute`**: Was reading from static cloned HashMap, now reads from live `DomSnapshot` via `Arc<RwLock>`
+- **`input.value` getter**: Was capturing initial value at creation, now reads from live snapshot
+- **`input.value` setter**: Was only recording mutation, now also updates snapshot attribute immediately
+- **`click()`**: Was only recording mutation, now also fires registered JS event handlers from `__listeners`
+- **`createElement`**: Was returning minimal stub, now calls `create_element_object()` for full element with all APIs
+- **110 code quality issues**: Security, data integrity, API completeness, CSS rendering, testing, dependency hygiene
+
+### Changed
+- `apply_mutations()` now applies all 5 structural mutations (CreateElement, CreateTextNode, AppendChild, RemoveChild, SetInnerHtml) to webapi DOM
+- `Frame::document_mut()` bumps `dom_version` counter on each mutation
+- webapi `Document` gains `create_element_node()`, `create_text_node()`, `tree_mut()`, `nodes_mut()`
+
+### Tests
+- 279 tests pass (223 core + 23 E2E + 20 webapi + 10 event + 3 smoke)
+- 22/22 scenario tests pass (real websites: httpbin, Hacker News)
+
+## [0.6.0] - 2026-05-14
 
 ### Added
 - **Input domain**: `Input.dispatchKeyEvent`, `Input.dispatchMouseEvent`, `Input.insertText` — dispatch real `KeyboardEvent`/`MouseEvent` via JS evaluation on `document.activeElement` / `document.elementFromPoint()`
@@ -20,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 208 tests pass (164 core + 23 E2E + 18 webapi + 3 smoke)
 
-## [0.5.0] - 2025-05-13
+## [0.5.0] - 2026-05-13
 
 ### Added
 - **CSS text screenshot**: `page.to_text_screenshot()` — ASCII/Unicode DOM rendering with block element tags, indentation, BR/HR/IMG handling
@@ -31,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 205 tests pass (152 core + 3 smoke + 22 E2E + 18 webapi + 10 event)
 
-## [0.4.0] - 2025-05-13
+## [0.4.0] - 2026-05-13
 
 ### Added
 - **DOM Mutation**: `document.createElement(tag)`, `document.createTextNode(text)`, `element.appendChild(child)`, `element.removeChild(child)` — full DOM mutation with `DomSnapshot` sync
@@ -46,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 201 tests pass (151 core + 22 E2E + 18 webapi + 10 event)
 
-## [0.3.0] - 2025-05-13
+## [0.3.0] - 2026-05-13
 
 ### Added
 - **Logs to stderr**: `tracing_subscriber` now writes to stderr, stdout is clean data output
@@ -66,7 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - 194→201 tests
 
-## [0.2.0] - 2025-05-13
+## [0.2.0] - 2026-05-13
 
 ### Added
 - **CI/CD**: GitHub Actions workflow (check, test, clippy, fmt, release build)
@@ -85,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Potential runtime panics from poisonable `std::sync::RwLock` in JS runtime
 - Potential runtime panics from `unwrap()` on `Option` and `Result` types in production code
 
-## [0.1.0] - 2025-05-12
+## [0.1.0] - 2026-05-12
 
 ### Added
 - **Browser lifecycle**: `Browser`, `Session`, `Page`, `Frame` hierarchy with thread-safe IDs
@@ -111,8 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tests**: 185 tests (142 core + 15 E2E + 18 webapi + 10 integration)
 - **Encoding**: charset detection and encoding conversion via encoding_rs
 
-[0.2.0]: https://github.com/oxibrowser/oxibrowser/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/oxibrowser/oxibrowser/releases/tag/v0.1.0[0.6.0]: https://github.com/a7garden/oxibrowser/compare/v0.5.0...v0.6.0
+[0.7.0]: https://github.com/a7garden/oxibrowser/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/a7garden/oxibrowser/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/a7garden/oxibrowser/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/a7garden/oxibrowser/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/a7garden/oxibrowser/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/a7garden/oxibrowser/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/a7garden/oxibrowser/releases/tag/v0.1.0
