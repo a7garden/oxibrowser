@@ -410,18 +410,6 @@ const { data } = await client.send('Page.captureScreenshot', {
 - [ ] HTML parsing in `innerHTML` setter
 - [ ] `window.location` setter (navigation)
 
-### v0.9.0
-- [ ] Canvas 2D API (basic drawing operations)
-- [ ] iframe support (nested frames)
-- [ ] `window.history` / back-forward navigation
-- [ ] WebSocket API in JS runtime
-
-### v1.0.0
-- [ ] CSS layout engine (box model, positioning)
-- [ ] WebGL support (basic)
-- [ ] Service Worker stubs
-- [ ] Multi-process isolation
-
 See [HEADLESS_ROADMAP.md](docs/HEADLESS_ROADMAP.md) for detailed planning.
 
 ---
