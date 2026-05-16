@@ -4,10 +4,11 @@
 //! - `oxibrowser fetch <url>` — fetch a URL and dump HTML/markdown (enhanced)
 //! - `oxibrowser eval <url> <expr>` — evaluate JS on a page
 //! - `oxibrowser extract <url>` — extract structured data from a page
+//! - `oxibrowser browse <url>` — interactive Tab API browsing (CDP-free)
 //! - `oxibrowser serve` — start the CDP server
 //! - `oxibrowser version` — print version
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,6 +89,51 @@ enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
+
+    /// Browse a page using the Tab API (CDP-free).
+    Browse {
+        /// URL to navigate to.
+        url: String,
+        /// Output format: markdown, html, text, json, links.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Click an element matching a CSS selector.
+        #[arg(long)]
+        click: Option<String>,
+        /// Fill an element (format: "selector:text").
+        #[arg(long)]
+        input: Option<String>,
+        /// Press a key combo (e.g., Enter, Ctrl+C, Shift+Tab).
+        #[arg(long)]
+        press: Option<String>,
+        /// Wait for a CSS selector before continuing.
+        #[arg(long)]
+        wait: Option<String>,
+        /// Wait timeout in ms.
+        #[arg(long, default_value_t = 5000)]
+        wait_timeout: u64,
+        /// Extract text from elements matching a selector.
+        #[arg(long)]
+        extract: Option<String>,
+        /// With --extract, print all matches.
+        #[arg(long)]
+        all: bool,
+        /// Save PNG screenshot to a file.
+        #[arg(long)]
+        screenshot: Option<String>,
+        /// Screenshot width in pixels.
+        #[arg(long, default_value_t = 800)]
+        width: u32,
+        /// Evaluate JS and print result.
+        #[arg(long)]
+        eval: Option<String>,
+        /// Print response metadata to stderr.
+        #[arg(long)]
+        headers: bool,
         /// Timeout in seconds.
         #[arg(long, default_value_t = 30)]
         timeout: u64,
@@ -183,6 +229,46 @@ async fn main() -> Result<()> {
                 selector.as_deref(),
                 all,
                 json,
+                timeout,
+            );
+            tokio::select! {
+                result = op => result?,
+                _ = &mut ctrlc => {
+                    eprintln!("\nInterrupted.");
+                    std::process::exit(130);
+                }
+            }
+        }
+        Commands::Browse {
+            url,
+            format,
+            click,
+            input,
+            press,
+            wait,
+            wait_timeout,
+            extract,
+            all,
+            screenshot,
+            width,
+            eval,
+            headers,
+            timeout,
+        } => {
+            let op = run_browse(
+                &url,
+                &format,
+                click.as_deref(),
+                input.as_deref(),
+                press.as_deref(),
+                wait.as_deref(),
+                wait_timeout,
+                extract.as_deref(),
+                all,
+                screenshot.as_deref(),
+                width,
+                eval.as_deref(),
+                headers,
                 timeout,
             );
             tokio::select! {
@@ -544,6 +630,131 @@ async fn run_extract(
     }
 
     drop(session_guard);
+    browser.close().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// browse
+// ---------------------------------------------------------------------------
+
+/// Browse a page using the Tab API (CDP-free).
+#[allow(clippy::too_many_arguments)]
+async fn run_browse(
+    url: &str,
+    format: &str,
+    click: Option<&str>,
+    input: Option<&str>,
+    press: Option<&str>,
+    wait: Option<&str>,
+    wait_timeout: u64,
+    extract: Option<&str>,
+    all: bool,
+    screenshot: Option<&str>,
+    width: u32,
+    eval: Option<&str>,
+    headers: bool,
+    timeout: u64,
+) -> Result<()> {
+    info!(url = %url, timeout, "browsing URL");
+
+    let config = oxibrowser_core::BrowserConfig::headless();
+    let browser = oxibrowser_core::Browser::new(config).await?;
+    let tab = browser.new_tab().await?;
+
+    let nav_result = tokio::time::timeout(Duration::from_secs(timeout), tab.goto(url)).await;
+    let nav = match nav_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: timed out after {timeout}s");
+            std::process::exit(1);
+        }
+    };
+
+    if headers {
+        eprintln!("HTTP {}", nav.status);
+        eprintln!("URL: {}", nav.url);
+        eprintln!("Title: {}", nav.title);
+    }
+
+    if let Some(selector) = wait {
+        tab.wait_for(selector, wait_timeout).await?;
+    }
+    if let Some(selector) = click {
+        tab.click(selector).await?;
+    }
+    if let Some(spec) = input {
+        let (selector, value) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow!("--input must be in the form selector:text"))?;
+        tab.fill(selector, value).await?;
+    }
+    if let Some(keys) = press {
+        tab.press(keys).await?;
+    }
+
+    if let Some(path) = screenshot {
+        let png = tab.screenshot(width).await?;
+        std::fs::write(path, &png)?;
+        eprintln!("Screenshot: {path} ({} bytes)", png.len());
+    }
+
+    if let Some(js) = eval {
+        let value = tab.evaluate(js).await?;
+        match value {
+            serde_json::Value::String(s) => print!("{s}"),
+            serde_json::Value::Null => {}
+            other => print!("{other}"),
+        }
+    } else if let Some(selector) = extract {
+        let matches = tab.query_all(selector).await?;
+        if all {
+            for text in matches {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    println!("{trimmed}");
+                }
+            }
+        } else if let Some(first) = matches.iter().find(|t| !t.trim().is_empty()) {
+            println!("{}", first.trim());
+        }
+    } else {
+        let content = tab.content().await?;
+        match format {
+            "markdown" | "md" => print!("{}", content.markdown),
+            "html" => print!("{}", content.html),
+            "text" => {
+                if let serde_json::Value::String(body) =
+                    tab.evaluate("document.body ? document.body.textContent : ''").await?
+                {
+                    print!("{body}");
+                }
+            }
+            "json" => println!(
+                "{}",
+                serde_json::to_string_pretty(&content).unwrap_or_default()
+            ),
+            "links" => {
+                let value = tab
+                    .evaluate("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
+                    .await?;
+                if let serde_json::Value::Array(items) = value {
+                    for item in items {
+                        if let Some(link) = item.as_str() {
+                            println!("{link}");
+                        }
+                    }
+                }
+            }
+            _ => print!("{}", content.markdown),
+        }
+    }
+
+    tab.close().await?;
     browser.close().await?;
     Ok(())
 }

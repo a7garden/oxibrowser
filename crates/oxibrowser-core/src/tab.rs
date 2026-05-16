@@ -111,7 +111,9 @@ impl Tab {
             r#"(function() {{
                 var el = document.querySelector({sel_json});
                 if (!el) return null;
-                var rect = el.getBoundingClientRect();
+                var rect = el.getBoundingClientRect
+                    ? el.getBoundingClientRect()
+                    : { left: 0, top: 0, width: 0, height: 0 };
                 var x = rect.left + rect.width / 2;
                 var y = rect.top + rect.height / 2;
                 el.dispatchEvent(new MouseEvent('click', {{
@@ -178,6 +180,226 @@ impl Tab {
         let up_js = js::input::js_dispatch_key_event(key, &code, "keyUp", 0, timestamp_millis());
         session.evaluate_js(&up_js).await?;
         Ok(())
+    }
+
+    /// Press a key combo (e.g., "Ctrl+C", "Shift+Tab").
+    pub async fn press(&self, combo: &str) -> Result<()> {
+        let (key, code, modifiers) = js::mouse::parse_key_combo(combo);
+        if key.is_empty() {
+            return Err(CoreError::DomError("press: empty key".to_string()));
+        }
+        let down_js =
+            js::input::js_dispatch_key_event(&key, &code, "keyDown", modifiers, timestamp_millis());
+        self.eval_js_checked(down_js).await?;
+        let up_js =
+            js::input::js_dispatch_key_event(&key, &code, "keyUp", modifiers, timestamp_millis());
+        self.eval_js_checked(up_js).await?;
+        Ok(())
+    }
+
+    /// Dispatch a keyDown event (supports modifiers).
+    pub async fn key_down(&self, combo: &str) -> Result<()> {
+        let (key, code, modifiers) = js::mouse::parse_key_combo(combo);
+        if key.is_empty() {
+            return Err(CoreError::DomError("key_down: empty key".to_string()));
+        }
+        let down_js =
+            js::input::js_dispatch_key_event(&key, &code, "keyDown", modifiers, timestamp_millis());
+        self.eval_js_checked(down_js).await?;
+        Ok(())
+    }
+
+    /// Dispatch a keyUp event (supports modifiers).
+    pub async fn key_up(&self, combo: &str) -> Result<()> {
+        let (key, code, modifiers) = js::mouse::parse_key_combo(combo);
+        if key.is_empty() {
+            return Err(CoreError::DomError("key_up: empty key".to_string()));
+        }
+        let up_js =
+            js::input::js_dispatch_key_event(&key, &code, "keyUp", modifiers, timestamp_millis());
+        self.eval_js_checked(up_js).await?;
+        Ok(())
+    }
+
+    /// Click at viewport coordinates.
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
+        let down_js = js::input::js_dispatch_mouse_event(x, y, "mousedown", "left", 1);
+        self.eval_js_checked(down_js).await?;
+        let up_js = js::input::js_dispatch_mouse_event(x, y, "mouseup", "left", 1);
+        self.eval_js_checked(up_js).await?;
+        let click_js = js::input::js_dispatch_mouse_event(x, y, "click", "left", 1);
+        self.eval_dom_action(click_js, format!("click_at: no element at ({x}, {y})"))
+            .await?;
+        Ok(())
+    }
+
+    /// Double-click an element matching a CSS selector.
+    pub async fn double_click(&self, selector: &str) -> Result<()> {
+        let js = js::mouse::js_double_click(selector);
+        self.eval_dom_action(
+            js,
+            format!("double_click: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Right-click an element matching a CSS selector.
+    pub async fn right_click(&self, selector: &str) -> Result<()> {
+        let js = js::mouse::js_right_click(selector);
+        self.eval_dom_action(
+            js,
+            format!("right_click: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Hover over an element matching a CSS selector.
+    pub async fn hover(&self, selector: &str) -> Result<()> {
+        let js = js::mouse::js_hover(selector);
+        self.eval_dom_action(js, format!("hover: no element matching '{selector}'"))
+            .await?;
+        Ok(())
+    }
+
+    /// Move mouse to viewport coordinates.
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
+        let js = js::mouse::js_move_mouse(x, y);
+        self.eval_dom_action(js, format!("move_mouse: no element at ({x}, {y})"))
+            .await?;
+        Ok(())
+    }
+
+    /// Scroll by (delta_x, delta_y) pixels.
+    pub async fn scroll(&self, delta_x: f64, delta_y: f64) -> Result<()> {
+        let js = js::mouse::js_scroll(delta_x, delta_y);
+        self.eval_dom_action(js, "scroll failed".to_string()).await?;
+        Ok(())
+    }
+
+    /// Scroll the first matching element into view.
+    pub async fn scroll_into_view(&self, selector: &str, center: bool) -> Result<()> {
+        let js = js::mouse::js_scroll_into_view(selector, center);
+        self.eval_dom_action(
+            js,
+            format!("scroll_into_view: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Drag from one selector to another.
+    pub async fn drag(&self, from_selector: &str, to_selector: &str) -> Result<()> {
+        let js = js::mouse::js_drag(from_selector, to_selector);
+        self.eval_dom_action(
+            js,
+            format!(
+                "drag: no element matching '{}' or '{}'",
+                from_selector, to_selector
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Fill an input/textarea or contentEditable with a value.
+    pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
+        let js = js::form::js_fill(selector, value);
+        self.eval_dom_action(js, format!("fill: no element matching '{selector}'"))
+            .await?;
+        Ok(())
+    }
+
+    /// Select an option by value or text.
+    pub async fn select_option(&self, selector: &str, value: &str) -> Result<()> {
+        let js = js::form::js_select_option(selector, value);
+        self.eval_dom_action(
+            js,
+            format!("select_option: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Check a checkbox or radio input.
+    pub async fn check(&self, selector: &str) -> Result<()> {
+        let js = js::form::js_check(selector, true);
+        self.eval_dom_action(js, format!("check: no element matching '{selector}'"))
+            .await?;
+        Ok(())
+    }
+
+    /// Uncheck a checkbox or radio input.
+    pub async fn uncheck(&self, selector: &str) -> Result<()> {
+        let js = js::form::js_check(selector, false);
+        self.eval_dom_action(
+            js,
+            format!("uncheck: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Upload a file (synthetic) to an <input type="file"> element.
+    pub async fn upload_file(&self, selector: &str, file_path: &str) -> Result<()> {
+        let js = js::form::js_upload_file(selector, file_path);
+        self.eval_dom_action(
+            js,
+            format!("upload_file: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Clear an input or textarea value.
+    pub async fn clear_input(&self, selector: &str) -> Result<()> {
+        let js = js::form::js_clear(selector);
+        self.eval_dom_action(
+            js,
+            format!("clear_input: no element matching '{selector}'"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Get the current value/textContent for the first matching element.
+    pub async fn get_value(&self, selector: &str) -> Result<String> {
+        let js = js::form::js_get_value(selector);
+        let value = self
+            .eval_dom_action(js, format!("get_value: no element matching '{selector}'"))
+            .await?;
+        match value {
+            Value::String(s) => Ok(s),
+            Value::Null => Ok(String::new()),
+            other => Ok(other.to_string()),
+        }
+    }
+
+    /// Get an attribute value from the first matching element.
+    pub async fn query_attr(&self, selector: &str, attr: &str) -> Result<Option<String>> {
+        let sel_json = serde_json::to_string(selector).unwrap_or_default();
+        let attr_json = serde_json::to_string(attr).unwrap_or_default();
+        let js = format!(
+            r#"(function() {{
+                var el = document.querySelector({sel_json});
+                if (!el) return {{ found: false }};
+                return {{ found: true, value: el.getAttribute({attr_json}) }};
+            }})()"#,
+        );
+        let value = self.eval_js_checked(js).await?;
+        if let Value::Object(map) = value {
+            if map.get("found").and_then(|v| v.as_bool()) == Some(true) {
+                let attr_val = map
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                return Ok(attr_val);
+            }
+        }
+        Err(CoreError::DomError(format!(
+            "query_attr: no element matching '{selector}'"
+        )))
     }
 
     // -----------------------------------------------------------------------
@@ -312,6 +534,25 @@ impl Tab {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Evaluate JS and surface exceptions as CoreError::JsError.
+    async fn eval_js_checked(&self, js_code: String) -> Result<Value> {
+        let mut session = self.inner.lock().await;
+        let result = session.evaluate_js(&js_code).await?;
+        if let Some(exception) = result.exception {
+            return Err(CoreError::JsError(exception));
+        }
+        Ok(result.value.unwrap_or(Value::Null))
+    }
+
+    /// Evaluate JS and ensure the result is non-null (DOM element found).
+    async fn eval_dom_action(&self, js_code: String, error: String) -> Result<Value> {
+        let value = self.eval_js_checked(js_code).await?;
+        if value.is_null() {
+            return Err(CoreError::DomError(error));
+        }
+        Ok(value)
+    }
 
     /// Extract BrowseResult from a Session's current page.
     fn extract_result(session: &Session) -> BrowseResult {
