@@ -3714,12 +3714,6 @@ fn create_element_object(
     dom_snapshot_arc: &Arc<RwLock<Option<DomSnapshot>>>,
 ) -> JsValue {
     let tag_upper = node.tag.to_uppercase();
-    let id_val = node.attributes.get("id").map(|s| s.as_str()).unwrap_or("");
-    let class_val = node
-        .attributes
-        .get("class")
-        .map(|s| s.as_str())
-        .unwrap_or("");
     let href_val = node
         .attributes
         .get("href")
@@ -4903,6 +4897,118 @@ fn create_element_object(
         None => JsValue::null(),
     };
 
+    // id — accessor that reads/writes from live DomSnapshot
+    let snap_id = dom_snapshot_arc.clone();
+    let nid_id = node.id;
+    let mut_id = mutations.clone();
+    let id_getter_fn = {
+        let snap = snap_id.clone();
+        let nid = nid_id;
+        let getter = unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                let dom = snap.read();
+                if let Some(ref s) = *dom {
+                    if let Some(n) = s.nodes.get(&nid) {
+                        return Ok(JsValue::from(JsString::from(
+                            n.attributes.get("id").map(|s| s.as_str()).unwrap_or(""),
+                        )));
+                    }
+                }
+                Ok(JsValue::from(JsString::from("")))
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get id"))
+            .build()
+    };
+    let id_setter_fn = {
+        let snap = snap_id.clone();
+        let nid = nid_id;
+        let m = mut_id.clone();
+        let setter = unsafe {
+            NativeFunction::from_closure(move |_this, args, _ctx| {
+                let value = args
+                    .first()
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                {
+                    let mut dom = snap.write();
+                    if let Some(ref mut s) = *dom {
+                        if let Some(n) = s.nodes.get_mut(&nid) {
+                            n.attributes.insert("id".to_string(), value.clone());
+                        }
+                    }
+                }
+                m.write().push(DomMutation::SetAttribute {
+                    node_id: nid,
+                    name: "id".to_string(),
+                    value,
+                });
+                Ok(JsValue::undefined())
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), setter)
+            .name(js_string!("set id"))
+            .build()
+    };
+
+    // className — accessor
+    let snap_cn = dom_snapshot_arc.clone();
+    let nid_cn = node.id;
+    let mut_cn = mutations.clone();
+    let class_getter_fn = {
+        let snap = snap_cn.clone();
+        let nid = nid_cn;
+        let getter = unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                let dom = snap.read();
+                if let Some(ref s) = *dom {
+                    if let Some(n) = s.nodes.get(&nid) {
+                        return Ok(JsValue::from(JsString::from(
+                            n.attributes.get("class").map(|s| s.as_str()).unwrap_or(""),
+                        )));
+                    }
+                }
+                Ok(JsValue::from(JsString::from("")))
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), getter)
+            .name(js_string!("get className"))
+            .build()
+    };
+    let class_setter_fn = {
+        let snap = snap_cn.clone();
+        let nid = nid_cn;
+        let m = mut_cn.clone();
+        let setter = unsafe {
+            NativeFunction::from_closure(move |_this, args, _ctx| {
+                let value = args
+                    .first()
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                {
+                    let mut dom = snap.write();
+                    if let Some(ref mut s) = *dom {
+                        if let Some(n) = s.nodes.get_mut(&nid) {
+                            n.attributes.insert("class".to_string(), value.clone());
+                        }
+                    }
+                }
+                m.write().push(DomMutation::SetAttribute {
+                    node_id: nid,
+                    name: "class".to_string(),
+                    value,
+                });
+                Ok(JsValue::undefined())
+            })
+        };
+        FunctionObjectBuilder::new(ctx.realm(), setter)
+            .name(js_string!("set className"))
+            .build()
+    };
+
     let obj = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
             js_string!("tagName"),
@@ -4921,14 +5027,16 @@ fn create_element_object(
             Some(inner_html_setter_fn),
             Attribute::all(),
         )
-        .property(
+        .accessor(
             js_string!("id"),
-            JsValue::from(JsString::from(id_val)),
+            Some(id_getter_fn),
+            Some(id_setter_fn),
             Attribute::all(),
         )
-        .property(
+        .accessor(
             js_string!("className"),
-            JsValue::from(JsString::from(class_val)),
+            Some(class_getter_fn),
+            Some(class_setter_fn),
             Attribute::all(),
         )
         .property(
@@ -5727,6 +5835,10 @@ fn register_window_globals(
     // Build final window by combining all sub-objects
     // Since boa 0.20 doesn't have with_object, we register properties
     // on a fresh object that includes everything.
+    // Clone objects before using them in window_final (they get moved)
+    let nav_obj_for_window = nav_obj.clone();
+    let location_obj_for_window = location_obj.clone();
+    let perf_obj_for_window = perf_obj.clone();
     let global_doc = ctx
         .global_object()
         .get(js_string!("document"), ctx)
@@ -5775,17 +5887,17 @@ fn register_window_globals(
         .property(js_string!("console"), global_console, Attribute::all())
         .property(
             js_string!("navigator"),
-            JsValue::from(nav_obj),
+            JsValue::from(nav_obj_for_window),
             Attribute::all(),
         )
         .property(
             js_string!("location"),
-            JsValue::from(location_obj),
+            JsValue::from(location_obj_for_window),
             Attribute::all(),
         )
         .property(
             js_string!("performance"),
-            JsValue::from(perf_obj),
+            JsValue::from(perf_obj_for_window),
             Attribute::all(),
         )
         // DOM shortcuts (as functions since boa 0.20 doesn't support
@@ -5803,6 +5915,37 @@ fn register_window_globals(
     let _ = ctx.register_global_property(
         js_string!("self"),
         JsValue::from(window_final),
+        Attribute::all(),
+    );
+    // Also register navigator and location as standalone globals (browser spec)
+    let _ = ctx.register_global_property(
+        js_string!("navigator"),
+        JsValue::from(nav_obj.clone()),
+        Attribute::all(),
+    );
+    let _ = ctx.register_global_property(
+        js_string!("location"),
+        JsValue::from(location_obj.clone()),
+        Attribute::all(),
+    );
+    // crypto global (for window.crypto)
+    let crypto_get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            // crypto.getRandomValues — fill ArrayBuffer/TypedArray with random bytes
+            // For now, just return the buffer as-is (full impl would copy random bytes)
+            if let Some(arg) = args.first() {
+                Ok(arg.clone())
+            } else {
+                Ok(JsValue::undefined())
+            }
+        })
+    };
+    let crypto_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .function(crypto_get_fn, js_string!("getRandomValues"), 1)
+        .build();
+    let _ = ctx.register_global_property(
+        js_string!("crypto"),
+        JsValue::from(crypto_obj),
         Attribute::all(),
     );
 }

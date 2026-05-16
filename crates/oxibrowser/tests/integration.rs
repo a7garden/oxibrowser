@@ -170,7 +170,6 @@ async fn test_encoding_meta_charset() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_js_create_element_on_real_page() {
     let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
     let session = browser.new_page("https://example.com").await.unwrap();
@@ -199,7 +198,6 @@ async fn test_js_create_element_on_real_page() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_js_window_globals_on_real_page() {
     let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
     let session = browser.new_page("https://example.com").await.unwrap();

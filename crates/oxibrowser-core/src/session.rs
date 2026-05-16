@@ -739,6 +739,16 @@ impl Session {
         self.id
     }
 
+    /// Get the parent browser ID.
+    pub fn browser_id(&self) -> BrowserId {
+        self.browser_id
+    }
+
+    /// Get the HTTP client.
+    pub fn http_client(&self) -> Arc<HttpClient> {
+        self.http_client.clone()
+    }
+
     /// Get navigation history.
     pub fn history(&self) -> &[Url] {
         &self.history
