@@ -97,10 +97,7 @@ pub struct BrowserConfig {
     pub user_agent: String,
 
     /// Default page navigation timeout (in seconds for serialization).
-    #[serde(
-        default = "default_timeout_secs",
-        with = "duration_secs"
-    )]
+    #[serde(default = "default_timeout_secs", with = "duration_secs")]
     pub default_timeout: Duration,
 
     /// Whether to obey robots.txt.

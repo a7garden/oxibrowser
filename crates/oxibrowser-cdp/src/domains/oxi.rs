@@ -24,10 +24,7 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
 
 async fn get_markdown(ctx: &DispatchContext) -> DomainResult {
     let guard = ctx.session.read().await;
-    let markdown = guard
-        .page()
-        .map(|p| p.to_markdown())
-        .unwrap_or_default();
+    let markdown = guard.page().map(|p| p.to_markdown()).unwrap_or_default();
     Ok(Some(json!({ "markdown": markdown })))
 }
 

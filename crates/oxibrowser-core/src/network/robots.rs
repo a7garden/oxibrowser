@@ -79,7 +79,7 @@ impl RobotStore {
         };
 
         // Collect the best-matching rule (longest pattern wins per RFC 9309)
-        let mut best_match_allow = (0usize, true);   // (pattern_len, is_allowed)
+        let mut best_match_allow = (0usize, true); // (pattern_len, is_allowed)
         let mut best_match_disallow = (0usize, false);
 
         // Check wildcard agent rules first

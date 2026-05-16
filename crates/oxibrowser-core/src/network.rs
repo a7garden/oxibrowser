@@ -10,8 +10,8 @@ pub mod robots;
 pub use client::HttpClient;
 pub use cookie::CookieJar;
 pub use intercept::{
-    InterceptAction, InterceptedBody, InterceptedResponse, PausedRequest,
-    PausedRequestRegistry, SharedRegistry,
+    InterceptAction, InterceptedBody, InterceptedResponse, PausedRequest, PausedRequestRegistry,
+    SharedRegistry,
 };
 pub use ip_filter::IpFilter;
 pub use robots::RobotStore;

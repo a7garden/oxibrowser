@@ -183,7 +183,10 @@ impl Browser {
         )
         .await?;
 
-        tracing::info!(session_count = self.sessions.read().len(), "new tab created");
+        tracing::info!(
+            session_count = self.sessions.read().len(),
+            "new tab created"
+        );
         Ok(Tab::new_with_cleanup(session, self.tab_count.clone()))
     }
 
@@ -277,7 +280,11 @@ impl Browser {
         });
         let removed = before - sessions.len();
         if removed > 0 {
-            info!(removed, session_count = sessions.len(), "cleaned up closed sessions");
+            info!(
+                removed,
+                session_count = sessions.len(),
+                "cleaned up closed sessions"
+            );
         }
     }
 
@@ -341,8 +348,10 @@ mod tests {
         assert!(s3.is_err(), "exceeding max_sessions should return error");
         match s3 {
             Err(CoreError::SessionError(msg)) => {
-                assert!(msg.contains("maximum number of sessions"),
-                    "error should mention max sessions, got: {msg}");
+                assert!(
+                    msg.contains("maximum number of sessions"),
+                    "error should mention max sessions, got: {msg}"
+                );
             }
             Err(e) => panic!("wrong error type: {e:?}"),
             Ok(_) => panic!("should have failed"),
@@ -441,6 +450,9 @@ mod tests {
         let _t1 = browser.new_tab().await.unwrap();
         let t2 = browser.new_tab().await;
 
-        assert!(t2.is_err(), "exceeding max_sessions via new_tab should fail");
+        assert!(
+            t2.is_err(),
+            "exceeding max_sessions via new_tab should fail"
+        );
     }
 }

@@ -33,7 +33,15 @@ impl OxiBrowserProcess {
     /// Spawn `cargo run -p oxibrowser -- serve --port <port>`.
     fn start(port: u16) -> Self {
         let child = Command::new("cargo")
-            .args(["run", "-p", "oxibrowser", "--", "serve", "--port", &port.to_string()])
+            .args([
+                "run",
+                "-p",
+                "oxibrowser",
+                "--",
+                "serve",
+                "--port",
+                &port.to_string(),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -44,9 +52,7 @@ impl OxiBrowserProcess {
 
     /// Wait for the CDP HTTP endpoint to respond, returning the socket address.
     async fn wait_ready(&self) -> SocketAddr {
-        let addr: SocketAddr = format!("127.0.0.1:{}", self.port)
-            .parse()
-            .unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", self.port).parse().unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
         loop {
@@ -115,7 +121,10 @@ impl TestHttpServer {
             }
         });
 
-        Self { addr, shutdown: Some(shutdown_tx) }
+        Self {
+            addr,
+            shutdown: Some(shutdown_tx),
+        }
     }
 
     fn addr(&self) -> SocketAddr {
@@ -206,10 +215,15 @@ async fn send_command(
 
 /// Simulates: `const browser = await puppeteer.connect({ browserWSEndpoint })`
 #[tokio::test]
+#[ignore] // Requires `cargo run` build; run with `cargo test -p oxibrowser --test smoke -- --ignored`
 async fn test_puppeteer_connect_and_get_version() {
     let port = {
         use std::net::TcpListener;
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     };
     let _oxi = OxiBrowserProcess::start(port);
     let addr = _oxi.wait_ready().await;
@@ -230,10 +244,15 @@ async fn test_puppeteer_connect_and_get_version() {
 
 /// Simulates: `const page = await browser.newPage()` → Target.createTarget
 #[tokio::test]
+#[ignore] // Requires `cargo run` build; run with `cargo test -p oxibrowser --test smoke -- --ignored`
 async fn test_puppeteer_new_page_equivalent() {
     let port = {
         use std::net::TcpListener;
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     };
     let _oxi = OxiBrowserProcess::start(port);
     let addr = _oxi.wait_ready().await;
@@ -278,6 +297,7 @@ async fn test_puppeteer_new_page_equivalent() {
 /// await browser.close();
 /// ```
 #[tokio::test]
+#[ignore] // Requires `cargo run` build; run with `cargo test -p oxibrowser --test smoke -- --ignored`
 async fn test_puppeteer_full_workflow() {
     let html = r#"<!DOCTYPE html>
 <html lang="en">
@@ -294,7 +314,11 @@ async fn test_puppeteer_full_workflow() {
 
     let port = {
         use std::net::TcpListener;
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     };
     let _oxi = OxiBrowserProcess::start(port);
     let addr = _oxi.wait_ready().await;

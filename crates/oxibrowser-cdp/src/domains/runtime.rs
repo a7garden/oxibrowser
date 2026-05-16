@@ -79,7 +79,10 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
 
     let mut guard = ctx.session.write().await;
 
-    match guard.evaluate_js_with_await(expression, await_promise).await {
+    match guard
+        .evaluate_js_with_await(expression, await_promise)
+        .await
+    {
         Ok(result) => {
             // Handle exceptions
             if let Some(exception) = &result.exception {
@@ -201,7 +204,11 @@ async fn call_function_on(params: Option<Value>, ctx: &DispatchContext) -> Domai
         format!(
             "(function() {{ var __fn = {func}; return __fn(undefined{args}); }})()",
             func = function_declaration,
-            args = if args_str.is_empty() { String::new() } else { format!(", {}", args_str) }
+            args = if args_str.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", args_str)
+            }
         )
     };
 
@@ -309,10 +316,7 @@ fn build_args_expression(arguments: &[Value], _this_object_id: &str) -> String {
                 } else {
                     "undefined".to_string()
                 }
-            } else if let Some(unsv) = arg
-                .get("unserializableValue")
-                .and_then(|v| v.as_str())
-            {
+            } else if let Some(unsv) = arg.get("unserializableValue").and_then(|v| v.as_str()) {
                 unsv.to_string()
             } else {
                 "undefined".to_string()

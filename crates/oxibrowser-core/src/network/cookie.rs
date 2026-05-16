@@ -272,15 +272,11 @@ impl CookieJar {
         }
 
         // Replace existing cookie with same name and path, or append
-        if let Some(existing) = self
-            .cookies
-            .get_mut(&storage_domain)
-            .and_then(|entries| {
-                entries
-                    .iter_mut()
-                    .find(|c| c.name == entry.name && c.path == entry.path)
-            })
-        {
+        if let Some(existing) = self.cookies.get_mut(&storage_domain).and_then(|entries| {
+            entries
+                .iter_mut()
+                .find(|c| c.name == entry.name && c.path == entry.path)
+        }) {
             *existing = entry;
             return;
         }
@@ -686,7 +682,10 @@ mod tests {
 
         let mut jar = CookieJar::new();
         let url = Url::parse("https://example.com/").unwrap();
-        jar.store(&url, "id=42; Path=/; Domain=.example.com; Secure; HttpOnly; SameSite=Lax");
+        jar.store(
+            &url,
+            "id=42; Path=/; Domain=.example.com; Secure; HttpOnly; SameSite=Lax",
+        );
 
         jar.save_to_file(&path).unwrap();
         let loaded = CookieJar::load_from_file(&path).unwrap();
@@ -744,10 +743,7 @@ mod tests {
 
         let bank_url = Url::parse("https://bank.com/").unwrap();
         let cookies = jar.cookies_for_url(&bank_url);
-        assert!(
-            cookies.is_empty(),
-            "cross-domain cookie should be rejected"
-        );
+        assert!(cookies.is_empty(), "cross-domain cookie should be rejected");
     }
 
     #[test]
@@ -831,11 +827,7 @@ mod tests {
 
         let _cookies = jar.cookies_for_url(&url);
         // Value should be truncated to 4096
-        if let Some(entry) = jar
-            .cookies
-            .get("example.com")
-            .and_then(|v| v.first())
-        {
+        if let Some(entry) = jar.cookies.get("example.com").and_then(|v| v.first()) {
             assert!(
                 entry.value.len() <= MAX_COOKIE_VALUE_SIZE,
                 "cookie value should be truncated to max size"

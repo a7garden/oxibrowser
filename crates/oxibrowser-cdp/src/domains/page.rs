@@ -199,7 +199,8 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     // 1. Capture current URL before emitting events (read lock)
     let current_url = {
         let guard = ctx.session.read().await;
-        guard.current_url()
+        guard
+            .current_url()
             .map(|u| u.to_string())
             .unwrap_or_else(|| "about:blank".to_string())
     };
@@ -368,7 +369,9 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
     let png_bytes: Vec<u8> = match guard.page() {
         Some(page) => page
             .to_screenshot_png(viewport_width.max(64))
-            .unwrap_or_else(|_| oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default()),
+            .unwrap_or_else(|_| {
+                oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default()
+            }),
         None => oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default(),
     };
 

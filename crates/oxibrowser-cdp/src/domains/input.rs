@@ -139,7 +139,10 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
         message: "dispatchMouseEvent requires parameters".to_string(),
     })?;
 
-    let event_type = p.get("type").and_then(|v| v.as_str()).unwrap_or("mouseMoved");
+    let event_type = p
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mouseMoved");
     let x = p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let button = p.get("button").and_then(|v| v.as_str()).unwrap_or("none");
@@ -210,19 +213,40 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
 /// CDP modifiers: 0=none, 1=click, 2=alt, 4=ctrl, 8=shift, 16=meta
 fn calculate_modifiers(params: &serde_json::Value) -> u32 {
     let mut m = 0u32;
-    if params.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+    if params
+        .get("modifiers")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        > 0
+    {
         m |= 1;
     }
-    if params.get("shiftKey").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if params
+        .get("shiftKey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         m |= 8;
     }
-    if params.get("ctrlKey").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if params
+        .get("ctrlKey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         m |= 4;
     }
-    if params.get("altKey").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if params
+        .get("altKey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         m |= 2;
     }
-    if params.get("metaKey").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if params
+        .get("metaKey")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         m |= 16;
     }
     m

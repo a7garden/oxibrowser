@@ -40,10 +40,7 @@ pub fn text_to_png(text: &str, viewport_width: u32) -> Result<Vec<u8>, String> {
     let margin = 4u32;
     let inner_w = viewport_width.saturating_sub(margin * 2).max(64);
     let chars_per_line = inner_w / CHAR_W;
-    let img_h = std::cmp::min(
-        lines.len() as u32 * CHAR_H + margin * 2,
-        MAX_IMAGE_HEIGHT,
-    );
+    let img_h = std::cmp::min(lines.len() as u32 * CHAR_H + margin * 2, MAX_IMAGE_HEIGHT);
     let img_w = inner_w + margin * 2;
 
     // White background

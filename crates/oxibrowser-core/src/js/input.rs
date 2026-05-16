@@ -199,7 +199,10 @@ mod tests {
         // Multi-byte UTF-8 character: é is 2 bytes but 1 character
         let js = js_insert_text("é");
         // Should use character count (1), not byte length (2)
-        assert!(js.contains("start + 1"), "Should use char count not byte length");
+        assert!(
+            js.contains("start + 1"),
+            "Should use char count not byte length"
+        );
         assert!(!js.contains("start + 2"), "Should NOT use byte length");
     }
 }

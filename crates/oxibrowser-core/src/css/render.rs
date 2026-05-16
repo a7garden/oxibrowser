@@ -39,8 +39,18 @@ fn render_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String, dept
             let tag = node.tag.to_uppercase();
             let invisible = matches!(
                 tag.as_str(),
-                "SCRIPT" | "STYLE" | "LINK" | "META" | "HEAD" | "HTML"
-                    | "TITLE" | "NOSCRIPT" | "BASE" | "SVG" | "DEFS" | "PATH"
+                "SCRIPT"
+                    | "STYLE"
+                    | "LINK"
+                    | "META"
+                    | "HEAD"
+                    | "HTML"
+                    | "TITLE"
+                    | "NOSCRIPT"
+                    | "BASE"
+                    | "SVG"
+                    | "DEFS"
+                    | "PATH"
             );
             if invisible {
                 return;
@@ -48,8 +58,16 @@ fn render_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String, dept
 
             let is_self_closing = matches!(
                 tag.as_str(),
-                "BR" | "HR" | "IMG" | "INPUT" | "AREA" | "COL" | "EMBED"
-                    | "PARAM" | "SOURCE" | "TRACK" | "WBR"
+                "BR" | "HR"
+                    | "IMG"
+                    | "INPUT"
+                    | "AREA"
+                    | "COL"
+                    | "EMBED"
+                    | "PARAM"
+                    | "SOURCE"
+                    | "TRACK"
+                    | "WBR"
             );
 
             if is_self_closing {
@@ -75,11 +93,34 @@ fn render_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String, dept
             let indent = "  ".repeat(depth);
             let is_block = matches!(
                 tag.as_str(),
-                "DIV" | "P" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6"
-                    | "UL" | "OL" | "LI" | "TABLE" | "TR" | "TD" | "TH"
-                    | "FORM" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER"
-                    | "NAV" | "MAIN" | "ADDRESS" | "BLOCKQUOTE" | "PRE"
-                    | "FIGURE" | "FIGCAPTION" | "ASIDE"
+                "DIV"
+                    | "P"
+                    | "H1"
+                    | "H2"
+                    | "H3"
+                    | "H4"
+                    | "H5"
+                    | "H6"
+                    | "UL"
+                    | "OL"
+                    | "LI"
+                    | "TABLE"
+                    | "TR"
+                    | "TD"
+                    | "TH"
+                    | "FORM"
+                    | "SECTION"
+                    | "ARTICLE"
+                    | "HEADER"
+                    | "FOOTER"
+                    | "NAV"
+                    | "MAIN"
+                    | "ADDRESS"
+                    | "BLOCKQUOTE"
+                    | "PRE"
+                    | "FIGURE"
+                    | "FIGCAPTION"
+                    | "ASIDE"
             );
 
             if is_block && depth > 0 {
@@ -152,8 +193,18 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
             let tag = node.tag.to_uppercase();
             let skip = matches!(
                 tag.as_str(),
-                "SCRIPT" | "STYLE" | "LINK" | "META" | "HEAD" | "HTML"
-                    | "NOSCRIPT" | "SVG" | "DEFS" | "PATH" | "BASE" | "TITLE"
+                "SCRIPT"
+                    | "STYLE"
+                    | "LINK"
+                    | "META"
+                    | "HEAD"
+                    | "HTML"
+                    | "NOSCRIPT"
+                    | "SVG"
+                    | "DEFS"
+                    | "PATH"
+                    | "BASE"
+                    | "TITLE"
             );
 
             if skip {
@@ -171,16 +222,8 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
                     return;
                 }
                 "IMG" => {
-                    let alt = node
-                        .attributes
-                        .get("alt")
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let src = node
-                        .attributes
-                        .get("src")
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
+                    let alt = node.attributes.get("alt").map(|s| s.as_str()).unwrap_or("");
+                    let src = node.attributes.get("src").map(|s| s.as_str()).unwrap_or("");
                     output.push_str(&format!("![{alt}]({src})"));
                     return;
                 }
@@ -329,8 +372,17 @@ fn render_markdown_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut Str
                     // Add trailing newlines for block-level elements
                     if matches!(
                         tag.as_str(),
-                        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER"
-                            | "NAV" | "MAIN" | "TR" | "FIGURE" | "ASIDE" | "ADDRESS"
+                        "DIV"
+                            | "SECTION"
+                            | "ARTICLE"
+                            | "HEADER"
+                            | "FOOTER"
+                            | "NAV"
+                            | "MAIN"
+                            | "TR"
+                            | "FIGURE"
+                            | "ASIDE"
+                            | "ADDRESS"
                     ) {
                         output.push('\n');
                     }

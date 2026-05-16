@@ -49,10 +49,7 @@ impl Tab {
     }
 
     /// Create a Tab with a browser tab counter to decrement on close.
-    pub(crate) fn new_with_cleanup(
-        session: Session,
-        tab_count: Arc<AtomicUsize>,
-    ) -> Self {
+    pub(crate) fn new_with_cleanup(session: Session, tab_count: Arc<AtomicUsize>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(session)),
             tab_count: Some(tab_count),
@@ -178,8 +175,7 @@ impl Tab {
             js::input::js_dispatch_key_event(key, &code, "keyDown", 0, timestamp_millis());
         session.evaluate_js(&down_js).await?;
 
-        let up_js =
-            js::input::js_dispatch_key_event(key, &code, "keyUp", 0, timestamp_millis());
+        let up_js = js::input::js_dispatch_key_event(key, &code, "keyUp", 0, timestamp_millis());
         session.evaluate_js(&up_js).await?;
         Ok(())
     }
@@ -417,14 +413,9 @@ mod tests {
         let config = BrowserConfig::headless();
         let cookie_jar = Arc::new(RwLock::new(CookieJar::new()));
         let http_client = Arc::new(HttpClient::new(&config, cookie_jar.clone()).unwrap());
-        let mut session = Session::new(
-            BrowserId::next(),
-            config,
-            http_client,
-            cookie_jar,
-        )
-        .await
-        .unwrap();
+        let mut session = Session::new(BrowserId::next(), config, http_client, cookie_jar)
+            .await
+            .unwrap();
 
         // Load HTML directly via navigate-style logic
         let url = url::Url::parse("https://test.local/page").unwrap();
@@ -474,11 +465,24 @@ mod tests {
         let tab = tab_with_html(html).await;
 
         let items = tab.query_all(".item").await.unwrap();
-        assert_eq!(items.len(), 3, "should find 3 .item elements, got: {items:?}");
+        assert_eq!(
+            items.len(),
+            3,
+            "should find 3 .item elements, got: {items:?}"
+        );
         // textContent includes all child text
-        assert!(items.iter().any(|t| t.contains("First")), "should contain First: {items:?}");
-        assert!(items.iter().any(|t| t.contains("Second")), "should contain Second: {items:?}");
-        assert!(items.iter().any(|t| t.contains("Third")), "should contain Third: {items:?}");
+        assert!(
+            items.iter().any(|t| t.contains("First")),
+            "should contain First: {items:?}"
+        );
+        assert!(
+            items.iter().any(|t| t.contains("Second")),
+            "should contain Second: {items:?}"
+        );
+        assert!(
+            items.iter().any(|t| t.contains("Third")),
+            "should contain Third: {items:?}"
+        );
     }
 
     #[tokio::test]
@@ -509,8 +513,7 @@ mod tests {
             .await
             .unwrap();
         // Result is a JSON string
-        let parsed: serde_json::Value =
-            serde_json::from_str(result.as_str().unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
         assert_eq!(parsed["key"], "value");
         assert_eq!(parsed["num"], 42);
     }

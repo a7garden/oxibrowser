@@ -4,17 +4,17 @@
 //! session storage, and the cookie jar.
 
 use crate::browser::BrowserId;
-use std::collections::HashMap;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
 use crate::js::runtime::JsRuntimeConfig;
+use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::js::JsRuntime;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
-use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::page::Page;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::info;
@@ -129,7 +129,11 @@ fn handle_fetch_requests(
                     match resp {
                         Ok(response) => {
                             let status = response.status().as_u16();
-                            let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+                            let status_text = response
+                                .status()
+                                .canonical_reason()
+                                .unwrap_or("")
+                                .to_string();
                             let resp_url = response.url().to_string();
                             let headers: Vec<(String, String)> = response
                                 .headers()
@@ -241,7 +245,8 @@ impl Session {
         }));
 
         // Spawn localStorage sync handler thread
-        let local_storage_arc = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+        let local_storage_arc =
+            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
         let ls_arc_clone = local_storage_arc.clone();
         let local_storage_task = Some(std::thread::spawn(move || {
             handle_local_storage_sync(ls_rx, ls_arc_clone);
@@ -368,7 +373,8 @@ impl Session {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| CoreError::NavigationFailed("no retry attempts were made".into())))
+        Err(last_error
+            .unwrap_or_else(|| CoreError::NavigationFailed("no retry attempts were made".into())))
     }
     pub async fn go_back(&mut self) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
@@ -611,41 +617,52 @@ impl Session {
                 // DOM structure mutations — apply to webapi DOM
                 DomMutation::CreateElement { node_id, tag } => {
                     if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().document_mut()
-                            .create_element_node(
-                                oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                                tag,
-                            );
+                        page.root_frame_mut().document_mut().create_element_node(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            tag,
+                        );
                     }
                 }
                 DomMutation::CreateTextNode { node_id, text } => {
                     if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().document_mut()
-                            .create_text_node(
-                                oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                                text,
-                            );
+                        page.root_frame_mut().document_mut().create_text_node(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            text,
+                        );
                     }
                 }
-                DomMutation::AppendChild { parent_id, child_id } => {
+                DomMutation::AppendChild {
+                    parent_id,
+                    child_id,
+                } => {
                     if let Some(page) = &mut self.active_page {
                         let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
                         let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
-                        page.root_frame_mut().document_mut()
-                            .tree_mut().append_child(pid, cid);
+                        page.root_frame_mut()
+                            .document_mut()
+                            .tree_mut()
+                            .append_child(pid, cid);
                     }
                 }
-                DomMutation::RemoveChild { parent_id, child_id } => {
+                DomMutation::RemoveChild {
+                    parent_id,
+                    child_id,
+                } => {
                     if let Some(page) = &mut self.active_page {
                         let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
                         let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
-                        if let Some(children) = page.root_frame_mut().document_mut()
-                            .tree_mut().children_mut(pid)
+                        if let Some(children) = page
+                            .root_frame_mut()
+                            .document_mut()
+                            .tree_mut()
+                            .children_mut(pid)
                         {
                             children.retain(|&c| c != cid);
                         }
-                        page.root_frame_mut().document_mut()
-                            .tree_mut().remove_parent(cid);
+                        page.root_frame_mut()
+                            .document_mut()
+                            .tree_mut()
+                            .remove_parent(cid);
                     }
                 }
                 DomMutation::SetInnerHtml { node_id, html } => {
@@ -747,7 +764,11 @@ impl Session {
         let mut guard = self.response_bodies.write();
         guard.insert(
             request_id.to_string(),
-            CapturedResponse { body, base64: false, content_type: content_type.to_string() },
+            CapturedResponse {
+                body,
+                base64: false,
+                content_type: content_type.to_string(),
+            },
         );
     }
 

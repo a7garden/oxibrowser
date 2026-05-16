@@ -210,7 +210,8 @@ async fn get_response_body(params: Option<Value>, ctx: &DispatchContext) -> Doma
         message: "getResponseBody requires parameters".to_string(),
     })?;
 
-    let request_id = params.get("requestId")
+    let request_id = params
+        .get("requestId")
         .and_then(|v| v.as_str())
         .ok_or_else(|| CdpError {
             code: -32602,

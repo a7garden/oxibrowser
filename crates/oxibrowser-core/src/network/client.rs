@@ -60,10 +60,7 @@ impl HttpClient {
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                 let url = attempt.url();
                 if !check_url_ssrf(url, &redirect_filter) {
-                    tracing::warn!(
-                        "SSRF blocked: redirect to {} rejected (blocked IP)",
-                        url
-                    );
+                    tracing::warn!("SSRF blocked: redirect to {} rejected (blocked IP)", url);
                     return attempt.stop();
                 }
                 attempt.follow()
@@ -145,8 +142,16 @@ impl HttpClient {
         use reqwest::header::{HeaderName, HeaderValue};
 
         match action {
-            InterceptAction::Continue { url: url_mod, method: method_mod, headers: headers_mod, post_data: post_data_mod } => {
-                let effective_url = url_mod.as_ref().and_then(|u| Url::parse(u).ok()).unwrap_or_else(|| url.clone());
+            InterceptAction::Continue {
+                url: url_mod,
+                method: method_mod,
+                headers: headers_mod,
+                post_data: post_data_mod,
+            } => {
+                let effective_url = url_mod
+                    .as_ref()
+                    .and_then(|u| Url::parse(u).ok())
+                    .unwrap_or_else(|| url.clone());
                 let effective_method = method_mod.as_deref().unwrap_or("GET");
                 let effective_post = post_data_mod.as_deref();
 
@@ -156,7 +161,9 @@ impl HttpClient {
 
                 let mut req_builder = if effective_method == "POST" {
                     let body = effective_post.unwrap_or_default();
-                    self.client.post(effective_url.as_str()).body(body.to_string())
+                    self.client
+                        .post(effective_url.as_str())
+                        .body(body.to_string())
                 } else {
                     self.client.get(effective_url.as_str())
                 };
@@ -182,10 +189,13 @@ impl HttpClient {
                 self.store_response_cookies(&effective_url, &response);
                 Ok(response)
             }
-            InterceptAction::Fail { error_reason } => {
-                Err(CoreError::NetworkError(error_reason))
-            }
-            InterceptAction::Fulfill { status_code, status_text, headers: resp_headers, body } => {
+            InterceptAction::Fail { error_reason } => Err(CoreError::NetworkError(error_reason)),
+            InterceptAction::Fulfill {
+                status_code,
+                status_text,
+                headers: resp_headers,
+                body,
+            } => {
                 let resp = InterceptedResponse {
                     status_code,
                     status_text,
@@ -332,16 +342,13 @@ mod tests {
         let jar = Arc::new(RwLock::new(CookieJar::new()));
         let client = HttpClient::new(&config, jar.clone()).unwrap();
 
-        let url =
-            Url::parse("https://httpbin.org/cookies/set?test_cookie=test_value").unwrap();
+        let url = Url::parse("https://httpbin.org/cookies/set?test_cookie=test_value").unwrap();
         let _ = client.fetch(&url).await;
 
-        let cookies =
-            jar.read().cookies_for_url(&Url::parse("https://httpbin.org/").unwrap());
-        assert!(
-            !cookies.is_empty(),
-            "cookies should be stored after fetch"
-        );
+        let cookies = jar
+            .read()
+            .cookies_for_url(&Url::parse("https://httpbin.org/").unwrap());
+        assert!(!cookies.is_empty(), "cookies should be stored after fetch");
     }
 
     #[test]

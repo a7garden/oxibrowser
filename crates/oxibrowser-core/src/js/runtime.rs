@@ -28,21 +28,21 @@
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
-use base64::Engine;
 
 use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
-use crate::network::cookie::CookieJar;
 use crate::js::job_queue::TokioJobQueue;
+use crate::network::cookie::CookieJar;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -145,9 +145,13 @@ enum JsCommand {
     /// Update the page URL (for window.location).
     SetPageUrl { url: String },
     /// Set the fetch channel so JS can make real HTTP requests.
-    SetFetchChannel { tx: std::sync::mpsc::Sender<FetchRequestMsg> },
+    SetFetchChannel {
+        tx: std::sync::mpsc::Sender<FetchRequestMsg>,
+    },
     /// Set the localStorage sync channel so JS operations propagate to Session.
-    SetLocalStorageChannel { tx: std::sync::mpsc::Sender<LocalStorageMsg> },
+    SetLocalStorageChannel {
+        tx: std::sync::mpsc::Sender<LocalStorageMsg>,
+    },
     /// Set the CookieJar so document.cookie can read/write real cookies.
     SetCookieJar { jar: Arc<RwLock<CookieJar>> },
     /// Shut down the JS thread.
@@ -777,11 +781,22 @@ fn js_thread_loop(
                 // otherwise the existing JS-side storage object persists across navigations
                 // (same-origin policy would be checked in a full implementation).
                 // Previously this always re-registered with an empty HashMap, wiping storage.
-                let existing_ls = ctx.global_object().get(js_string!("localStorage"), &mut ctx).ok();
-                if existing_ls.as_ref().is_none_or(|v| v.is_undefined() || v.is_null()) {
+                let existing_ls = ctx
+                    .global_object()
+                    .get(js_string!("localStorage"), &mut ctx)
+                    .ok();
+                if existing_ls
+                    .as_ref()
+                    .is_none_or(|v| v.is_undefined() || v.is_null())
+                {
                     // First time — register fresh
                     let empty = std::collections::HashMap::new();
-                    register_local_storage(&mut ctx, empty, &dom_snapshot_ref, local_storage_tx_arc.clone());
+                    register_local_storage(
+                        &mut ctx,
+                        empty,
+                        &dom_snapshot_ref,
+                        local_storage_tx_arc.clone(),
+                    );
                 }
                 // else: localStorage already exists, preserve it across navigation
                 let _ = resp_tx.send(JsResponse::Done);
@@ -945,11 +960,7 @@ fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
 }
 
 /// Push a mutation record to all active MutationObservers.
-fn notify_mutation_observers(
-    ctx: &mut Context,
-    mutation_type: &str,
-    target_id: u32,
-) {
+fn notify_mutation_observers(ctx: &mut Context, mutation_type: &str, target_id: u32) {
     let registry = ctx.global_object().get(js_string!("__moRegistry"), ctx);
     if let Ok(reg_val) = registry {
         if let Some(reg_obj) = reg_val.as_object() {
@@ -1076,22 +1087,13 @@ fn create_context(
                 return Ok(JsValue::undefined());
             }
             let callback = args[0].clone();
-            let delay_ms = args
-                .get(1)
-                .and_then(|v| v.as_number())
-                .unwrap_or(0.0) as u64;
+            let delay_ms = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u64;
             let cb_args: Vec<JsValue> = args[2..].to_vec();
 
             if let Some(func) = callback.as_object().cloned() {
                 if func.is_callable() {
                     let deadline = Instant::now() + Duration::from_millis(delay_ms);
-                    let id = timer_queue_st.schedule_timer(
-                        deadline,
-                        func,
-                        cb_args,
-                        false,
-                        None,
-                    );
+                    let id = timer_queue_st.schedule_timer(deadline, func, cb_args, false, None);
                     return Ok(JsValue::from(id as f64));
                 }
             }
@@ -1106,10 +1108,7 @@ fn create_context(
                 return Ok(JsValue::undefined());
             }
             let callback = args[0].clone();
-            let delay_ms = args
-                .get(1)
-                .and_then(|v| v.as_number())
-                .unwrap_or(0.0) as u64;
+            let delay_ms = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u64;
             let cb_args: Vec<JsValue> = args[2..].to_vec();
 
             if let Some(func) = callback.as_object().cloned() {
@@ -1130,15 +1129,14 @@ fn create_context(
     };
 
     let timer_queue_ct = job_queue.clone();
-    let clear_timer_fn =
-        unsafe {
-            NativeFunction::from_closure(move |_this, args, _ctx| {
-                if let Some(id) = args.first().and_then(|v| v.as_number()) {
-                    timer_queue_ct.cancel_timer(id as u64);
-                }
-                Ok(JsValue::undefined())
-            })
-        };
+    let clear_timer_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(id) = args.first().and_then(|v| v.as_number()) {
+                timer_queue_ct.cancel_timer(id as u64);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
 
     let _ = context.register_global_callable(js_string!("setTimeout"), 2, set_timeout_fn);
     let _ = context.register_global_callable(js_string!("setInterval"), 2, set_interval_fn);
@@ -1230,11 +1228,9 @@ fn create_context(
 
             if let Err(e) = tx.send(request) {
                 // Channel error — return rejected Promise
-                let err_json = serde_json::to_string(&e.to_string()).unwrap_or_else(|_| "\"fetch channel error\"".to_string());
-                let reject_code = format!(
-                    "Promise.reject(new Error({}))",
-                    err_json
-                );
+                let err_json = serde_json::to_string(&e.to_string())
+                    .unwrap_or_else(|_| "\"fetch channel error\"".to_string());
+                let reject_code = format!("Promise.reject(new Error({}))", err_json);
                 let result = ctx.eval(Source::from_bytes(reject_code.trim()));
                 return result;
             }
@@ -1280,18 +1276,47 @@ fn create_context(
                             let _ = headers_obj.set(
                                 JsString::from(k.as_str()),
                                 JsValue::from(JsString::from(v.as_str())),
-                                true, ctx
+                                true,
+                                ctx,
                             );
                         }
 
                         let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                            .property(js_string!("status"), JsValue::from(resp.status), Attribute::all())
-                            .property(js_string!("statusText"), JsValue::from(JsString::from(resp.status_text.as_str())), Attribute::all())
-                            .property(js_string!("ok"), JsValue::from(resp.status < 400), Attribute::all())
-                            .property(js_string!("url"), JsValue::from(JsString::from(resp.url.as_str())), Attribute::all())
-                            .property(js_string!("bodyUsed"), JsValue::from(false), Attribute::all())
-                            .property(js_string!("type"), JsValue::from(JsString::from("basic")), Attribute::all())
-                            .property(js_string!("headers"), JsValue::from(headers_obj), Attribute::all())
+                            .property(
+                                js_string!("status"),
+                                JsValue::from(resp.status),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("statusText"),
+                                JsValue::from(JsString::from(resp.status_text.as_str())),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("ok"),
+                                JsValue::from(resp.status < 400),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("url"),
+                                JsValue::from(JsString::from(resp.url.as_str())),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("bodyUsed"),
+                                JsValue::from(false),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("type"),
+                                JsValue::from(JsString::from("basic")),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("headers"),
+                                JsValue::from(headers_obj),
+                                Attribute::all(),
+                            )
                             .function(text_fn, js_string!("text"), 0)
                             .function(json_fn, js_string!("json"), 0)
                             .build();
@@ -1312,14 +1337,11 @@ fn create_context(
                 }
             }
 
-
             // Return rejected Promise on error
             let err_msg = resp_error.unwrap_or_else(|| "fetch failed".to_string());
-            let err_json = serde_json::to_string(&err_msg).unwrap_or_else(|_| "\"fetch failed\"".to_string());
-            let reject_code = format!(
-                "Promise.reject(new Error({}))",
-                err_json
-            );
+            let err_json =
+                serde_json::to_string(&err_msg).unwrap_or_else(|_| "\"fetch failed\"".to_string());
+            let reject_code = format!("Promise.reject(new Error({}))", err_json);
             let result = ctx.eval(Source::from_bytes(reject_code.trim()));
             result
         })
@@ -1355,7 +1377,8 @@ fn create_context(
                 })
             };
             let onload_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onload_setter)
-                .name(js_string!("set onload")).build();
+                .name(js_string!("set onload"))
+                .build();
 
             // onerror setter
             let onerror_set = onerror_cb.clone();
@@ -1368,7 +1391,8 @@ fn create_context(
                 })
             };
             let onerror_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onerror_setter)
-                .name(js_string!("set onerror")).build();
+                .name(js_string!("set onerror"))
+                .build();
 
             // onreadystatechange setter
             let onrsc_set = onreadystatechange_cb.clone();
@@ -1381,7 +1405,8 @@ fn create_context(
                 })
             };
             let onrsc_setter_fn = FunctionObjectBuilder::new(ctx.realm(), onrsc_setter)
-                .name(js_string!("set onreadystatechange")).build();
+                .name(js_string!("set onreadystatechange"))
+                .build();
 
             // .open(method, url, async)
             let om = open_method.clone();
@@ -1390,17 +1415,17 @@ fn create_context(
             let rs = ready_state.clone();
             let open_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
-                    let method = args.first()
+                    let method = args
+                        .first()
                         .and_then(|v| v.to_string(ctx).ok())
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_default();
-                    let url = args.get(1)
+                    let url = args
+                        .get(1)
                         .and_then(|v| v.to_string(ctx).ok())
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_default();
-                    let async_flag = args.get(2)
-                        .and_then(|v| v.as_boolean())
-                        .unwrap_or(true);
+                    let async_flag = args.get(2).and_then(|v| v.as_boolean()).unwrap_or(true);
                     *om.write() = method;
                     *ou.write() = url;
                     *oa.write() = async_flag;
@@ -1423,7 +1448,8 @@ fn create_context(
             let send_tx = xhr_fetch_tx.clone();
             let send_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
-                    let body = args.first()
+                    let body = args
+                        .first()
                         .and_then(|v| v.as_string())
                         .map(|s| s.to_std_string_escaped());
                     let method = send_method.read().clone();
@@ -1434,7 +1460,8 @@ fn create_context(
 
                     let tx_guard = send_tx.read();
                     if let Some(ref tx) = *tx_guard {
-                        let (response_tx, response_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+                        let (response_tx, response_rx) =
+                            std::sync::mpsc::channel::<FetchResponseMsg>();
                         let request = FetchRequestMsg {
                             url: url.clone(),
                             method: method.clone(),
@@ -1461,7 +1488,11 @@ fn create_context(
                                         if let Some(ref cb) = *send_onload.read() {
                                             if let Some(cb_obj) = cb.as_object() {
                                                 if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                                    let _ = cb_obj.call(
+                                                        &JsValue::undefined(),
+                                                        &[],
+                                                        ctx,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1469,7 +1500,11 @@ fn create_context(
                                         if let Some(ref cb) = *send_onerror.read() {
                                             if let Some(cb_obj) = cb.as_object() {
                                                 if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                                    let _ = cb_obj.call(
+                                                        &JsValue::undefined(),
+                                                        &[],
+                                                        ctx,
+                                                    );
                                                 }
                                             }
                                         }
@@ -1478,7 +1513,8 @@ fn create_context(
                                     if let Some(ref cb) = *send_onrsc.read() {
                                         if let Some(cb_obj) = cb.as_object() {
                                             if cb_obj.is_callable() {
-                                                let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+                                                let _ =
+                                                    cb_obj.call(&JsValue::undefined(), &[], ctx);
                                             }
                                         }
                                     }
@@ -1497,16 +1533,15 @@ fn create_context(
 
             // .setRequestHeader(name, value) — noop for now
             let set_req_header_fn = {
-                NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    Ok(JsValue::undefined())
-                })
+                NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
             };
 
             // .getResponseHeader(name)
             let get_hdr_rs = response_headers.clone();
             let get_header_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
-                    let name = args.first()
+                    let name = args
+                        .first()
                         .and_then(|v| v.to_string(ctx).ok())
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_default();
@@ -1515,7 +1550,7 @@ fn create_context(
                         if let Some(eq) = line.find(':') {
                             let key = line[..eq].trim();
                             if key.eq_ignore_ascii_case(&name) {
-                                return Ok(JsValue::from(JsString::from(line[eq+1..].trim())));
+                                return Ok(JsValue::from(JsString::from(line[eq + 1..].trim())));
                             }
                         }
                     }
@@ -1540,7 +1575,8 @@ fn create_context(
                 })
             };
             let rs_getter_fn = FunctionObjectBuilder::new(ctx.realm(), rs_getter)
-                .name(js_string!("get readyState")).build();
+                .name(js_string!("get readyState"))
+                .build();
 
             let st_clone = status_val.clone();
             let st_getter = {
@@ -1549,7 +1585,8 @@ fn create_context(
                 })
             };
             let st_getter_fn = FunctionObjectBuilder::new(ctx.realm(), st_getter)
-                .name(js_string!("get status")).build();
+                .name(js_string!("get status"))
+                .build();
 
             let rt_clone = response_text.clone();
             let rt_getter = {
@@ -1558,7 +1595,8 @@ fn create_context(
                 })
             };
             let rt_getter_fn = FunctionObjectBuilder::new(ctx.realm(), rt_getter)
-                .name(js_string!("get responseText")).build();
+                .name(js_string!("get responseText"))
+                .build();
 
             let ol_clone = onload_cb.clone();
             let ol_getter = {
@@ -1567,7 +1605,8 @@ fn create_context(
                 })
             };
             let ol_getter_fn = FunctionObjectBuilder::new(ctx.realm(), ol_getter)
-                .name(js_string!("get onload")).build();
+                .name(js_string!("get onload"))
+                .build();
 
             let oe_clone = onerror_cb.clone();
             let oe_getter = {
@@ -1576,18 +1615,57 @@ fn create_context(
                 })
             };
             let oe_getter_fn = FunctionObjectBuilder::new(ctx.realm(), oe_getter)
-                .name(js_string!("get onerror")).build();
+                .name(js_string!("get onerror"))
+                .build();
 
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .accessor(js_string!("readyState"), Some(rs_getter_fn), None, Attribute::all())
-                .accessor(js_string!("status"), Some(st_getter_fn), None, Attribute::all())
-                .accessor(js_string!("responseText"), Some(rt_getter_fn), None, Attribute::all())
-                .accessor(js_string!("onload"), Some(ol_getter_fn), Some(onload_setter_fn), Attribute::all())
-                .accessor(js_string!("onerror"), Some(oe_getter_fn), Some(onerror_setter_fn), Attribute::all())
-                .accessor(js_string!("onreadystatechange"), None, Some(onrsc_setter_fn), Attribute::all())
-                .property(js_string!("responseType"), JsValue::from(JsString::from("")), Attribute::all())
+                .accessor(
+                    js_string!("readyState"),
+                    Some(rs_getter_fn),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("status"),
+                    Some(st_getter_fn),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("responseText"),
+                    Some(rt_getter_fn),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("onload"),
+                    Some(ol_getter_fn),
+                    Some(onload_setter_fn),
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("onerror"),
+                    Some(oe_getter_fn),
+                    Some(onerror_setter_fn),
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("onreadystatechange"),
+                    None,
+                    Some(onrsc_setter_fn),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("responseType"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
                 .property(js_string!("timeout"), JsValue::from(0), Attribute::all())
-                .property(js_string!("withCredentials"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("withCredentials"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .function(open_fn, js_string!("open"), 3)
                 .function(send_fn, js_string!("send"), 1)
                 .function(set_req_header_fn, js_string!("setRequestHeader"), 2)
@@ -1615,7 +1693,8 @@ fn create_context(
                     if let Some(obj) = _this.as_object() {
                         let _ = obj.set(js_string!("__observing"), JsValue::from(false), true, ctx);
                         let empty_arr = JsArray::new(ctx);
-                        let _ = obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
+                        let _ =
+                            obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
                     }
                     Ok(JsValue::undefined())
                 })
@@ -1630,7 +1709,9 @@ fn create_context(
                         let _ = obj.set(js_string!("__observing"), JsValue::from(true), true, ctx);
 
                         // Register in global __moRegistry
-                        let registry = ctx.global_object().get(js_string!("__moRegistry"), ctx)
+                        let registry = ctx
+                            .global_object()
+                            .get(js_string!("__moRegistry"), ctx)
                             .unwrap_or(JsValue::Null);
                         if let Some(reg_obj) = registry.as_object() {
                             if let Ok(reg_arr) = JsArray::from_object(reg_obj.clone()) {
@@ -1645,10 +1726,13 @@ fn create_context(
             let take_records_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
                     if let Some(obj) = _this.as_object() {
-                        let records = obj.get(js_string!("__records"), ctx).unwrap_or(JsValue::Null);
+                        let records = obj
+                            .get(js_string!("__records"), ctx)
+                            .unwrap_or(JsValue::Null);
                         // Clear records
                         let empty_arr = JsArray::new(ctx);
-                        let _ = obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
+                        let _ =
+                            obj.set(js_string!("__records"), JsValue::from(empty_arr), true, ctx);
                         return Ok(records);
                     }
                     let arr = JsArray::new(ctx);
@@ -1659,8 +1743,16 @@ fn create_context(
             let empty_arr = JsArray::new(ctx);
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
                 .property(js_string!("__callback"), callback, Attribute::all())
-                .property(js_string!("__observing"), JsValue::from(false), Attribute::all())
-                .property(js_string!("__records"), JsValue::from(empty_arr), Attribute::all())
+                .property(
+                    js_string!("__observing"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("__records"),
+                    JsValue::from(empty_arr),
+                    Attribute::all(),
+                )
                 .function(observe_fn, js_string!("observe"), 2)
                 .function(disconnect_fn, js_string!("disconnect"), 0)
                 .function(take_records_fn, js_string!("takeRecords"), 0)
@@ -1924,7 +2016,8 @@ fn create_context(
             let parsed = url::Url::parse(&url_str);
 
             // Storage object for URL properties
-            let url_storage = std::sync::Arc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+            let url_storage =
+                std::sync::Arc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
             // url_storage holds parsed values as strings
             {
@@ -1934,15 +2027,34 @@ fn create_context(
                         s.insert("href".to_string(), u.to_string());
                         s.insert("origin".to_string(), u.origin().ascii_serialization());
                         s.insert("protocol".to_string(), format!("{}:", u.scheme()));
-                        s.insert("host".to_string(), u.host().map(|h| h.to_string()).unwrap_or_default());
-                        s.insert("hostname".to_string(), u.host().map(|h| h.to_string()).unwrap_or_default());
+                        s.insert(
+                            "host".to_string(),
+                            u.host().map(|h| h.to_string()).unwrap_or_default(),
+                        );
+                        s.insert(
+                            "hostname".to_string(),
+                            u.host().map(|h| h.to_string()).unwrap_or_default(),
+                        );
                         s.insert("pathname".to_string(), u.path().to_string());
-                        s.insert("search".to_string(), u.query().map(|q| format!("?{}", q)).unwrap_or_default());
-                        s.insert("hash".to_string(), u.fragment().map(|f| format!("#{}", f)).unwrap_or_default());
-                        s.insert("port".to_string(), u.port().map(|p| p.to_string()).unwrap_or_default());
+                        s.insert(
+                            "search".to_string(),
+                            u.query().map(|q| format!("?{}", q)).unwrap_or_default(),
+                        );
+                        s.insert(
+                            "hash".to_string(),
+                            u.fragment().map(|f| format!("#{}", f)).unwrap_or_default(),
+                        );
+                        s.insert(
+                            "port".to_string(),
+                            u.port().map(|p| p.to_string()).unwrap_or_default(),
+                        );
                         s.insert("username".to_string(), u.username().to_string());
-                        s.insert("password".to_string(), u.password().map(|p| p.to_string()).unwrap_or_default());
-                        s.insert("searchParams".to_string(), "URLSearchParams".to_string()); // marker
+                        s.insert(
+                            "password".to_string(),
+                            u.password().map(|p| p.to_string()).unwrap_or_default(),
+                        );
+                        s.insert("searchParams".to_string(), "URLSearchParams".to_string());
+                        // marker
                     }
                     Err(_) => {
                         s.insert("href".to_string(), url_str.clone());
@@ -1973,7 +2085,11 @@ fn create_context(
             // href getter
             let href_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let href = href_storage.borrow().get("href").cloned().unwrap_or_default();
+                    let href = href_storage
+                        .borrow()
+                        .get("href")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(href.as_str())))
                 })
             };
@@ -1981,7 +2097,11 @@ fn create_context(
             // origin getter
             let origin_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let origin = us_storage.borrow().get("origin").cloned().unwrap_or_default();
+                    let origin = us_storage
+                        .borrow()
+                        .get("origin")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(origin.as_str())))
                 })
             };
@@ -1989,7 +2109,11 @@ fn create_context(
             // protocol getter
             let proto_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let proto = us_storage2.borrow().get("protocol").cloned().unwrap_or_default();
+                    let proto = us_storage2
+                        .borrow()
+                        .get("protocol")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(proto.as_str())))
                 })
             };
@@ -1997,7 +2121,11 @@ fn create_context(
             // host getter
             let host_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let host = us_storage3.borrow().get("host").cloned().unwrap_or_default();
+                    let host = us_storage3
+                        .borrow()
+                        .get("host")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(host.as_str())))
                 })
             };
@@ -2005,7 +2133,11 @@ fn create_context(
             // pathname getter
             let path_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let path = us_storage4.borrow().get("pathname").cloned().unwrap_or_default();
+                    let path = us_storage4
+                        .borrow()
+                        .get("pathname")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(path.as_str())))
                 })
             };
@@ -2013,7 +2145,11 @@ fn create_context(
             // search getter
             let search_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let search = us_storage5.borrow().get("search").cloned().unwrap_or_default();
+                    let search = us_storage5
+                        .borrow()
+                        .get("search")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(search.as_str())))
                 })
             };
@@ -2021,7 +2157,11 @@ fn create_context(
             // hash getter
             let hash_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    let hash = us_storage6.borrow().get("hash").cloned().unwrap_or_default();
+                    let hash = us_storage6
+                        .borrow()
+                        .get("hash")
+                        .cloned()
+                        .unwrap_or_default();
                     Ok(JsValue::from(JsString::from(hash.as_str())))
                 })
             };
@@ -2030,23 +2170,30 @@ fn create_context(
             let sp_storage = us_storage7.clone();
             let sp_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
-                    let search = sp_storage.borrow().get("search").cloned().unwrap_or_default();
+                    let search = sp_storage
+                        .borrow()
+                        .get("search")
+                        .cloned()
+                        .unwrap_or_default();
                     let query = search.trim_start_matches('?').to_string();
 
                     // Parse query string into key-value pairs
                     let params: Vec<(String, String)> = if query.is_empty() {
                         Vec::new()
                     } else {
-                        query.split('&').filter_map(|pair| {
-                            let mut kv = pair.splitn(2, '=');
-                            let key = kv.next().unwrap_or("").to_string();
-                            let val = kv.next().unwrap_or("").to_string();
-                            if !key.is_empty() {
-                                Some((key, val))
-                            } else {
-                                None
-                            }
-                        }).collect()
+                        query
+                            .split('&')
+                            .filter_map(|pair| {
+                                let mut kv = pair.splitn(2, '=');
+                                let key = kv.next().unwrap_or("").to_string();
+                                let val = kv.next().unwrap_or("").to_string();
+                                if !key.is_empty() {
+                                    Some((key, val))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     };
 
                     // Build a JS object that acts like URLSearchParams
@@ -2060,8 +2207,16 @@ fn create_context(
                     let params_arr = JsArray::new(ctx);
                     for (k, v) in &params {
                         let entry = boa_engine::object::ObjectInitializer::new(ctx)
-                            .property(js_string!("0"), JsValue::from(JsString::from(k.as_str())), Attribute::all())
-                            .property(js_string!("1"), JsValue::from(JsString::from(v.as_str())), Attribute::all())
+                            .property(
+                                js_string!("0"),
+                                JsValue::from(JsString::from(k.as_str())),
+                                Attribute::all(),
+                            )
+                            .property(
+                                js_string!("1"),
+                                JsValue::from(JsString::from(v.as_str())),
+                                Attribute::all(),
+                            )
                             .build();
                         let _ = params_arr.push(JsValue::from(entry), ctx);
                     }
@@ -2070,7 +2225,11 @@ fn create_context(
                     let get_params = params.clone();
                     let sp_get = {
                         NativeFunction::from_closure(move |_this, args, _ctx| {
-                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                            let key = args
+                                .first()
+                                .and_then(|v| v.as_string())
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_default();
                             for (k, v) in &get_params {
                                 if k == &key {
                                     return Ok(JsValue::from(JsString::from(v.as_str())));
@@ -2084,7 +2243,11 @@ fn create_context(
                     let has_params = params.clone();
                     let sp_has = {
                         NativeFunction::from_closure(move |_this, args, _ctx| {
-                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                            let key = args
+                                .first()
+                                .and_then(|v| v.as_string())
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_default();
                             Ok(JsValue::from(has_params.iter().any(|(k, _)| k == &key)))
                         })
                     };
@@ -2101,8 +2264,13 @@ fn create_context(
                     let getall_params = params.clone();
                     let sp_get_all = {
                         NativeFunction::from_closure(move |_this, args, ctx2| {
-                            let key = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                            let vals: Vec<JsValue> = getall_params.iter()
+                            let key = args
+                                .first()
+                                .and_then(|v| v.as_string())
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_default();
+                            let vals: Vec<JsValue> = getall_params
+                                .iter()
                                 .filter(|(k, _)| k == &key)
                                 .map(|(_, v)| JsValue::from(JsString::from(v.as_str())))
                                 .collect();
@@ -2121,24 +2289,80 @@ fn create_context(
             };
 
             // Build URL object — convert NativeFunction to JsFunction via FunctionObjectBuilder
-            let href_getter = FunctionObjectBuilder::new(ctx.realm(), href_fn).name("get href").build();
-            let origin_getter = FunctionObjectBuilder::new(ctx.realm(), origin_fn).name("get origin").build();
-            let proto_getter = FunctionObjectBuilder::new(ctx.realm(), proto_fn).name("get protocol").build();
-            let host_getter = FunctionObjectBuilder::new(ctx.realm(), host_fn).name("get host").build();
-            let path_getter = FunctionObjectBuilder::new(ctx.realm(), path_fn).name("get pathname").build();
-            let search_getter = FunctionObjectBuilder::new(ctx.realm(), search_fn).name("get search").build();
-            let hash_getter = FunctionObjectBuilder::new(ctx.realm(), hash_fn).name("get hash").build();
-            let sp_getter = FunctionObjectBuilder::new(ctx.realm(), sp_fn).name("get searchParams").build();
+            let href_getter = FunctionObjectBuilder::new(ctx.realm(), href_fn)
+                .name("get href")
+                .build();
+            let origin_getter = FunctionObjectBuilder::new(ctx.realm(), origin_fn)
+                .name("get origin")
+                .build();
+            let proto_getter = FunctionObjectBuilder::new(ctx.realm(), proto_fn)
+                .name("get protocol")
+                .build();
+            let host_getter = FunctionObjectBuilder::new(ctx.realm(), host_fn)
+                .name("get host")
+                .build();
+            let path_getter = FunctionObjectBuilder::new(ctx.realm(), path_fn)
+                .name("get pathname")
+                .build();
+            let search_getter = FunctionObjectBuilder::new(ctx.realm(), search_fn)
+                .name("get search")
+                .build();
+            let hash_getter = FunctionObjectBuilder::new(ctx.realm(), hash_fn)
+                .name("get hash")
+                .build();
+            let sp_getter = FunctionObjectBuilder::new(ctx.realm(), sp_fn)
+                .name("get searchParams")
+                .build();
 
             let url_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .accessor(js_string!("href"), Some(href_getter), None, Attribute::all())
-                .accessor(js_string!("origin"), Some(origin_getter), None, Attribute::all())
-                .accessor(js_string!("protocol"), Some(proto_getter), None, Attribute::all())
-                .accessor(js_string!("host"), Some(host_getter), None, Attribute::all())
-                .accessor(js_string!("pathname"), Some(path_getter), None, Attribute::all())
-                .accessor(js_string!("search"), Some(search_getter), None, Attribute::all())
-                .accessor(js_string!("hash"), Some(hash_getter), None, Attribute::all())
-                .accessor(js_string!("searchParams"), Some(sp_getter), None, Attribute::all())
+                .accessor(
+                    js_string!("href"),
+                    Some(href_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("origin"),
+                    Some(origin_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("protocol"),
+                    Some(proto_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("host"),
+                    Some(host_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("pathname"),
+                    Some(path_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("search"),
+                    Some(search_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("hash"),
+                    Some(hash_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("searchParams"),
+                    Some(sp_getter),
+                    None,
+                    Attribute::all(),
+                )
                 .build();
 
             Ok(JsValue::from(url_obj))
@@ -2192,11 +2416,19 @@ fn create_context(
                 let _ = arr.push(JsValue::from(b), ctx);
             }
             let _obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("encoding"), JsValue::from(JsString::from("utf-8")), Attribute::all())
-.build();
+                .property(
+                    js_string!("encoding"),
+                    JsValue::from(JsString::from("utf-8")),
+                    Attribute::all(),
+                )
+                .build();
             // Return Uint8Array-like object
             let result = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("buffer"), JsValue::from(arr.clone()), Attribute::all())
+                .property(
+                    js_string!("buffer"),
+                    JsValue::from(arr.clone()),
+                    Attribute::all(),
+                )
                 .build();
             Ok(JsValue::from(result))
         })
@@ -2220,7 +2452,11 @@ fn create_context(
                 })
             };
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("encoding"), JsValue::from(JsString::from("utf-8")), Attribute::all())
+                .property(
+                    js_string!("encoding"),
+                    JsValue::from(JsString::from("utf-8")),
+                    Attribute::all(),
+                )
                 .function(encode_fn, js_string!("encode"), 1)
                 .build();
             Ok(JsValue::from(obj))
@@ -2259,7 +2495,11 @@ fn create_context(
                 .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
                 .unwrap_or_else(|| "utf-8".to_string());
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("encoding"), JsValue::from(JsString::from(encoding.as_str())), Attribute::all())
+                .property(
+                    js_string!("encoding"),
+                    JsValue::from(JsString::from(encoding.as_str())),
+                    Attribute::all(),
+                )
                 .function(decode_fn, js_string!("decode"), 1)
                 .build();
             Ok(JsValue::from(obj))
@@ -2323,27 +2563,45 @@ fn create_context(
     let _ = context.register_global_callable(js_string!("requestAnimationFrame"), 1, raf_fn);
 
     // --- cancelAnimationFrame ---
-    let cancel_raf_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            Ok(JsValue::undefined())
-        })
-    };
+    let cancel_raf_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
     let _ = context.register_global_callable(js_string!("cancelAnimationFrame"), 1, cancel_raf_fn);
 
     // --- Event constructor ---
     let event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
-            let event_type = args.first()
+            let event_type = args
+                .first()
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
-                .property(js_string!("bubbles"), JsValue::from(false), Attribute::all())
-                .property(js_string!("cancelable"), JsValue::from(false), Attribute::all())
-                .property(js_string!("defaultPrevented"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("type"),
+                    JsValue::from(JsString::from(event_type.as_str())),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("bubbles"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("cancelable"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("defaultPrevented"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .property(js_string!("target"), JsValue::null(), Attribute::all())
-                .property(js_string!("currentTarget"), JsValue::null(), Attribute::all())
+                .property(
+                    js_string!("currentTarget"),
+                    JsValue::null(),
+                    Attribute::all(),
+                )
                 .property(js_string!("eventPhase"), JsValue::from(0), Attribute::all())
                 .build();
             Ok(JsValue::from(obj))
@@ -2354,14 +2612,23 @@ fn create_context(
     // --- MouseEvent constructor ---
     let mouse_event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
-            let event_type = args.first()
+            let event_type = args
+                .first()
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
+                .property(
+                    js_string!("type"),
+                    JsValue::from(JsString::from(event_type.as_str())),
+                    Attribute::all(),
+                )
                 .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
-                .property(js_string!("cancelable"), JsValue::from(true), Attribute::all())
+                .property(
+                    js_string!("cancelable"),
+                    JsValue::from(true),
+                    Attribute::all(),
+                )
                 .property(js_string!("clientX"), JsValue::from(0), Attribute::all())
                 .property(js_string!("clientY"), JsValue::from(0), Attribute::all())
                 .property(js_string!("button"), JsValue::from(0), Attribute::all())
@@ -2374,14 +2641,27 @@ fn create_context(
     // --- KeyboardEvent constructor ---
     let keyboard_event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
-            let event_type = args.first()
+            let event_type = args
+                .first()
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
-                .property(js_string!("key"), JsValue::from(JsString::from("")), Attribute::all())
-                .property(js_string!("code"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(
+                    js_string!("type"),
+                    JsValue::from(JsString::from(event_type.as_str())),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("key"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("code"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
                 .property(js_string!("keyCode"), JsValue::from(0), Attribute::all())
                 .build();
             Ok(JsValue::from(obj))
@@ -2392,14 +2672,27 @@ fn create_context(
     // --- FocusEvent constructor ---
     let focus_event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
-            let event_type = args.first()
+            let event_type = args
+                .first()
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
-                .property(js_string!("bubbles"), JsValue::from(false), Attribute::all())
-                .property(js_string!("cancelable"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("type"),
+                    JsValue::from(JsString::from(event_type.as_str())),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("bubbles"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("cancelable"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .build();
             Ok(JsValue::from(obj))
         })
@@ -2407,7 +2700,8 @@ fn create_context(
     let _ = context.register_global_callable(js_string!("FocusEvent"), 1, focus_event_ctor);
 
     // --- document.createDocumentFragment (via eval) ---
-    let _ = context.eval(Source::from_bytes(r#"
+    let _ = context.eval(Source::from_bytes(
+        r#"
         document.createDocumentFragment = function() {
             var fragId = 1100000;
             return {
@@ -2416,7 +2710,8 @@ fn create_context(
                 appendChild: function(child) { return child; }
             };
         };
-    "#));
+    "#,
+    ));
 
     (context, job_queue)
 }
@@ -2553,7 +2848,13 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_qsa, &dom_capture_qsa)
+                            create_element_object(
+                                snapshot,
+                                node,
+                                ctx,
+                                &mutations_capture_qsa,
+                                &dom_capture_qsa,
+                            )
                         })
                     })
                     .collect();
@@ -2612,7 +2913,13 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_gtn, &dom_capture_gtn)
+                            create_element_object(
+                                snapshot,
+                                node,
+                                ctx,
+                                &mutations_capture_gtn,
+                                &dom_capture_gtn,
+                            )
                         })
                     })
                     .collect();
@@ -2642,7 +2949,13 @@ fn register_document_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|node| {
-                            create_element_object(snapshot, node, ctx, &mutations_capture_gcn, &dom_capture_gcn)
+                            create_element_object(
+                                snapshot,
+                                node,
+                                ctx,
+                                &mutations_capture_gcn,
+                                &dom_capture_gcn,
+                            )
                         })
                     })
                     .collect();
@@ -2674,13 +2987,17 @@ fn register_document_object(
             };
 
             // Get or create __listeners object
-            let listeners_val = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let listeners_val = this_obj
+                .get(js_string!("__listeners"), ctx)
+                .unwrap_or(JsValue::Null);
             // Create __listeners if missing
             if listeners_val.as_object().is_none() {
                 let obj = boa_engine::object::ObjectInitializer::new(ctx).build();
                 let _ = this_obj.set(js_string!("__listeners"), JsValue::from(obj), true, ctx);
             }
-            let lv2 = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let lv2 = this_obj
+                .get(js_string!("__listeners"), ctx)
+                .unwrap_or(JsValue::Null);
             let listeners_obj = match lv2.as_object() {
                 Some(o) => o,
                 None => return Ok(JsValue::undefined()),
@@ -2688,7 +3005,9 @@ fn register_document_object(
 
             // Ensure array for this event type
             let arr_key = JsString::from(event_type.as_str());
-            let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
+            let ev = listeners_obj
+                .get(arr_key.clone(), ctx)
+                .unwrap_or(JsValue::Null);
             if ev.as_object().is_none() {
                 let a: JsValue = JsValue::from(JsArray::new(ctx));
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
@@ -2715,7 +3034,12 @@ fn register_document_object(
             if let Some(this_obj) = _this.as_object() {
                 if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
                     if let Some(l_obj) = l_val.as_object() {
-                        let _ = l_obj.set(JsString::from(event_type.as_str()), JsValue::Null, true, ctx);
+                        let _ = l_obj.set(
+                            JsString::from(event_type.as_str()),
+                            JsValue::Null,
+                            true,
+                            ctx,
+                        );
                     }
                 }
             }
@@ -2728,7 +3052,9 @@ fn register_document_object(
             let event = args.first().cloned().unwrap_or(JsValue::undefined());
 
             let event_type = if let Some(evt_obj) = event.as_object() {
-                evt_obj.get(js_string!("type"), ctx).ok()
+                evt_obj
+                    .get(js_string!("type"), ctx)
+                    .ok()
                     .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
                     .unwrap_or_default()
             } else if let Some(s) = event.as_string() {
@@ -2740,7 +3066,9 @@ fn register_document_object(
             if let Some(this_obj) = _this.as_object() {
                 if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
                     if let Some(l_obj) = l_val.as_object() {
-                        let arr_val = l_obj.get(JsString::from(event_type.as_str()), ctx).unwrap_or(JsValue::Null);
+                        let arr_val = l_obj
+                            .get(JsString::from(event_type.as_str()), ctx)
+                            .unwrap_or(JsValue::Null);
                         if let Some(arr_obj) = arr_val.as_object() {
                             if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
                                 if let Ok(len) = arr.length(ctx) {
@@ -2748,7 +3076,11 @@ fn register_document_object(
                                         if let Ok(cb) = arr.at(i as i64, ctx) {
                                             if let Some(cb_obj) = cb.as_object() {
                                                 if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(_this, std::slice::from_ref(&event), ctx);
+                                                    let _ = cb_obj.call(
+                                                        _this,
+                                                        std::slice::from_ref(&event),
+                                                        ctx,
+                                                    );
                                                 }
                                             }
                                         }
@@ -2775,7 +3107,13 @@ fn register_document_object(
                 if let Some(ref s) = *snap {
                     if let Some(bid) = s.body_id {
                         if let Some(node) = s.nodes.get(&bid) {
-                            return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_body_clone));
+                            return Ok(create_element_object(
+                                s,
+                                node,
+                                ctx,
+                                &mutations_clone,
+                                &dom_snap_body_clone,
+                            ));
                         }
                     }
                 }
@@ -2797,7 +3135,13 @@ fn register_document_object(
                 if let Some(ref s) = *snap {
                     if let Some(hid) = s.head_id {
                         if let Some(node) = s.nodes.get(&hid) {
-                            return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_head_clone));
+                            return Ok(create_element_object(
+                                s,
+                                node,
+                                ctx,
+                                &mutations_clone,
+                                &dom_snap_head_clone,
+                            ));
                         }
                     }
                 }
@@ -2830,7 +3174,13 @@ fn register_document_object(
                         })
                     });
                     if let Some((_, node)) = html_node {
-                        return Ok(create_element_object(s, node, ctx, &mutations_clone, &dom_snap_de));
+                        return Ok(create_element_object(
+                            s,
+                            node,
+                            ctx,
+                            &mutations_clone,
+                            &dom_snap_de,
+                        ));
                     }
                 }
                 Ok(JsValue::null())
@@ -2954,8 +3304,16 @@ fn register_document_object(
             let dom_snap_for_setattr = dom_snap_el.clone();
             let set_attr_fn = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
-                    let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                    let value = args.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let name = args
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let value = args
+                        .get(1)
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     // Update shared attribute map so getAttribute sees the change
                     attrs_for_set.write().insert(name.clone(), value.clone());
                     // Sync to snapshot so querySelector can find the attribute
@@ -2967,7 +3325,11 @@ fn register_document_object(
                             }
                         }
                     }
-                    mut_set_attr.write().push(DomMutation::SetAttribute { node_id: mut_set_id, name, value });
+                    mut_set_attr.write().push(DomMutation::SetAttribute {
+                        node_id: mut_set_id,
+                        name,
+                        value,
+                    });
                     Ok(JsValue::undefined())
                 })
             };
@@ -2976,7 +3338,11 @@ fn register_document_object(
             let attrs_for_get = attrs_map.clone();
             let get_attr_fn = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
-                    let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let name = args
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     match attrs_for_get.read().get(&name) {
                         Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
                         None => Ok(JsValue::null()),
@@ -2989,7 +3355,9 @@ fn register_document_object(
             let click_id = id_for_obj;
             let click_fn = {
                 NativeFunction::from_closure(move |_this, _args, _ctx| {
-                    mut_click.write().push(DomMutation::ClickElement { node_id: click_id });
+                    mut_click
+                        .write()
+                        .push(DomMutation::ClickElement { node_id: click_id });
                     Ok(JsValue::undefined())
                 })
             };
@@ -3000,7 +3368,8 @@ fn register_document_object(
             let append_child_fn = {
                 NativeFunction::from_closure(move |_this, args, ctx| {
                     let child = args.first().cloned().unwrap_or(JsValue::undefined());
-                    let child_id = child.as_object()
+                    let child_id = child
+                        .as_object()
                         .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                         .and_then(|v| v.as_number().map(|n| n as u32));
 
@@ -3034,17 +3403,47 @@ fn register_document_object(
             let dom = dom_snap_ce.read();
             if let Some(ref snap) = *dom {
                 if let Some(new_node) = snap.nodes.get(&new_id) {
-                    return Ok(create_element_object(snap, new_node, ctx, &mutations_ce, &dom_snap_ce));
+                    return Ok(create_element_object(
+                        snap,
+                        new_node,
+                        ctx,
+                        &mutations_ce,
+                        &dom_snap_ce,
+                    ));
                 }
             }
             // fallback: snapshot에서 못 찾으면 기본 객체 반환
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("tagName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
-                .property(js_string!("nodeName"), JsValue::from(JsString::from(tag_for_obj.as_str())), Attribute::all())
-                .property(js_string!("textContent"), JsValue::from(JsString::from("")), Attribute::all())
-                .property(js_string!("id"), JsValue::from(JsString::from("")), Attribute::all())
-                .property(js_string!("className"), JsValue::from(JsString::from("")), Attribute::all())
-                .property(js_string!("__nodeId"), JsValue::from(id_for_obj), Attribute::all())
+                .property(
+                    js_string!("tagName"),
+                    JsValue::from(JsString::from(tag_for_obj.as_str())),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("nodeName"),
+                    JsValue::from(JsString::from(tag_for_obj.as_str())),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("textContent"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("id"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("className"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("__nodeId"),
+                    JsValue::from(id_for_obj),
+                    Attribute::all(),
+                )
                 .function(get_attr_fn, js_string!("getAttribute"), 1)
                 .function(set_attr_fn, js_string!("setAttribute"), 2)
                 .function(click_fn, js_string!("click"), 0)
@@ -3089,9 +3488,17 @@ fn register_document_object(
             });
 
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
-                .property(js_string!("textContent"), JsValue::from(JsString::from(text.as_str())), Attribute::all())
+                .property(
+                    js_string!("textContent"),
+                    JsValue::from(JsString::from(text.as_str())),
+                    Attribute::all(),
+                )
                 .property(js_string!("nodeType"), JsValue::from(3), Attribute::all())
-                .property(js_string!("__nodeId"), JsValue::from(new_id), Attribute::all())
+                .property(
+                    js_string!("__nodeId"),
+                    JsValue::from(new_id),
+                    Attribute::all(),
+                )
                 .build();
 
             Ok(JsValue::from(obj))
@@ -3175,71 +3582,118 @@ fn register_document_object(
                 let mutations_efp = mutations.clone();
                 let dom_efp = dom_snapshot.clone();
                 unsafe {
-                    let fn_ptr: NativeFunction = NativeFunction::from_closure(move |_this, args, ctx| {
-                        // elementFromPoint(x, y) — approximate element lookup.
-                        //
-                        // Since there is no real layout engine, we estimate Y positions
-                        // from DOM order using tag-based height heuristics. X is used to
-                        // narrow down among children at a given depth: if a parent element
-                        // has multiple visible children at the estimated Y band, we pick
-                        // the child whose index corresponds to X / (viewport_width / num_children).
-                        let x = args.first().and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
-                        let y = args.get(1).and_then(|v| v.to_number(ctx).ok()).unwrap_or(0.0);
-                        let snap = snap_efp.read();
-                        if let Some(ref s) = *snap {
-                            if let Some(bid) = s.body_id {
-                                if let Some(body) = s.nodes.get(&bid) {
-                                    // Walk body children in order, estimate Y positions
-                                    let mut estimated_y = 0.0;
-                                    let mut last_visible_el: Option<&DomNode> = None;
-                                    for &child_id in &body.children {
-                                        if let Some(el) = s.nodes.get(&child_id) {
-                                            let el_h = estimate_element_height(el);
-                                            if el_h <= 0.0 {
-                                                continue; // skip invisible elements
-                                            }
-                                            if y >= estimated_y && y < estimated_y + el_h {
-                                                // Found the approximate Y band.
-                                                // If this element has visible children, try to
-                                                // narrow down using X coordinate.
-                                                let visible_children: Vec<u32> = el.children.iter().filter(|&&cid| {
-                                                    s.nodes.get(&cid)
-                                                        .map(|c| estimate_element_height(c) > 0.0)
-                                                        .unwrap_or(false)
-                                                }).copied().collect();
+                    let fn_ptr: NativeFunction =
+                        NativeFunction::from_closure(move |_this, args, ctx| {
+                            // elementFromPoint(x, y) — approximate element lookup.
+                            //
+                            // Since there is no real layout engine, we estimate Y positions
+                            // from DOM order using tag-based height heuristics. X is used to
+                            // narrow down among children at a given depth: if a parent element
+                            // has multiple visible children at the estimated Y band, we pick
+                            // the child whose index corresponds to X / (viewport_width / num_children).
+                            let x = args
+                                .first()
+                                .and_then(|v| v.to_number(ctx).ok())
+                                .unwrap_or(0.0);
+                            let y = args
+                                .get(1)
+                                .and_then(|v| v.to_number(ctx).ok())
+                                .unwrap_or(0.0);
+                            let snap = snap_efp.read();
+                            if let Some(ref s) = *snap {
+                                if let Some(bid) = s.body_id {
+                                    if let Some(body) = s.nodes.get(&bid) {
+                                        // Walk body children in order, estimate Y positions
+                                        let mut estimated_y = 0.0;
+                                        let mut last_visible_el: Option<&DomNode> = None;
+                                        for &child_id in &body.children {
+                                            if let Some(el) = s.nodes.get(&child_id) {
+                                                let el_h = estimate_element_height(el);
+                                                if el_h <= 0.0 {
+                                                    continue; // skip invisible elements
+                                                }
+                                                if y >= estimated_y && y < estimated_y + el_h {
+                                                    // Found the approximate Y band.
+                                                    // If this element has visible children, try to
+                                                    // narrow down using X coordinate.
+                                                    let visible_children: Vec<u32> = el
+                                                        .children
+                                                        .iter()
+                                                        .filter(|&&cid| {
+                                                            s.nodes
+                                                                .get(&cid)
+                                                                .map(|c| {
+                                                                    estimate_element_height(c) > 0.0
+                                                                })
+                                                                .unwrap_or(false)
+                                                        })
+                                                        .copied()
+                                                        .collect();
 
-                                                if !visible_children.is_empty() {
-                                                    // Estimate viewport width (fallback 1280).
-                                                    // TODO: pass actual viewport from the runtime config.
-                                                    let vp_w: f64 = 1280.0;
-                                                    // Pick child based on X position
-                                                    let idx = ((x / vp_w) * visible_children.len() as f64).floor() as usize;
-                                                    let idx = idx.min(visible_children.len() - 1);
-                                                    if let Some(&picked_id) = visible_children.get(idx) {
-                                                        if let Some(picked) = s.nodes.get(&picked_id) {
-                                                            return Ok(create_element_object(s, picked, ctx, &mutations_efp, &dom_efp));
+                                                    if !visible_children.is_empty() {
+                                                        // Estimate viewport width (fallback 1280).
+                                                        // TODO: pass actual viewport from the runtime config.
+                                                        let vp_w: f64 = 1280.0;
+                                                        // Pick child based on X position
+                                                        let idx = ((x / vp_w)
+                                                            * visible_children.len() as f64)
+                                                            .floor()
+                                                            as usize;
+                                                        let idx =
+                                                            idx.min(visible_children.len() - 1);
+                                                        if let Some(&picked_id) =
+                                                            visible_children.get(idx)
+                                                        {
+                                                            if let Some(picked) =
+                                                                s.nodes.get(&picked_id)
+                                                            {
+                                                                return Ok(create_element_object(
+                                                                    s,
+                                                                    picked,
+                                                                    ctx,
+                                                                    &mutations_efp,
+                                                                    &dom_efp,
+                                                                ));
+                                                            }
                                                         }
                                                     }
-                                                }
 
-                                                // No suitable children — return this element
-                                                return Ok(create_element_object(s, el, ctx, &mutations_efp, &dom_efp));
+                                                    // No suitable children — return this element
+                                                    return Ok(create_element_object(
+                                                        s,
+                                                        el,
+                                                        ctx,
+                                                        &mutations_efp,
+                                                        &dom_efp,
+                                                    ));
+                                                }
+                                                estimated_y += el_h;
+                                                last_visible_el = Some(el);
                                             }
-                                            estimated_y += el_h;
-                                            last_visible_el = Some(el);
                                         }
+                                        // If y exceeds all estimated heights, return the last visible element
+                                        if let Some(el) = last_visible_el {
+                                            return Ok(create_element_object(
+                                                s,
+                                                el,
+                                                ctx,
+                                                &mutations_efp,
+                                                &dom_efp,
+                                            ));
+                                        }
+                                        // Fallback: return body itself
+                                        return Ok(create_element_object(
+                                            s,
+                                            body,
+                                            ctx,
+                                            &mutations_efp,
+                                            &dom_efp,
+                                        ));
                                     }
-                                    // If y exceeds all estimated heights, return the last visible element
-                                    if let Some(el) = last_visible_el {
-                                        return Ok(create_element_object(s, el, ctx, &mutations_efp, &dom_efp));
-                                    }
-                                    // Fallback: return body itself
-                                    return Ok(create_element_object(s, body, ctx, &mutations_efp, &dom_efp));
                                 }
                             }
-                        }
-                        Ok(JsValue::null())
-                    });
+                            Ok(JsValue::null())
+                        });
                     fn_ptr
                 }
             },
@@ -3278,10 +3732,7 @@ fn create_element_object(
     // We add it to the cloned attribute map so getAttribute/hasAttribute
     // can also see it.
     let mut enriched_attrs: HashMap<String, String> = node.attributes.clone();
-    enriched_attrs.insert(
-        "data-oxi-node-id".to_string(),
-        node.id.to_string(),
-    );
+    enriched_attrs.insert("data-oxi-node-id".to_string(), node.id.to_string());
 
     // getAttribute(name)
     // getAttribute(name) — reads from live snapshot (reflects setAttribute mutations)
@@ -3347,19 +3798,25 @@ fn create_element_object(
                 None => return Ok(JsValue::undefined()),
             };
             // Ensure __listeners exists
-            let lv = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let lv = this_obj
+                .get(js_string!("__listeners"), ctx)
+                .unwrap_or(JsValue::Null);
             if lv.as_object().is_none() {
                 let obj = boa_engine::object::ObjectInitializer::new(ctx).build();
                 let _ = this_obj.set(js_string!("__listeners"), JsValue::from(obj), true, ctx);
             }
-            let listeners_val2 = this_obj.get(js_string!("__listeners"), ctx).unwrap_or(JsValue::Null);
+            let listeners_val2 = this_obj
+                .get(js_string!("__listeners"), ctx)
+                .unwrap_or(JsValue::Null);
             let listeners_obj = match listeners_val2.as_object() {
                 Some(o) => o,
                 None => return Ok(JsValue::undefined()),
             };
             // Ensure array for this event type
             let arr_key = JsString::from(event_type.as_str());
-            let ev = listeners_obj.get(arr_key.clone(), ctx).unwrap_or(JsValue::Null);
+            let ev = listeners_obj
+                .get(arr_key.clone(), ctx)
+                .unwrap_or(JsValue::Null);
             if ev.as_object().is_none() {
                 let a: JsValue = JsValue::from(JsArray::new(ctx));
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
@@ -3389,7 +3846,12 @@ fn create_element_object(
             let listeners = this_obj.get(js_string!("__listeners"), ctx);
             if let Ok(l_val) = listeners {
                 if let Some(l_obj) = l_val.as_object() {
-                    let _ = l_obj.set(JsString::from(event_type.as_str()), JsValue::Null, true, ctx);
+                    let _ = l_obj.set(
+                        JsString::from(event_type.as_str()),
+                        JsValue::Null,
+                        true,
+                        ctx,
+                    );
                 }
             }
 
@@ -3419,7 +3881,9 @@ fn create_element_object(
             let listeners = this_obj.get(js_string!("__listeners"), ctx);
             if let Ok(l_val) = listeners {
                 if let Some(l_obj) = l_val.as_object() {
-                    let arr_val = l_obj.get(JsString::from(event_type.as_str()), ctx).unwrap_or(JsValue::Null);
+                    let arr_val = l_obj
+                        .get(JsString::from(event_type.as_str()), ctx)
+                        .unwrap_or(JsValue::Null);
                     if let Some(arr_obj) = arr_val.as_object() {
                         if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
                             if let Ok(len) = arr.length(ctx) {
@@ -3428,11 +3892,7 @@ fn create_element_object(
                                         if let Some(cb_obj) = cb.as_object() {
                                             if cb_obj.is_callable() {
                                                 let evt_arg = event.clone();
-                                                let _ = cb_obj.call(
-                                                    _this,
-                                                    &[evt_arg],
-                                                    ctx,
-                                                );
+                                                let _ = cb_obj.call(_this, &[evt_arg], ctx);
                                             }
                                         }
                                     }
@@ -3465,15 +3925,35 @@ fn create_element_object(
                                 if let Ok(arr) = JsArray::from_object(arr_js.clone()) {
                                     let len = arr.length(ctx).unwrap_or(0) as usize;
                                     let event_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                                        .property(js_string!("type"), JsValue::from(JsString::from("click")), Attribute::all())
-                                        .property(js_string!("target"), _this.clone(), Attribute::all())
-                                        .property(js_string!("currentTarget"), _this.clone(), Attribute::all())
-                                        .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
+                                        .property(
+                                            js_string!("type"),
+                                            JsValue::from(JsString::from("click")),
+                                            Attribute::all(),
+                                        )
+                                        .property(
+                                            js_string!("target"),
+                                            _this.clone(),
+                                            Attribute::all(),
+                                        )
+                                        .property(
+                                            js_string!("currentTarget"),
+                                            _this.clone(),
+                                            Attribute::all(),
+                                        )
+                                        .property(
+                                            js_string!("bubbles"),
+                                            JsValue::from(true),
+                                            Attribute::all(),
+                                        )
                                         .build();
                                     for i in 0..len {
                                         if let Ok(cb) = arr.get(i as u64, ctx) {
                                             if let Some(cb_obj) = cb.as_object() {
-                                                let _ = cb_obj.call(_this, &[JsValue::from(event_obj.clone())], ctx);
+                                                let _ = cb_obj.call(
+                                                    _this,
+                                                    &[JsValue::from(event_obj.clone())],
+                                                    ctx,
+                                                );
                                             }
                                         }
                                     }
@@ -3528,7 +4008,8 @@ fn create_element_object(
     let append_child_obj_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let child = args.first().cloned().unwrap_or(JsValue::undefined());
-            let child_id = child.as_object()
+            let child_id = child
+                .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as u32));
 
@@ -3564,7 +4045,8 @@ fn create_element_object(
     let remove_child_obj_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let child = args.first().cloned().unwrap_or(JsValue::undefined());
-            let child_id = child.as_object()
+            let child_id = child
+                .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as u32));
 
@@ -3640,13 +4122,7 @@ fn create_element_object(
                     .iter()
                     .filter_map(|&id| {
                         snapshot.nodes.get(&id).map(|n| {
-                            create_element_object(
-                                snapshot,
-                                n,
-                                ctx,
-                                &qsa_mutations,
-                                &qsa_dom,
-                            )
+                            create_element_object(snapshot, n, ctx, &qsa_mutations, &qsa_dom)
                         })
                     })
                     .collect();
@@ -3749,13 +4225,15 @@ fn create_element_object(
         NativeFunction::from_closure(move |_this, args, ctx| {
             let new_child = args.first().cloned().unwrap_or(JsValue::undefined());
             let ref_child = args.get(1).cloned().unwrap_or(JsValue::null());
-            let new_id = new_child.as_object()
+            let new_id = new_child
+                .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as u32));
             let ref_id = if ref_child.is_null() || ref_child.is_undefined() {
                 None
             } else {
-                ref_child.as_object()
+                ref_child
+                    .as_object()
                     .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                     .and_then(|v| v.as_number().map(|n| n as u32))
             };
@@ -3771,7 +4249,9 @@ fn create_element_object(
                         }
                     }
                     // ref_id 위치에 삽입 또는 맨 뒤에 append
-                    let children = s.nodes.get(&nid_ib)
+                    let children = s
+                        .nodes
+                        .get(&nid_ib)
                         .map(|p| p.children.clone())
                         .unwrap_or_default();
                     if let Some(rid) = ref_id {
@@ -3807,10 +4287,12 @@ fn create_element_object(
         NativeFunction::from_closure(move |_this, args, ctx| {
             let new_child = args.first().cloned().unwrap_or(JsValue::undefined());
             let old_child = args.get(1).cloned().unwrap_or(JsValue::undefined());
-            let new_id = new_child.as_object()
+            let new_id = new_child
+                .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as u32));
-            let old_id = old_child.as_object()
+            let old_id = old_child
+                .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as u32));
             if let (Some(nid), Some(oid)) = (new_id, old_id) {
@@ -3824,10 +4306,20 @@ fn create_element_object(
                             p.children.push(nid);
                         }
                     }
-                    if let Some(c) = s.nodes.get_mut(&nid) { c.parent = Some(nid_rc); }
-                    if let Some(o) = s.nodes.get_mut(&oid) { o.parent = None; }
-                    mut_rc.write().push(DomMutation::RemoveChild { parent_id: nid_rc, child_id: oid });
-                    mut_rc.write().push(DomMutation::AppendChild { parent_id: nid_rc, child_id: nid });
+                    if let Some(c) = s.nodes.get_mut(&nid) {
+                        c.parent = Some(nid_rc);
+                    }
+                    if let Some(o) = s.nodes.get_mut(&oid) {
+                        o.parent = None;
+                    }
+                    mut_rc.write().push(DomMutation::RemoveChild {
+                        parent_id: nid_rc,
+                        child_id: oid,
+                    });
+                    mut_rc.write().push(DomMutation::AppendChild {
+                        parent_id: nid_rc,
+                        child_id: nid,
+                    });
                 }
             }
             Ok(new_child)
@@ -3839,7 +4331,8 @@ fn create_element_object(
     let mut_ra = mutations.clone();
     let remove_attr_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
-            let name = args.first()
+            let name = args
+                .first()
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
@@ -3899,12 +4392,24 @@ fn create_element_object(
                     if let Some(src) = s.nodes.get(&nid_cl) {
                         (
                             src.tag.clone(),
-                            if deep { src.attributes.clone() } else { HashMap::new() },
-                            if deep { src.text_content.clone() } else { String::new() },
+                            if deep {
+                                src.attributes.clone()
+                            } else {
+                                HashMap::new()
+                            },
+                            if deep {
+                                src.text_content.clone()
+                            } else {
+                                String::new()
+                            },
                             src.node_type,
                         )
-                    } else { return Ok(JsValue::null()); }
-                } else { return Ok(JsValue::null()); }
+                    } else {
+                        return Ok(JsValue::null());
+                    }
+                } else {
+                    return Ok(JsValue::null());
+                }
             };
             let cloned = DomNode {
                 id: new_id,
@@ -3946,10 +4451,16 @@ fn create_element_object(
             let sp_id = nid_st;
             let set_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let prop = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                    let val = args2.get(1).and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let prop = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = args2
+                        .get(1)
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     if !prop.is_empty() {
                         let mut dom = sp_arc.write();
                         if let Some(ref mut s) = *dom {
@@ -3965,8 +4476,11 @@ fn create_element_object(
             let gp_id = nid_st;
             let get_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let prop = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let prop = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     let dom = gp_arc.read();
                     if let Some(ref s) = *dom {
                         if let Some(n) = s.nodes.get(&gp_id) {
@@ -3983,8 +4497,11 @@ fn create_element_object(
             let rp_id = nid_st;
             let rm_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let prop = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let prop = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     if !prop.is_empty() {
                         let mut dom = rp_arc.write();
                         if let Some(ref mut s) = *dom {
@@ -4016,8 +4533,12 @@ fn create_element_object(
                 if let Some(ref s) = *dom {
                     if let Some(n) = s.nodes.get(&nid_cls) {
                         n.attributes.get("class").cloned().unwrap_or_default()
-                    } else { String::new() }
-                } else { String::new() }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
             };
             let count = current.split_whitespace().count() as i32;
 
@@ -4025,15 +4546,22 @@ fn create_element_object(
             let ca_id = nid_cls;
             let add_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let cls = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let cls = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     if !cls.is_empty() {
                         let mut dom = ca_arc.write();
                         if let Some(ref mut s) = *dom {
                             if let Some(n) = s.nodes.get_mut(&ca_id) {
                                 let cur = n.attributes.get("class").cloned().unwrap_or_default();
                                 if !cur.split_whitespace().any(|c| c == cls) {
-                                    let new_cls = if cur.is_empty() { cls.clone() } else { format!("{} {}", cur, cls) };
+                                    let new_cls = if cur.is_empty() {
+                                        cls.clone()
+                                    } else {
+                                        format!("{} {}", cur, cls)
+                                    };
                                     n.attributes.insert("class".to_string(), new_cls);
                                 }
                             }
@@ -4047,14 +4575,21 @@ fn create_element_object(
             let cr_id = nid_cls;
             let rm_cls_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let cls = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let cls = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     if !cls.is_empty() {
                         let mut dom = cr_arc.write();
                         if let Some(ref mut s) = *dom {
                             if let Some(n) = s.nodes.get_mut(&cr_id) {
                                 let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                                let new_cls = cur.split_whitespace().filter(|c| *c != cls).collect::<Vec<_>>().join(" ");
+                                let new_cls = cur
+                                    .split_whitespace()
+                                    .filter(|c| *c != cls)
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
                                 n.attributes.insert("class".to_string(), new_cls);
                             }
                         }
@@ -4067,8 +4602,11 @@ fn create_element_object(
             let ch_id = nid_cls;
             let has_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let cls = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let cls = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     let dom = ch_arc.read();
                     if let Some(ref s) = *dom {
                         if let Some(n) = s.nodes.get(&ch_id) {
@@ -4084,8 +4622,11 @@ fn create_element_object(
             let ct_id = nid_cls;
             let toggle_fn = {
                 NativeFunction::from_closure(move |_this2, args2, _ctx2| {
-                    let cls = args2.first().and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let cls = args2
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
                     let dom = ct_arc.read();
                     let mut found = false;
                     if let Some(ref s) = *dom {
@@ -4101,9 +4642,16 @@ fn create_element_object(
                             if let Some(n) = s.nodes.get_mut(&ct_id) {
                                 let cur = n.attributes.get("class").cloned().unwrap_or_default();
                                 let new_cls = if found {
-                                    cur.split_whitespace().filter(|c| *c != cls).collect::<Vec<_>>().join(" ")
+                                    cur.split_whitespace()
+                                        .filter(|c| *c != cls)
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
                                 } else {
-                                    if cur.is_empty() { cls.clone() } else { format!("{} {}", cur, cls) }
+                                    if cur.is_empty() {
+                                        cls.clone()
+                                    } else {
+                                        format!("{} {}", cur, cls)
+                                    }
                                 };
                                 n.attributes.insert("class".to_string(), new_cls);
                             }
@@ -4135,15 +4683,12 @@ fn create_element_object(
 
     // ── 포커스/폼 (noop) ──
 
-    let focus_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
-    };
-    let blur_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
-    };
-    let submit_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
-    };
+    let focus_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    let blur_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    let submit_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
 
     // value getter
     // value getter — reads from live snapshot (reflects value setter)
@@ -4155,7 +4700,7 @@ fn create_element_object(
             if let Some(ref snap) = *dom {
                 if let Some(n) = snap.nodes.get(&node_id_vg) {
                     return Ok(JsValue::from(JsString::from(
-                        n.attributes.get("value").map(|s| s.as_str()).unwrap_or("")
+                        n.attributes.get("value").map(|s| s.as_str()).unwrap_or(""),
                     )));
                 }
             }
@@ -4221,7 +4766,8 @@ fn create_element_object(
     let mut_tcs = mutations.clone();
     let text_content_setter = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
-            let text = args.first()
+            let text = args
+                .first()
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
@@ -4268,7 +4814,8 @@ fn create_element_object(
     let mut_ihs = mutations.clone();
     let inner_html_setter = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
-            let html = args.first()
+            let html = args
+                .first()
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
@@ -4425,9 +4972,13 @@ fn create_element_object(
                         let dom = snap_cn.read();
                         if let Some(ref snap) = *dom {
                             if let Some(cur) = snap.nodes.get(&nid_cn) {
-                                let items: Vec<JsValue> = cur.children.iter()
+                                let items: Vec<JsValue> = cur
+                                    .children
+                                    .iter()
                                     .filter_map(|&cid| snap.nodes.get(&cid))
-                                    .map(|child| create_element_object(snap, child, ctx, &mut_cn, &snap_cn))
+                                    .map(|child| {
+                                        create_element_object(snap, child, ctx, &mut_cn, &snap_cn)
+                                    })
                                     .collect();
                                 let arr = JsArray::from_iter(items, ctx);
                                 return Ok(arr.into());
@@ -4490,7 +5041,11 @@ fn create_element_object(
         .function(focus_fn, js_string!("focus"), 0)
         .function(blur_fn, js_string!("blur"), 0)
         .function(submit_fn, js_string!("submit"), 0)
-        .property(js_string!("__nodeId"), JsValue::from(node.id), Attribute::all())
+        .property(
+            js_string!("__nodeId"),
+            JsValue::from(node.id),
+            Attribute::all(),
+        )
         .accessor(
             js_string!("value"),
             Some(value_getter_fn),
@@ -4629,7 +5184,6 @@ fn register_local_storage(
     _dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
     local_storage_tx: Arc<RwLock<Option<std::sync::mpsc::Sender<LocalStorageMsg>>>>,
 ) {
-
     // Build a JS object with Storage interface methods
     // We store the HashMap in a RefCell so JS can mutate it.
     use std::cell::RefCell;
@@ -4639,103 +5193,116 @@ fn register_local_storage(
     // --- getItem ---
     let get_storage = storage_arc.clone();
     let get_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            let key = args.first()
-                .and_then(|v| v.to_string(ctx).ok())
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let val = get_storage.borrow().get(&key).cloned();
-            match val {
-                Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
-                None => Ok(JsValue::null()),
-            }
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                let key = args
+                    .first()
+                    .and_then(|v| v.to_string(ctx).ok())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let val = get_storage.borrow().get(&key).cloned();
+                match val {
+                    Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                    None => Ok(JsValue::null()),
+                }
+            },
+        )
     };
 
     // --- setItem ---
     let set_storage = storage_arc.clone();
     let set_ls_tx = local_storage_tx.clone();
     let set_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if args.len() >= 2 {
-                let key = args[0]
-                    .to_string(ctx)
-                    .map(|s| s.to_std_string_escaped())
-                    .unwrap_or_default();
-                let val = args[1]
-                    .to_string(ctx)
-                    .map(|s| s.to_std_string_escaped())
-                    .unwrap_or_default();
-                set_storage.borrow_mut().insert(key.clone(), val.clone());
-                // Sync to Session
-                let tx_opt = { set_ls_tx.read().as_ref().cloned() };
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(LocalStorageMsg::SetItem(key, val));
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if args.len() >= 2 {
+                    let key = args[0]
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = args[1]
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    set_storage.borrow_mut().insert(key.clone(), val.clone());
+                    // Sync to Session
+                    let tx_opt = { set_ls_tx.read().as_ref().cloned() };
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(LocalStorageMsg::SetItem(key, val));
+                    }
                 }
-            }
-            Ok(JsValue::undefined())
-        })
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // --- removeItem ---
     let rem_storage = storage_arc.clone();
     let rem_ls_tx = local_storage_tx.clone();
     let remove_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if let Some(key_arg) = args.first() {
-                let key = key_arg
-                    .to_string(ctx)
-                    .map(|s| s.to_std_string_escaped())
-                    .unwrap_or_default();
-                rem_storage.borrow_mut().remove(&key);
-                // Sync to Session
-                let tx_opt = { rem_ls_tx.read().as_ref().cloned() };
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(LocalStorageMsg::RemoveItem(key));
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if let Some(key_arg) = args.first() {
+                    let key = key_arg
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    rem_storage.borrow_mut().remove(&key);
+                    // Sync to Session
+                    let tx_opt = { rem_ls_tx.read().as_ref().cloned() };
+                    if let Some(tx) = tx_opt {
+                        let _ = tx.send(LocalStorageMsg::RemoveItem(key));
+                    }
                 }
-            }
-            Ok(JsValue::undefined())
-        })
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // --- clear ---
     let clear_storage = storage_arc.clone();
     let clear_ls_tx = local_storage_tx.clone();
     let clear_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
-            clear_storage.borrow_mut().clear();
-            // Sync to Session
-            let tx_opt = { clear_ls_tx.read().as_ref().cloned() };
-            if let Some(tx) = tx_opt {
-                let _ = tx.send(LocalStorageMsg::Clear);
-            }
-            Ok(JsValue::undefined())
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+                clear_storage.borrow_mut().clear();
+                // Sync to Session
+                let tx_opt = { clear_ls_tx.read().as_ref().cloned() };
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(LocalStorageMsg::Clear);
+                }
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // --- key ---
     let key_storage = storage_arc.clone();
     let key_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if let Some(idx_arg) = args.first() {
-                let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
-                let keys: Vec<_> = key_storage.borrow().keys().cloned().collect();
-                match keys.get(idx) {
-                    Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
-                    None => Ok(JsValue::null()),
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if let Some(idx_arg) = args.first() {
+                    let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
+                    let keys: Vec<_> = key_storage.borrow().keys().cloned().collect();
+                    match keys.get(idx) {
+                        Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
+                        None => Ok(JsValue::null()),
+                    }
+                } else {
+                    Ok(JsValue::null())
                 }
-            } else {
-                Ok(JsValue::null())
-            }
-        })
+            },
+        )
     };
 
     // --- get length (snapshot) ---
     let len_storage = storage_arc.clone();
     let _len_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
-            Ok(JsValue::from(len_storage.borrow().len() as i32))
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+                Ok(JsValue::from(len_storage.borrow().len() as i32))
+            },
+        )
     };
 
     // Build localStorage object (Storage interface)
@@ -4777,67 +5344,87 @@ fn register_storage_obj(
     // getItem
     let get_s = storage_arc.clone();
     let get_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            let key = args.first()
-                .and_then(|v| v.to_string(ctx).ok())
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            match get_s.borrow().get(&key).cloned() {
-                Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
-                None => Ok(JsValue::null()),
-            }
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                let key = args
+                    .first()
+                    .and_then(|v| v.to_string(ctx).ok())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                match get_s.borrow().get(&key).cloned() {
+                    Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                    None => Ok(JsValue::null()),
+                }
+            },
+        )
     };
 
     // setItem
     let set_s = storage_arc.clone();
     let set_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if args.len() >= 2 {
-                let key = args[0].to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                let val = args[1].to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                set_s.borrow_mut().insert(key, val);
-            }
-            Ok(JsValue::undefined())
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if args.len() >= 2 {
+                    let key = args[0]
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    let val = args[1]
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    set_s.borrow_mut().insert(key, val);
+                }
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // removeItem
     let rem_s = storage_arc.clone();
     let remove_item_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if let Some(k) = args.first() {
-                let key = k.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
-                rem_s.borrow_mut().remove(&key);
-            }
-            Ok(JsValue::undefined())
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if let Some(k) = args.first() {
+                    let key = k
+                        .to_string(ctx)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    rem_s.borrow_mut().remove(&key);
+                }
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // clear
     let clr_s = storage_arc.clone();
     let clear_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
-            clr_s.borrow_mut().clear();
-            Ok(JsValue::undefined())
-        })
+        NativeFunction::from_closure(
+            move |_this: &JsValue, _args: &[JsValue], _ctx: &mut Context| {
+                clr_s.borrow_mut().clear();
+                Ok(JsValue::undefined())
+            },
+        )
     };
 
     // key
     let key_s = storage_arc.clone();
     let key_fn = unsafe {
-        NativeFunction::from_closure(move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-            if let Some(idx_arg) = args.first() {
-                let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
-                let keys: Vec<_> = key_s.borrow().keys().cloned().collect();
-                match keys.get(idx) {
-                    Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
-                    None => Ok(JsValue::null()),
+        NativeFunction::from_closure(
+            move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
+                if let Some(idx_arg) = args.first() {
+                    let idx = idx_arg.to_index(ctx).unwrap_or(0) as usize;
+                    let keys: Vec<_> = key_s.borrow().keys().cloned().collect();
+                    match keys.get(idx) {
+                        Some(k) => Ok(JsValue::from(JsString::from(k.as_str()))),
+                        None => Ok(JsValue::null()),
+                    }
+                } else {
+                    Ok(JsValue::null())
                 }
-            } else {
-                Ok(JsValue::null())
-            }
-        })
+            },
+        )
     };
 
     // length (dynamic getter that reads current storage size)
@@ -4858,7 +5445,12 @@ fn register_storage_obj(
         .function(remove_item_fn, js_string!("removeItem"), 1)
         .function(clear_fn, js_string!("clear"), 0)
         .function(key_fn, js_string!("key"), 1)
-        .accessor(js_string!("length"), Some(len_getter_fn), None, Attribute::all())
+        .accessor(
+            js_string!("length"),
+            Some(len_getter_fn),
+            None,
+            Attribute::all(),
+        )
         .build();
 
     let _ = ctx.register_global_property(name, storage_obj, Attribute::all());
@@ -4939,7 +5531,13 @@ fn register_window_globals(
             if let Some(ref s) = *snap {
                 if let Some(bid) = s.body_id {
                     if let Some(node) = s.nodes.get(&bid) {
-                        return Ok(create_element_object(s, node, ctx, &mutations_body, &snap_body));
+                        return Ok(create_element_object(
+                            s,
+                            node,
+                            ctx,
+                            &mutations_body,
+                            &snap_body,
+                        ));
                     }
                 }
             }
@@ -4955,7 +5553,13 @@ fn register_window_globals(
             if let Some(ref s) = *snap {
                 if let Some(hid) = s.head_id {
                     if let Some(node) = s.nodes.get(&hid) {
-                        return Ok(create_element_object(s, node, ctx, &mutations_head, &snap_head));
+                        return Ok(create_element_object(
+                            s,
+                            node,
+                            ctx,
+                            &mutations_head,
+                            &snap_head,
+                        ));
                     }
                 }
             }
@@ -5211,6 +5815,32 @@ mod js_sys_helpers {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
         duration.as_millis() as f64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Estimate the height of a DOM element for elementFromPoint approximation.
+fn estimate_element_height(node: &DomNode) -> f64 {
+    let tag = node.tag.to_uppercase();
+    match tag.as_str() {
+        "H1" => 40.0,
+        "H2" => 36.0,
+        "H3" => 32.0,
+        "H4" | "H5" | "H6" => 28.0,
+        "P" => 24.0,
+        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER" | "NAV" | "MAIN" | "ASIDE" => 40.0,
+        "UL" | "OL" => 24.0,
+        "LI" => 20.0,
+        "TABLE" => 32.0,
+        "TR" => 24.0,
+        "IMG" | "IFRAME" => 300.0,
+        "INPUT" | "TEXTAREA" | "SELECT" => 32.0,
+        "SCRIPT" | "STYLE" | "LINK" | "META" => 0.0, // invisible
+        "SVG" | "CANVAS" => 200.0,
+        _ => 24.0, // default line height
     }
 }
 
@@ -6368,14 +6998,20 @@ mod tests {
     #[tokio::test]
     async fn test_url_class() {
         let mut rt = JsRuntime::new();
-        let result = rt.evaluate("new URL('https://example.com:8080/path?foo=bar#hash').hostname").await.unwrap();
+        let result = rt
+            .evaluate("new URL('https://example.com:8080/path?foo=bar#hash').hostname")
+            .await
+            .unwrap();
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_url_search_params() {
         let mut rt = JsRuntime::new();
-        let result = rt.evaluate("new URLSearchParams('foo=bar&baz=1').get('foo')").await.unwrap();
+        let result = rt
+            .evaluate("new URLSearchParams('foo=bar&baz=1').get('foo')")
+            .await
+            .unwrap();
         assert!(result.is_ok());
     }
 
@@ -6400,31 +7036,5 @@ mod tests {
         let result = rt.evaluate("Array.from('hello').length").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value.unwrap(), 5);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Estimate the height of a DOM element for elementFromPoint approximation.
-fn estimate_element_height(node: &DomNode) -> f64 {
-    let tag = node.tag.to_uppercase();
-    match tag.as_str() {
-        "H1" => 40.0,
-        "H2" => 36.0,
-        "H3" => 32.0,
-        "H4" | "H5" | "H6" => 28.0,
-        "P" => 24.0,
-        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER" | "NAV" | "MAIN" | "ASIDE" => 40.0,
-        "UL" | "OL" => 24.0,
-        "LI" => 20.0,
-        "TABLE" => 32.0,
-        "TR" => 24.0,
-        "IMG" | "IFRAME" => 300.0,
-        "INPUT" | "TEXTAREA" | "SELECT" => 32.0,
-        "SCRIPT" | "STYLE" | "LINK" | "META" => 0.0, // invisible
-        "SVG" | "CANVAS" => 200.0,
-        _ => 24.0, // default line height
     }
 }

@@ -32,30 +32,15 @@ pub enum DomMutation {
     /// Input text into a form element.
     InputElement { node_id: u32, value: String },
     /// Create a new element node.
-    CreateElement {
-        node_id: u32,
-        tag: String,
-    },
+    CreateElement { node_id: u32, tag: String },
     /// Create a new text node.
-    CreateTextNode {
-        node_id: u32,
-        text: String,
-    },
+    CreateTextNode { node_id: u32, text: String },
     /// Append a child node to a parent.
-    AppendChild {
-        parent_id: u32,
-        child_id: u32,
-    },
+    AppendChild { parent_id: u32, child_id: u32 },
     /// Remove a child node from its parent.
-    RemoveChild {
-        parent_id: u32,
-        child_id: u32,
-    },
+    RemoveChild { parent_id: u32, child_id: u32 },
     /// Set innerHTML of an element (parse + replace children).
-    SetInnerHtml {
-        node_id: u32,
-        html: String,
-    },
+    SetInnerHtml { node_id: u32, html: String },
 }
 
 /// Serializable DOM node.
@@ -276,7 +261,8 @@ impl DomSnapshot {
                     if let Some(idx) = heading_tags.iter().position(|t| *t == tag_lower) {
                         result.push((idx as u8 + 1, self.deep_text_content(node.id)));
                     } else if node.attributes.get("role").map(|s| s.as_str()) == Some("heading") {
-                        let level: u8 = node.attributes
+                        let level: u8 = node
+                            .attributes
                             .get("aria-level")
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(2);
@@ -322,7 +308,9 @@ impl DomSnapshot {
         let mut result = HashMap::new();
         for node in self.nodes.values() {
             if node.node_type == 1 && node.tag.to_lowercase() == "meta" {
-                let name = node.attributes.get("name")
+                let name = node
+                    .attributes
+                    .get("name")
                     .or_else(|| node.attributes.get("property"));
                 let content = node.attributes.get("content");
                 if let (Some(n), Some(c)) = (name, content) {
@@ -441,12 +429,9 @@ impl DomSnapshot {
                     // Check attribute: "href" or "href=value" or "href='value'"
                     return if let Some(eq_pos) = attr_part.find('=') {
                         let attr_name = &attr_part[..eq_pos];
-                        let val = attr_part[eq_pos + 1..]
-                            .trim_matches('\'')
-                            .trim_matches('"');
+                        let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
                         let has_attr = node.attributes.contains_key(attr_name);
-                        has_attr
-                            && node.attributes.get(attr_name).map(|s| s.as_str()) == Some(val)
+                        has_attr && node.attributes.get(attr_name).map(|s| s.as_str()) == Some(val)
                     } else {
                         node.attributes.contains_key(attr_part)
                     };
@@ -494,13 +479,15 @@ impl DomSnapshot {
 
     /// Get the first child node ID.
     pub fn first_child(&self, node_id: u32) -> Option<u32> {
-        self.nodes.get(&node_id)
+        self.nodes
+            .get(&node_id)
             .and_then(|n| n.children.first().copied())
     }
 
     /// Get the last child node ID.
     pub fn last_child(&self, node_id: u32) -> Option<u32> {
-        self.nodes.get(&node_id)
+        self.nodes
+            .get(&node_id)
             .and_then(|n| n.children.last().copied())
     }
 

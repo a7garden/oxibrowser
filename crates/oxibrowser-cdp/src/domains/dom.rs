@@ -149,26 +149,37 @@ async fn describe_node(params: Option<Value>, ctx: &DispatchContext) -> DomainRe
             match document.get_node(node_id) {
                 Some(node) => {
                     let (node_type_num, node_name, local_name, node_value) = match &node.node_type {
-                        NodeType::Document => (9, "#document".to_string(), String::new(), String::new()),
-                        NodeType::Element { tag, .. } => (1, tag.to_uppercase(), tag.to_lowercase(), String::new()),
-                        NodeType::Text(text) => (3, "#text".to_string(), String::new(), text.clone()),
-                        NodeType::Comment(text) => (8, "#comment".to_string(), String::new(), text.clone()),
-                        NodeType::Doctype { name } => (10, "#doctype".to_string(), String::new(), name.clone()),
+                        NodeType::Document => {
+                            (9, "#document".to_string(), String::new(), String::new())
+                        }
+                        NodeType::Element { tag, .. } => {
+                            (1, tag.to_uppercase(), tag.to_lowercase(), String::new())
+                        }
+                        NodeType::Text(text) => {
+                            (3, "#text".to_string(), String::new(), text.clone())
+                        }
+                        NodeType::Comment(text) => {
+                            (8, "#comment".to_string(), String::new(), text.clone())
+                        }
+                        NodeType::Doctype { name } => {
+                            (10, "#doctype".to_string(), String::new(), name.clone())
+                        }
                     };
 
                     let child_count = document.tree().children(node_id).len();
 
                     // Collect attribute pairs [name1, value1, name2, value2, ...]
-                    let attributes: Vec<Value> = if let NodeType::Element { attributes, .. } = &node.node_type {
-                        let mut attrs = Vec::new();
-                        for (k, v) in attributes {
-                            attrs.push(json!(k));
-                            attrs.push(json!(v));
-                        }
-                        attrs
-                    } else {
-                        Vec::new()
-                    };
+                    let attributes: Vec<Value> =
+                        if let NodeType::Element { attributes, .. } = &node.node_type {
+                            let mut attrs = Vec::new();
+                            for (k, v) in attributes {
+                                attrs.push(json!(k));
+                                attrs.push(json!(v));
+                            }
+                            attrs
+                        } else {
+                            Vec::new()
+                        };
 
                     Ok(Some(json!({
                         "node": {

@@ -3,7 +3,7 @@
 //! Mirrors Lightpanda's `Page.zig`: owns the DOM factory, JS identity map,
 //! and frame tree. A Page is created on navigation and holds the root Frame.
 
-use crate::error::{Result, CoreError};
+use crate::error::{CoreError, Result};
 use crate::frame::Frame;
 use crate::network::resource::Resource;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -174,7 +174,10 @@ mod tests {
             .unwrap();
 
         let content = page.content();
-        assert!(content.contains("Hello"), "content should contain body text");
+        assert!(
+            content.contains("Hello"),
+            "content should contain body text"
+        );
         assert!(
             content.contains("<html"),
             "content should contain HTML tags"
@@ -236,9 +239,6 @@ mod tests {
         page.add_resource(resource);
         assert_eq!(page.resources().len(), 1);
         assert_eq!(page.resources()[0].url, "https://example.com/style.css");
-        assert_eq!(
-            page.resources()[0].resource_type,
-            ResourceType::Stylesheet
-        );
+        assert_eq!(page.resources()[0].resource_type, ResourceType::Stylesheet);
     }
 }

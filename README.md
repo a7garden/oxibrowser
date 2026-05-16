@@ -396,23 +396,6 @@ const { data } = await client.send('Page.captureScreenshot', {
 
 ---
 
-## 🗺 Roadmap
-
-### v0.7.0 (Current) ✅
-- [x] Mutation persistence across `evaluate()` calls
-- [x] `style` / `classList` as property accessors
-- [x] `textContent` / `innerHTML` read/write
-- [x] DOM mutation: `createElement`, `appendChild`, `removeChild`, `insertBefore`
-
-### v0.8.0 (Next)
-- [ ] Event bubbling and propagation
-- [ ] Full `textContent` with subtree text collection
-- [ ] HTML parsing in `innerHTML` setter
-- [ ] `window.location` setter (navigation)
-
-See [HEADLESS_ROADMAP.md](docs/HEADLESS_ROADMAP.md) for detailed planning.
-
----
 
 ## 🤝 Contributing
 

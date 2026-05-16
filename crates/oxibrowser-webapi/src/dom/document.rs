@@ -172,12 +172,7 @@ impl Document {
     }
 
     /// Match a simple selector (no commas, no descendant) against tag/attributes.
-    fn matches_simple(
-        &self,
-        tag: &str,
-        attributes: &[(String, String)],
-        selector: &str,
-    ) -> bool {
+    fn matches_simple(&self, tag: &str, attributes: &[(String, String)], selector: &str) -> bool {
         // Universal selector
         if selector == "*" {
             return true;
@@ -196,12 +191,8 @@ impl Document {
 
                     return if let Some(eq_pos) = attr_part.find('=') {
                         let attr_name = &attr_part[..eq_pos];
-                        let val = attr_part[eq_pos + 1..]
-                            .trim_matches('\'')
-                            .trim_matches('"');
-                        attributes.iter().any(|(k, v)| {
-                            k == attr_name && v == val
-                        })
+                        let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
+                        attributes.iter().any(|(k, v)| k == attr_name && v == val)
                     } else {
                         attributes.iter().any(|(k, _)| k == attr_part)
                     };
@@ -226,9 +217,9 @@ impl Document {
             let tag_part = &selector[..dot_pos];
             let class_part = &selector[dot_pos + 1..];
             return tag.eq_ignore_ascii_case(tag_part)
-                && attributes.iter().any(|(k, v)| {
-                    k == "class" && v.split_whitespace().any(|c| c == class_part)
-                });
+                && attributes
+                    .iter()
+                    .any(|(k, v)| k == "class" && v.split_whitespace().any(|c| c == class_part));
         }
 
         // Tag with ID: tag#id
@@ -402,17 +393,22 @@ impl Document {
                 NodeType::Element { tag, attributes } => {
                     let tag_lower = tag.to_lowercase();
                     // Skip invisible elements
-                    if matches!(tag_lower.as_str(), "script" | "style" | "link" | "meta" | "noscript") {
+                    if matches!(
+                        tag_lower.as_str(),
+                        "script" | "style" | "link" | "meta" | "noscript"
+                    ) {
                         return;
                     }
 
                     // WAI-ARIA heading support: role="heading" + aria-level
-                    let role = attributes.iter()
+                    let role = attributes
+                        .iter()
                         .find(|(k, _)| k == "role")
                         .map(|(_, v)| v.as_str())
                         .unwrap_or("");
                     if role == "heading" {
-                        let level = attributes.iter()
+                        let level = attributes
+                            .iter()
                             .find(|(k, _)| k == "aria-level")
                             .and_then(|(_, v)| v.parse::<usize>().ok())
                             .unwrap_or(2);
@@ -644,10 +640,13 @@ impl Document {
     /// Inserts the node into the node map but does NOT attach it to the tree.
     /// Call `tree_mut().append_child(parent, id)` separately.
     pub fn create_element_node(&mut self, id: NodeId, tag: &str) {
-        let node = Node::new(id, NodeType::Element {
-            tag: tag.to_string(),
-            attributes: Vec::new(),
-        });
+        let node = Node::new(
+            id,
+            NodeType::Element {
+                tag: tag.to_string(),
+                attributes: Vec::new(),
+            },
+        );
         self.nodes.insert(id, node);
     }
 
@@ -885,10 +884,7 @@ impl TreeSink for DomSink {
         let child = *target;
         let old_parent = self.tree.borrow().parent(child);
         if let Some(old_parent) = old_parent {
-            if let Some(c) = self.tree
-                .borrow_mut()
-                .children_mut(old_parent)
-            {
+            if let Some(c) = self.tree.borrow_mut().children_mut(old_parent) {
                 c.retain(|&id| id != child);
             }
         }
@@ -896,8 +892,7 @@ impl TreeSink for DomSink {
     }
 
     fn reparent_children(&self, parent: &Self::Handle, new_parent: &Self::Handle) {
-        let children: Vec<NodeId> =
-            self.tree.borrow().children(*parent).to_vec();
+        let children: Vec<NodeId> = self.tree.borrow().children(*parent).to_vec();
         for child in children {
             self.tree.borrow_mut().append_child(*new_parent, child);
         }
@@ -1155,10 +1150,22 @@ mod tests {
         let doc = Document::parse(html);
         let md = doc.to_markdown();
 
-        assert!(md.contains("# Main Title"), "should render aria-level=1 as #");
-        assert!(md.contains("### Section"), "should render aria-level=3 as ###");
-        assert!(md.contains("## Default Level"), "default level should be 2 (##)");
-        assert!(md.contains("Normal paragraph"), "should include normal text");
+        assert!(
+            md.contains("# Main Title"),
+            "should render aria-level=1 as #"
+        );
+        assert!(
+            md.contains("### Section"),
+            "should render aria-level=3 as ###"
+        );
+        assert!(
+            md.contains("## Default Level"),
+            "default level should be 2 (##)"
+        );
+        assert!(
+            md.contains("Normal paragraph"),
+            "should include normal text"
+        );
     }
 
     #[test]

@@ -768,17 +768,38 @@ async fn test_input_dispatch_key_event() {
 
     let _ = send_command(&mut sink, &mut ws, 1, "Page.enable", None).await;
 
-    let resp = send_command(&mut sink, &mut ws, 2, "Input.dispatchKeyEvent", Some(json!({
-        "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 0
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Input.dispatchKeyEvent",
+        Some(json!({
+            "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 0
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 2);
 
-    let resp = send_command(&mut sink, &mut ws, 3, "Input.dispatchKeyEvent", Some(json!({
-        "type": "keyUp", "key": "a", "code": "KeyA"
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        3,
+        "Input.dispatchKeyEvent",
+        Some(json!({
+            "type": "keyUp", "key": "a", "code": "KeyA"
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 3);
 
-    let resp = send_command(&mut sink, &mut ws, 4, "Input.insertText", Some(json!({"text": "hello"}))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        4,
+        "Input.insertText",
+        Some(json!({"text": "hello"})),
+    )
+    .await;
     assert_eq!(resp["id"], 4);
 
     server.shutdown();
@@ -789,19 +810,40 @@ async fn test_input_dispatch_mouse_event() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    let resp = send_command(&mut sink, &mut ws, 1, "Input.dispatchMouseEvent", Some(json!({
-        "type": "mouseMoved", "x": 100.0, "y": 200.0, "button": "none", "clickCount": 0
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mouseMoved", "x": 100.0, "y": 200.0, "button": "none", "clickCount": 0
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 1);
 
-    let resp = send_command(&mut sink, &mut ws, 2, "Input.dispatchMouseEvent", Some(json!({
-        "type": "mousePressed", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mousePressed", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 2);
 
-    let resp = send_command(&mut sink, &mut ws, 3, "Input.dispatchMouseEvent", Some(json!({
-        "type": "mouseReleased", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        3,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mouseReleased", "x": 100.0, "y": 200.0, "button": "left", "clickCount": 1
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 3);
 
     server.shutdown();
@@ -846,13 +888,27 @@ async fn test_network_delete_cookies() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    let _ = send_command(&mut sink, &mut ws, 1, "Network.setCookie", Some(json!({
-        "name": "temp_key", "value": "temp_val", "url": "http://example.com/"
-    }))).await;
+    let _ = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Network.setCookie",
+        Some(json!({
+            "name": "temp_key", "value": "temp_val", "url": "http://example.com/"
+        })),
+    )
+    .await;
 
-    let resp = send_command(&mut sink, &mut ws, 2, "Network.deleteCookies", Some(json!({
-        "name": "temp_key", "url": "http://example.com/"
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Network.deleteCookies",
+        Some(json!({
+            "name": "temp_key", "url": "http://example.com/"
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 2);
     assert_eq!(resp["result"]["success"], true);
 
@@ -869,16 +925,30 @@ async fn test_fetch_fulfill_request() {
     let (mut sink, mut ws) = connect_ws(addr).await;
 
     // Enable Fetch domain with wildcard pattern
-    let resp = send_command(&mut sink, &mut ws, 1, "Fetch.enable", Some(json!({
-        "patterns": [{"urlPattern": "http://*"}]
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Fetch.enable",
+        Some(json!({
+            "patterns": [{"urlPattern": "http://*"}]
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 1);
 
     // Navigate to example.com — this will trigger Fetch.requestPaused
     // because our pattern matches "http://example.com/"
-    let resp = send_command(&mut sink, &mut ws, 2, "Page.navigate", Some(json!({
-        "url": "http://example.com/"
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Page.navigate",
+        Some(json!({
+            "url": "http://example.com/"
+        })),
+    )
+    .await;
     // Navigation response (may succeed or fail depending on server)
     assert_eq!(resp["id"], 2);
     // Note: example.com may not be running, so navigation might fail.
@@ -896,12 +966,22 @@ async fn test_fetch_continue_request() {
     let _ = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
 
     // Try to continue a non-existent request — should return error
-    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.continueRequest", Some(json!({
-        "requestId": "nonexistent", "url": "http://example.com/"
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Fetch.continueRequest",
+        Some(json!({
+            "requestId": "nonexistent", "url": "http://example.com/"
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 2);
     // Should have an error because requestId not found
-    assert!(resp.get("error").is_some(), "expected error for unknown requestId");
+    assert!(
+        resp.get("error").is_some(),
+        "expected error for unknown requestId"
+    );
 
     let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
     server.shutdown();
@@ -913,17 +993,25 @@ async fn test_fetch_fulfill_unknown_request() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-
     let _ = send_command(&mut sink, &mut ws, 1, "Fetch.enable", None).await;
 
-    let resp = send_command(&mut sink, &mut ws, 2, "Fetch.fulfillRequest", Some(json!({
-        "requestId": "unknown-id", "statusCode": 200, "statusText": "OK",
-        "body": "test", "responseHeaders": []
-    }))).await;
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        2,
+        "Fetch.fulfillRequest",
+        Some(json!({
+            "requestId": "unknown-id", "statusCode": 200, "statusText": "OK",
+            "body": "test", "responseHeaders": []
+        })),
+    )
+    .await;
     assert_eq!(resp["id"], 2);
     // Should have an error because requestId not found
-    assert!(resp.get("error").is_some(), "expected error for unknown requestId in fulfillRequest");
-
+    assert!(
+        resp.get("error").is_some(),
+        "expected error for unknown requestId in fulfillRequest"
+    );
 
     let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
     server.shutdown();

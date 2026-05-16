@@ -6,10 +6,10 @@
 
 use crate::domains::fetch::FetchPattern;
 use crate::protocol::CdpEvent;
-use std::sync::RwLock;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -118,7 +118,10 @@ impl EventSender {
 
     /// Get Fetch interception patterns.
     pub fn get_fetch_patterns(&self) -> Vec<FetchPattern> {
-        self.fetch_patterns.read().map(|g| g.clone()).unwrap_or_default()
+        self.fetch_patterns
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Check if Page domain events are enabled.

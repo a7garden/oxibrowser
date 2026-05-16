@@ -201,14 +201,8 @@ async fn fulfill_request(params: Option<Value>, ctx: &DispatchContext) -> Domain
         .get("requestId")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let status_code = p
-        .get("statusCode")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(200) as u16;
-    let status_text = p
-        .get("statusText")
-        .and_then(|v| v.as_str())
-        .unwrap_or("OK");
+    let status_code = p.get("statusCode").and_then(|v| v.as_i64()).unwrap_or(200) as u16;
+    let status_text = p.get("statusText").and_then(|v| v.as_str()).unwrap_or("OK");
 
     // Extract response headers
     let mut headers = Vec::new();
@@ -360,10 +354,8 @@ pub fn emit_request_paused(
 
     let _ = registry.insert(request_id.to_string(), request);
 
-    let headers_json: serde_json::Map<String, serde_json::Value> = headers
-        .iter()
-        .map(|(k, v)| (k.clone(), json!(v)))
-        .collect();
+    let headers_json: serde_json::Map<String, serde_json::Value> =
+        headers.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
 
     events.send_fetch_event(
         "Fetch.requestPaused",
@@ -433,8 +425,14 @@ fn parse_fetch_pattern(value: &serde_json::Value) -> Option<FetchPattern> {
             .and_then(|v| v.as_str())
             .unwrap_or("*")
             .to_string(),
-        resource_type: obj.get("resourceType").and_then(|v| v.as_str()).map(String::from),
-        request_stage: obj.get("requestStage").and_then(|v| v.as_str()).map(String::from),
+        resource_type: obj
+            .get("resourceType")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        request_stage: obj
+            .get("requestStage")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
