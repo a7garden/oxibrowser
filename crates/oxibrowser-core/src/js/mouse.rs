@@ -11,7 +11,7 @@ pub fn js_hover(selector: &str) -> String {
             if (!el) return null;
             var rect = el.getBoundingClientRect
                 ? el.getBoundingClientRect()
-                : { left: 0, top: 0, width: 0, height: 0 };
+                : {{ left: 0, top: 0, width: 0, height: 0 }};
             var x = rect.left + rect.width / 2;
             var y = rect.top + rect.height / 2;
             el.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true, cancelable: true, clientX: x, clientY: y }}));
@@ -31,7 +31,7 @@ pub fn js_double_click(selector: &str) -> String {
             if (!el) return null;
             var rect = el.getBoundingClientRect
                 ? el.getBoundingClientRect()
-                : { left: 0, top: 0, width: 0, height: 0 };
+                : {{ left: 0, top: 0, width: 0, height: 0 }};
             var x = rect.left + rect.width / 2;
             var y = rect.top + rect.height / 2;
             el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: 1, detail: 1 }}));
@@ -53,7 +53,7 @@ pub fn js_right_click(selector: &str) -> String {
             if (!el) return null;
             var rect = el.getBoundingClientRect
                 ? el.getBoundingClientRect()
-                : { left: 0, top: 0, width: 0, height: 0 };
+                : {{ left: 0, top: 0, width: 0, height: 0 }};
             var x = rect.left + rect.width / 2;
             var y = rect.top + rect.height / 2;
             el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2, buttons: 2, detail: 1 }}));
@@ -117,10 +117,10 @@ pub fn js_drag(from_sel: &str, to_sel: &str) -> String {
             if (!fe || !te) return null;
             var fr = fe.getBoundingClientRect
                 ? fe.getBoundingClientRect()
-                : { left: 0, top: 0, width: 0, height: 0 };
+                : {{ left: 0, top: 0, width: 0, height: 0 }};
             var tr = te.getBoundingClientRect
                 ? te.getBoundingClientRect()
-                : { left: 0, top: 0, width: 0, height: 0 };
+                : {{ left: 0, top: 0, width: 0, height: 0 }};
             var sx = fr.left + fr.width / 2, sy = fr.top + fr.height / 2;
             var ex = tr.left + tr.width / 2, ey = tr.top + tr.height / 2;
             var hasDrag = typeof DragEvent !== 'undefined';

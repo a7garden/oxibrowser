@@ -113,7 +113,7 @@ impl Tab {
                 if (!el) return null;
                 var rect = el.getBoundingClientRect
                     ? el.getBoundingClientRect()
-                    : { left: 0, top: 0, width: 0, height: 0 };
+                    : {{ left: 0, top: 0, width: 0, height: 0 }};
                 var x = rect.left + rect.width / 2;
                 var y = rect.top + rect.height / 2;
                 el.dispatchEvent(new MouseEvent('click', {{
