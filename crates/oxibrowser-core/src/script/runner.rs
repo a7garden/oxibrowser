@@ -4,7 +4,7 @@
 //! - Variable interpolation (`${var}` in strings)
 //! - Error handling (abort/continue, retry, screenshots)
 //! - Conditional execution (`if`)
-//
+//!
 //! The runner is stateful: it maintains variables and error strategy across steps.
 //! `run()` takes `&mut self` so variables persist across calls.
 

@@ -2,414 +2,209 @@
 
 **Date**: 2026-05-16
 **Author**: AI agent
-**Status**: ✅ Implemented (v0.8.0)
+**Status**: Implemented (oxibrowser 0.9.0, oxios-kernel updated)
 
-## Problem Statement
+## Design Principle
 
-Oxios has **two browser paths** that do the same thing:
-
-```
-Path A: Agent → BrowserTool → oxibrowser_core::Browser/Tab  (in-process, stateful)
-Path B: Agent → ExecTool → "oxibrowser fetch ..." → new Browser  (subprocess, stateless)
-```
-
-This is wrong. Two `Browser` instances, two code paths, two maintenance burdens.
-For the Agent OS, there should be **one path only**.
-
----
-
-## The One Path
+**One Browser. One Tool. One Path.**
 
 ```
 Agent → BrowserTool → oxibrowser_core::Browser (singleton)
-                          └── Tab Pool (per-agent or per-task)
+                          └── Tab (per-agent, stateful)
                                 ├── browse(url)       — one-shot read
                                 ├── goto/click/fill   — interactive
                                 └── run_script(yaml)  — batch scenarios
 ```
 
-**Everything** goes through `BrowserTool`. No subprocess. No CLI from agents.
-
-The `oxibrowser` CLI binary becomes a **developer tool** — humans use it to debug and test.
-Agents never call it.
+No subprocess. No CLI from agents. The `oxibrowser` CLI is a developer tool only.
 
 ---
 
-## Architecture
+## What Was Done
+
+### 1. oxibrowser-core 0.8.0 → 0.9.0
+
+0.9.0 adds `oxibrowser_core::script` module:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Oxios Kernel                                  │
-│                                                                     │
-│  KernelHandle                                                       │
-│    └── BrowserApi                                                   │
-│          └── Browser (singleton)           ← ONE instance           │
-│                └── CookieJar (shared)      ← persistent cookies     │
-│                      │                                              │
-│                      ├── Tab 1  (Agent A's session)                 │
-│                      ├── Tab 2  (Agent B's session)                 │
-│                      └── Tab 3  (script execution)                  │
-│                                                                     │
-│  Agent Tool Registry                                                │
-│    └── BrowserTool ──────────────────→ BrowserApi.browser()         │
-│          │                                ↑                         │
-│          │  action: browse                │                         │
-│          │  action: goto / click / fill   │                         │
-│          │  action: run_script            │  ← NEW                  │
-│          │  action: screenshot / evaluate │                         │
-│          └────────────────────────────────┘                         │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│  oxibrowser CLI (developer tool only — NOT in agent tool chain)     │
-│                                                                     │
-│  Human: oxibrowser fetch <url>                                      │
-│  Human: oxibrowser browse <url> --click "#btn" --extract ".result"  │
-│  Human: oxibrowser run script.yaml          ← test scripts          │
-│  Human: oxibrowser serve                   ← CDP debugging          │
-│                                                                     │
-│  Never called by agents. No .programs/oxibrowser registration.      │
-└─────────────────────────────────────────────────────────────────────┘
+oxibrowser-core/src/script/
+  mod.rs          — pub re-exports
+  parser.rs       — YAML → Vec<Step>
+  runner.rs       — ScriptRunner executes steps on a Tab
+  types.rs        — Step enum, ScriptConfig, ScriptResult, StepResult
 ```
 
----
+ScriptRunner handles:
+- Variable interpolation (`${var}` → string replacement)
+- Error handling (abort/continue, retry with count + delay, auto-screenshot)
+- Conditional execution (`if` with JS expression evaluated via `tab.evaluate()`)
+- All Tab API actions (goto, click, fill, type, wait, extract, evaluate, etc.)
 
-## What Changes
-
-### 1. BrowserTool: Add `run_script` Action
-
-The only missing piece. Everything else already works.
+### 2. BrowserTool: `run_script` Action Added
 
 ```rust
-// In BrowserTool::execute()
-
 "run_script" => {
-    let yaml = param_str(&params, "script", "run_script requires 'script'")?;
-    let tab = self.get_or_create_tab().await.map_err(|e| e.to_string())?;
-    
-    // Parse + execute YAML script on the existing Tab
-    // (no new Browser, no subprocess)
-    let runner = ScriptRunner::new(tab);
-    let result = runner.run(yaml).await.map_err(|e| e.to_string())?;
-    
-    Ok(AgentToolResult::success(serde_json::to_string_pretty(&result).unwrap()))
+    let yaml = param_str(&params, "script", ...)?;
+    let tab = self.get_or_create_tab().await?;
+    let mut runner = oxibrowser_core::script::ScriptRunner::new(&tab);
+    let result = runner.run(yaml).await?;
+    // result: ScriptResult { steps, vars, success, duration_ms }
 }
 ```
 
-Agent usage:
-```json
-{
-  "action": "run_script",
-  "script": "name: Login\nsteps:\n  - goto: https://example.com/login\n  - fill: { selector: '#user', value: admin }\n  - click: button[type=submit]\n  - wait: .dashboard\n  - extract: { selector: '.info', all: true }"
-}
-```
+One tool-call = one complex scenario. Tab stays alive between calls.
 
-One tool-call. One Tab. One Browser. Result comes back as JSON.
+### 3. `.programs/oxibrowser` Deleted
 
-### 2. ScriptRunner in oxibrowser-core
+Agents should never call `oxibrowser` CLI via ExecTool. BrowserTool provides
+all browser capabilities in-process. The program registration was a redundant
+second path.
 
-New module. Shared by BrowserTool (agent path) and CLI `run` command (dev path).
+### 4. CLI Remains (Developer Tool)
 
-```
-oxibrowser-core/src/
-  script/
-    mod.rs          # pub mod + re-exports
-    parser.rs       # YAML → Vec<Step>
-    runner.rs       # Step execution on Tab
-    types.rs        # Step enum, ScriptConfig, ScriptResult
-```
+The `oxibrowser` binary exists for human debugging only:
+- `oxibrowser run <yaml>` — test scripts (uses ScriptRunner from core)
+- `oxibrowser fetch <url>` — quick URL dump
+- `oxibrowser browse <url>` — interactive with flags
+- `oxibrowser serve` — CDP server for DevTools
 
-```rust
-// oxibrowser-core/src/script/runner.rs
-
-pub struct ScriptRunner {
-    tab: Tab,
-    vars: HashMap<String, Value>,
-    on_error: ErrorStrategy,
-}
-
-impl ScriptRunner {
-    pub fn new(tab: Tab) -> Self { ... }
-    
-    /// Parse YAML and execute all steps on the Tab.
-    pub async fn run(&mut self, yaml: &str) -> Result<ScriptResult> {
-        let script = parse_script(yaml)?;
-        let mut results = Vec::new();
-        for (i, step) in script.steps.iter().enumerate() {
-            match self.execute_step(step).await {
-                Ok(r) => results.push(r),
-                Err(e) => match &self.on_error.action {
-                    ErrorAction::Abort => return Err(e.into_step_error(i)),
-                    ErrorAction::Continue => results.push(StepResult::error(i, &e)),
-                },
-            }
-        }
-        Ok(ScriptResult { steps: results, vars: self.vars.clone() })
-    }
-}
-```
-
-### 3. Remove .programs/oxibrowser
-
-Delete `.programs/oxibrowser/program.toml` and `.programs/oxibrowser/SKILL.md`.
-
-Agents use `BrowserTool` directly (kernel-registered). They should never shell out
-to `oxibrowser` via ExecTool — that would create a second Browser instance.
-
-### 4. CLI: Developer Tool Only
-
-The `oxibrowser` binary stays but with a clear scope boundary:
-
-```
-oxibrowser SUBCOMMAND
-
-SUBCOMMANDS:
-  run <yaml>      Run a script file (uses ScriptRunner from core)
-  fetch <url>     One-shot URL fetch (dev debugging)
-  browse <url>    Interactive browse with flags (dev debugging)
-  serve           Start CDP server (devtools integration)
-  version         Print version
-
-REMOVED (not needed — agents use BrowserTool):
-  eval            → use BrowserTool action "evaluate"
-  extract         → use BrowserTool action "query_all"
-  batch           → use BrowserTool action "run_script"
-```
-
-The CLI creates its own `Browser` instance (it's a standalone process).
-This is fine — it's a dev tool, not part of the agent runtime.
-
-### 5. File Structure
-
-```
-oxibrowser-core/src/
-  script/              ← NEW
-    mod.rs
-    parser.rs
-    runner.rs
-    types.rs
-
-oxibrowser/src/
-  main.rs              ← Simplified (dev tool only)
-  cmd/
-    run.rs             ← oxibrowser run (uses core::ScriptRunner)
-    fetch.rs
-    browse.rs
-    serve.rs
-
-oxios-kernel/src/tools/browser/
-  browser_tool.rs      ← Add run_script action
-
-DELETE:
-  oxios/.programs/oxibrowser/   ← Agents don't need this program
-```
-
----
-
-## Script DSL
-
-### YAML Schema
-
-```yaml
-name: <string>
-timeout: <ms>              # default: 30000
-
-on_error:
-  action: abort | continue  # default: abort
-  screenshot: <bool>        # default: false
-  retry:
-    count: <n>
-    delay_ms: <ms>
-
-steps:
-  - <Step>
-```
-
-### Step Types
-
-```yaml
-# Navigation
-- goto: <url>
-  wait: <selector>
-- back
-- forward
-- reload
-- post:
-    url: <url>
-    body: <string>
-    content_type: <string>
-
-# Interaction
-- click: <selector>
-- dbl-click: <selector>
-- right-click: <selector>
-- hover: <selector>
-- fill:
-    selector: <selector>
-    value: <value>
-- type:
-    selector: <selector>
-    text: <string>
-- clear: <selector>
-- check: <selector>
-- uncheck: <selector>
-- select:
-    selector: <selector>
-    value: <value>
-- press: <keys>
-- scroll:
-    x: <px>
-    y: <px>
-- drag:
-    from: <selector>
-    to: <selector>
-
-# Content
-- evaluate: <expression>
-  await: <bool>
-  save: <var_name>
-- wait: <selector>
-  timeout: <ms>
-- extract:
-    selector: <selector>
-    all: <bool>
-    links: <bool>
-    text: <bool>
-  save: <var_name>
-- content:
-    format: markdown | html | text | json
-- screenshot:
-    file: <path>
-    width: <px>
-- load-resources
-
-# Flow Control
-- set:
-    <name>: <value>
-- echo: <message>
-- sleep: <ms>
-- if:
-    expression: <js_expr>    # executed via tab.evaluate()
-    then:
-      - <steps>
-    else:
-      - <steps>
-- retry:
-    count: <n>
-    delay: <ms>
-    steps:
-      - <steps>
-
-# Session
-- new-tab:
-    url: <url>
-- close-tab
-```
-
-### Variables
-
-```yaml
-- set:
-    base_url: "https://example.com"
-- goto: "${base_url}/login"           # string interpolation
-- evaluate: "document.querySelector('.user').textContent"
-  save: username                      # save result to variable
-- echo: "Hello ${username}"           # use saved variable
-```
-
-Rules:
-- `${...}` is pure string replacement, done by ScriptRunner (not JS).
-- `$$` escapes to literal `$`.
-- Variables never inserted into JS expressions — only into string fields.
-
-### if Expression
-
-```yaml
-- if:
-    expression: "document.querySelector('.error') !== null"
-    then:
-      - screenshot:
-          file: "./error.png"
-      - echo: "Error found"
-```
-
-Execution: `tab.evaluate(expression)`, result truthiness determines branch.
-Runs in the same JS context as all other evaluate calls.
-
----
-
-## Error Handling
-
-```yaml
-on_error:
-  action: abort | continue    # default: abort
-  screenshot: true            # auto-screenshot on error
-  retry:
-    count: 3
-    delay_ms: 500
-```
-
-Screenshot path on error: `error_step{N}_{timestamp}.png`
-
-JSON error output:
-```json
-{
-  "error": "ElementNotFound",
-  "message": "button#submit not found",
-  "step": 3,
-  "step_name": "click",
-  "error_screenshot": "error_step3_20260516_143052.png"
-}
-```
+Agents never touch it.
 
 ---
 
 ## BrowserTool — Complete Action List
 
-After adding `run_script`, BrowserTool has **one action for every browser need**:
-
-| Action | Description | One-shot? |
-|--------|-------------|-----------|
-| `browse` | URL → Markdown | ✓ |
-| `goto` | Navigate to URL | |
+| Action | Description | State |
+|--------|-------------|-------|
+| `browse` | URL → Markdown | one-shot |
+| `goto` | Navigate | |
 | `back` | History back | |
 | `forward` | History forward | |
 | `reload` | Reload page | |
 | `post` | POST request | |
 | `click` | Click element | |
-| `type` | Type text into element | |
+| `type` | Type text | |
 | `press_key` | Press key combo | |
 | `evaluate` | Run JS | |
-| `evaluate_await` | Run JS, await Promise | |
-| `content` | Get page content | |
-| `query_all` | Query elements by selector | |
+| `evaluate_await` | Run JS + await Promise | |
+| `content` | Page content | |
+| `query_all` | Query by selector | |
 | `wait_for` | Wait for element | |
 | `load_resources` | Load sub-resources | |
-| `screenshot` | Capture PNG | |
-| `run_script` | Execute YAML scenario | ✓ (NEW) |
+| `screenshot` | PNG screenshot | |
+| `run_script` | YAML scenario | NEW |
 | `close` | Close tab | |
-
-**Agent decision tree**:
-```
-Need to read a URL?           → browse
-Need to interact with a page?  → goto → click → fill → ...
-Need a complex flow?           → run_script (one call)
-```
-
-No subprocess. No CLI. No second Browser instance.
 
 ---
 
-## Summary
+## Script DSL Reference
 
-| Before | After |
-|--------|-------|
-| Two Browser instances (kernel + CLI subprocess) | One Browser singleton |
-| BrowserTool for interactive, CLI for batch | BrowserTool for everything |
-| Agents call `oxibrowser` via ExecTool | Agents never call CLI |
-| Script logic only in CLI binary | ScriptRunner in `oxibrowser-core` (shared) |
-| `.programs/oxibrowser/` registered | Deleted (not needed) |
-| 4 usage models (script/REPL/pipeline/split) | 1 usage model (BrowserTool) |
+### YAML Schema
 
-**One Browser. One Tool. One Path.**
+```yaml
+name: <string>
+timeout: <ms>
+
+on_error:
+  action: abort | continue   # default: abort
+  screenshot: true            # auto-screenshot on error
+  retry:
+    count: 3
+    delay_ms: 500
+
+steps:
+  - step_type: goto
+    data:
+      goto: "https://example.com"
+      wait: ".loaded"
+  - step_type: fill
+    data:
+      selector: "#username"
+      value: admin
+  - step_type: click
+    data:
+      click: "button[type=submit]"
+  - step_type: wait
+    data:
+      wait: ".dashboard"
+      timeout: 10000
+  - step_type: evaluate
+    data:
+      evaluate: "document.querySelector('.user').textContent"
+      save: username
+  - step_type: extract
+    data:
+      selector: ".nav-item"
+      all: true
+      save: nav_items
+  - step_type: echo
+    data:
+      echo: "Logged in as ${username}"
+  - step_type: screenshot
+    data:
+      file: "./dashboard.png"
+      width: 1280
+```
+
+### Step Types
+
+| Step | Key Fields |
+|------|-----------|
+| `goto` | `goto: url`, `wait: selector` |
+| `back` / `forward` / `reload` | — |
+| `post` | `url`, `body`, `content_type` |
+| `click` / `dbl-click` / `right-click` / `hover` | `click: selector` |
+| `fill` | `selector`, `value` |
+| `type` | `selector`, `text` |
+| `clear` / `check` / `uncheck` | `selector` |
+| `select` | `selector`, `value` |
+| `press` | `press: key` |
+| `scroll` | `x`, `y` |
+| `drag` | `from`, `to` |
+| `evaluate` | `evaluate: js`, `await: bool`, `save: var` |
+| `wait` | `wait: selector`, `timeout: ms` |
+| `extract` | `selector`, `all`, `links`, `text`, `save: var` |
+| `content` | `format: markdown\|html\|text\|json`, `save: var` |
+| `screenshot` | `file: path`, `width: px` |
+| `load_resources` | — |
+| `set` | `key: value` (flattened) |
+| `echo` | `echo: message` |
+| `sleep` | `sleep: ms` |
+| `if` | `expression: js`, `then: [steps]`, `else: [steps]` |
+| `retry` | `count`, `delay: ms`, `steps: [steps]` |
+| `new-tab` | `url` (optional) |
+| `close-tab` | — |
+
+### Variables
+
+- `${var}` — string interpolation (done by ScriptRunner, not JS)
+- `$$` — literal `$`
+- `save: var_name` on evaluate/extract/content steps
+- Variables never injected into JS expressions
+
+### if Expression
+
+- Executed via `tab.evaluate(expression)`
+- Truthiness: null/false/0/"" → else branch, everything else → then branch
+- Same JS context as all evaluate calls
+
+---
+
+## Agent Decision Tree
+
+```
+Need to read a URL?              → browse
+Need to interact with a page?    → goto → click → fill → ...
+Need a complex multi-step flow?  → run_script (one call)
+```
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `oxios-kernel/Cargo.toml` | `oxibrowser-core` 0.8.0 → 0.9.0 |
+| `oxios-kernel/.../browser_tool.rs` | Added `run_script` action |
+| `oxios-kernel/.../browser/mod.rs` | Updated module docs |
+| `.programs/oxibrowser/` | Deleted (not needed) |
