@@ -1,34 +1,40 @@
-# Progress
+# Progress: OXI.getStructuredPage + Markdown WAI-ARIA Heading Support
 
-## Status
-In Progress — SSRF/TOCTOU fixes applied, build passes
+## Status: ✅ COMPLETE
 
-## Tasks
-- [x] Fix 1: Inject `data-oxi-node-id` attribute in `create_element_object` so `callFunctionOn` querySelector works
-- [x] Fix 2: Use X coordinate in `elementFromPoint` for element approximation
-- [x] Fix 3: Capture current URL in `Page.reload` before emitting `requestWillBeSent`
-- [x] Fix R2-1: Network.getAllCookies uses actual cookie same_site attribute instead of hardcoded "None"
-- [x] Fix R2-2: Added SAFETY comment to callFunctionOn JS injection documenting IIFE containment
-- [x] Fix R2-3: Added TODO(#sop) comment for localStorage same-origin policy check
-- [x] Fix R2-4: Simplified duplicate returnByValue branches in Runtime.evaluate with TODO for future objectId support
-- [x] Pre-existing fix: Resolved create_context call-site mismatch (cookie_jar_arc parameter) and register_document_object signature mismatch
-- [x] Fix R3: Full document.cookie integration with CookieJar — getter reads from session CookieJar, setter writes to it
-- [x] Fix R2-SSRF-1: Custom redirect policy validates every redirect target against SSRF IP filter (prevents redirect bypass)
-- [x] Fix R2-SSRF-2: Added missing IPv6 ranges (multicast ff00::/8, unspecified ::, discard 100::/64, NAT64 64:ff9b::/96)
-- [x] Fix R2-SSRF-3: Added add_block_v6/add_allow_v6 methods for custom IPv6 rules
-- [x] Fix R2-SSRF-4: Added fail_closed option for DNS error handling (fail-open by default, configurable)
-- [x] Fix R2-SSRF-5: TOCTOU documented with comments — reqwest DNS TOCTOU limitation noted in client.rs and ip_filter.rs
+## Changes Made
 
-## Files Changed
-- `crates/oxibrowser-core/src/js/runtime.rs` — Added `data-oxi-node-id` injection in `create_element_object`; improved `elementFromPoint` X/Y coordinate handling; added TODO(#sop) same-origin comment for localStorage; fixed create_context call sites and register_document_object signature for cookie_jar_arc; **added SetCookieJar JsCommand variant, set_cookie_jar method on JsRuntime, CookieJar-aware cookie getter using cookies_for_url(), cookie setter using store(), updated document.cookie accessor with both getter and setter**
-- `crates/oxibrowser-cdp/src/domains/page.rs` — Fixed reload to capture URL before events
-- `crates/oxibrowser-cdp/src/domains/runtime.rs` — Updated comment in `callFunctionOn` noting `data-oxi-node-id` is now injected; added SAFETY comment for JS injection; simplified duplicate returnByValue branches in evaluate()
-- `crates/oxibrowser-cdp/src/domains/network.rs` — getAllCookies now uses actual `c.same_site` attribute via `oxibrowser_core::network::cookie::SameSite` enum
-- `crates/oxibrowser-core/src/session.rs` — Added `js_runtime.set_cookie_jar(cookie_jar.clone())` call in Session::new() to wire CookieJar into JS runtime
-- `crates/oxibrowser-core/src/network/client.rs` — Replaced `Policy::limited(10)` with `Policy::custom()` that validates every redirect URL against SSRF filter; extracted `check_url_ssrf()` standalone function; `ip_filter` field changed to `Arc<IpFilter>` for sharing with redirect closure; added TOCTOU limitation documentation
-- `crates/oxibrowser-core/src/network/ip_filter.rs` — Added missing IPv6 block ranges (ff00::/8, ::/128, 100::/64, 64:ff9b::/96); added `add_block_v6()`/`add_allow_v6()` methods; added `fail_closed` field with `set_fail_closed()`/`is_fail_closed()`; updated `is_hostname_allowed()` with fail-closed/fail-open logic and TOCTOU documentation; added 8 new unit tests
+### Part A: Markdown WAI-ARIA Heading Support
+- **File**: `crates/oxibrowser-webapi/src/dom/document.rs`
+- Changed `NodeType::Element { tag, .. }` to `{ tag, attributes }` pattern to access attrs
+- Added `role="heading"` check with `aria-level` support before tag-based heading matching
+- Default level is 2 when `aria-level` is not specified
+- Level is clamped to 1-6 range
+- Added 2 unit tests: `test_markdown_aria_heading`, `test_markdown_style_script_skipped`
 
-## Notes
-- Reverted unrelated incomplete changes from another agent in `network.rs`, `client.rs`, `ip_filter.rs` that were causing build failures
-- Fixed pre-existing build breakage: `create_context` call sites were passing wrong number of arguments after cookie_jar_arc was partially added
-- All 18 tests pass, build succeeds with `cargo build --workspace`
+### Part B: DomSnapshot Structured Data Extraction
+- **File**: `crates/oxibrowser-core/src/js/dom_snapshot.rs`
+- Added `headings()` — extracts `(level, text)` for `<h1>`-`<h6>` and `role="heading"` elements
+- Added `links()` — extracts `(text, href)` for all `<a>` elements
+- Added `meta_tags()` — extracts `name/property → content` for `<meta>` elements
+- Added helper `deep_text_content()` and `collect_text_recursive()` for recursive text extraction
+- Added 5 unit tests covering headings, ARIA headings, links, meta, and empty page
+
+### Part C: OXI.getStructuredPage CDP Command
+- **File**: `crates/oxibrowser-cdp/src/domains/oxi.rs`
+- Added `getStructuredPage` to the `handle()` match
+- Returns JSON with `url`, `title`, `headings[]`, `links[]`, `meta{}`, `linkCount`, `headingCount`
+- Supports optional `maxLinks` param (default: 200)
+
+## Test Results
+- `cargo test --workspace`: 279 passed, 0 failed
+- `cargo clippy --workspace`: 0 warnings
+
+## New Tests Added
+1. `test_headings_extraction` — verifies h1/h2/h3 in correct order
+2. `test_headings_with_aria_role` — verifies role="heading" + aria-level
+3. `test_links_extraction` — verifies links with/without href
+4. `test_meta_tags_extraction` — verifies name/property meta extraction
+5. `test_structured_data_empty_page` — verifies empty snapshot returns empty
+6. `test_markdown_aria_heading` — verifies ARIA headings in markdown output
+7. `test_markdown_style_script_skipped` — verifies invisible elements skipped

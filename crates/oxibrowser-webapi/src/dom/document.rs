@@ -399,12 +399,30 @@ impl Document {
                         md.push(' ');
                     }
                 }
-                NodeType::Element { tag, .. } => {
+                NodeType::Element { tag, attributes } => {
                     let tag_lower = tag.to_lowercase();
                     // Skip invisible elements
                     if matches!(tag_lower.as_str(), "script" | "style" | "link" | "meta" | "noscript") {
                         return;
                     }
+
+                    // WAI-ARIA heading support: role="heading" + aria-level
+                    let role = attributes.iter()
+                        .find(|(k, _)| k == "role")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("");
+                    if role == "heading" {
+                        let level = attributes.iter()
+                            .find(|(k, _)| k == "aria-level")
+                            .and_then(|(_, v)| v.parse::<usize>().ok())
+                            .unwrap_or(2);
+                        let hashes = "#".repeat(level.clamp(1, 6));
+                        md.push_str(&format!("\n{} ", hashes));
+                        self.write_children_text(node_id, md);
+                        md.push_str("\n\n");
+                        return;
+                    }
+
                     match tag_lower.as_str() {
                         "h1" => {
                             md.push_str("\n# ");
@@ -1094,5 +1112,36 @@ mod tests {
         let doc = Document::parse(html);
         let iframes = doc.extract_iframe_srcs();
         assert!(iframes.is_empty(), "should find no iframes");
+    }
+
+    #[test]
+    fn test_markdown_aria_heading() {
+        let html = r#"<html><body>
+            <div role="heading" aria-level="1">Main Title</div>
+            <span role="heading" aria-level="3">Section</span>
+            <div role="heading">Default Level</div>
+            <p>Normal paragraph</p>
+        </body></html>"#;
+        let doc = Document::parse(html);
+        let md = doc.to_markdown();
+
+        assert!(md.contains("# Main Title"), "should render aria-level=1 as #");
+        assert!(md.contains("### Section"), "should render aria-level=3 as ###");
+        assert!(md.contains("## Default Level"), "default level should be 2 (##)");
+        assert!(md.contains("Normal paragraph"), "should include normal text");
+    }
+
+    #[test]
+    fn test_markdown_style_script_skipped() {
+        let html = r#"<html><head><style>body{color:red}</style></head><body>
+            <p>Content</p>
+            <script>alert('xss')</script>
+        </body></html>"#;
+        let doc = Document::parse(html);
+        let md = doc.to_markdown();
+
+        assert!(!md.contains("color:red"), "should not include CSS");
+        assert!(!md.contains("alert"), "should not include JS");
+        assert!(md.contains("Content"), "should include visible text");
     }
 }

@@ -2068,6 +2068,47 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("TextDecoder"), 0, td_ctor);
 
+    // --- Array.from() polyfill ---
+    // boa_engine doesn't expose Array.from yet, so we inject it.
+    let array_from_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let source = args.first().cloned().unwrap_or(JsValue::undefined());
+
+            // Case 1: Already an array → shallow copy
+            if let Some(obj) = source.as_object() {
+                if let Ok(arr) = JsArray::from_object(obj.clone()) {
+                    if let Ok(len) = arr.length(ctx) {
+                        let items: Vec<JsValue> = (0..len)
+                            .filter_map(|i| arr.at(i as i64, ctx).ok())
+                            .collect();
+                        return Ok(JsArray::from_iter(items, ctx).into());
+                    }
+                }
+
+                // Case 2: Array-like object (has .length + indexed props)
+                if let Ok(len_val) = obj.get(js_string!("length"), ctx) {
+                    if let Some(len) = len_val.as_number() {
+                        let items: Vec<JsValue> = (0..len as u32)
+                            .filter_map(|i| obj.get(i, ctx).ok())
+                            .collect();
+                        return Ok(JsArray::from_iter(items, ctx).into());
+                    }
+                }
+            }
+
+            // Case 3: Single value → wrap in array
+            if !source.is_undefined() {
+                return Ok(JsArray::from_iter([source], ctx).into());
+            }
+
+            Ok(JsArray::new(ctx).into())
+        })
+    };
+    let _ = context.register_global_callable(js_string!("ArrayFrom"), 1, array_from_fn);
+    let _ = context.eval(Source::from_bytes(
+        "if (typeof Array.from === 'undefined') { Array.from = ArrayFrom; delete globalThis.ArrayFrom; }"
+    ));
+
     (context, job_queue)
 }
 
@@ -2121,7 +2162,7 @@ fn register_document_object(
                 if let Ok(url) = url::Url::parse(&s.url) {
                     let guard = cookie_jar_for_get.read();
                     if let Some(ref jar) = *guard {
-                        let cookies = jar.read().cookies_for_url(&url);
+                        let cookies = jar.read().cookies_for_js(&url);
                         return Ok(JsValue::from(JsString::from(cookies.as_str())));
                     }
                 }
@@ -3158,6 +3199,73 @@ fn create_element_object(
         })
     };
 
+    // element.querySelector(selector)
+    let qs_dom = dom_snapshot_arc.clone();
+    let qs_mutations = mutations.clone();
+    let qs_root_id = node.id;
+    let element_qs_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = qs_dom.read();
+            if let Some(ref snapshot) = *dom {
+                if let Some(match_id) = snapshot.query_selector_from(qs_root_id, &selector) {
+                    if let Some(match_node) = snapshot.nodes.get(&match_id) {
+                        return Ok(create_element_object(
+                            snapshot,
+                            match_node,
+                            ctx,
+                            &qs_mutations,
+                            &qs_dom,
+                        ));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    // element.querySelectorAll(selector)
+    let qsa_dom = dom_snapshot_arc.clone();
+    let qsa_mutations = mutations.clone();
+    let qsa_root_id = node.id;
+    let element_qsa_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let dom = qsa_dom.read();
+            if let Some(ref snapshot) = *dom {
+                let ids = snapshot.query_selector_all_from(qsa_root_id, &selector);
+                let js_values: Vec<JsValue> = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        snapshot.nodes.get(&id).map(|n| {
+                            create_element_object(
+                                snapshot,
+                                n,
+                                ctx,
+                                &qsa_mutations,
+                                &qsa_dom,
+                            )
+                        })
+                    })
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
+            let arr = JsArray::from_iter(Vec::<JsValue>::new(), ctx);
+            Ok(arr.into())
+        })
+    };
+
     // value getter
     let value_val = node
         .attributes
@@ -3315,6 +3423,8 @@ fn create_element_object(
         .function(set_attribute_fn, js_string!("setAttribute"), 2)
         .function(append_child_obj_fn, js_string!("appendChild"), 1)
         .function(remove_child_obj_fn, js_string!("removeChild"), 1)
+        .function(element_qs_fn, js_string!("querySelector"), 1)
+        .function(element_qsa_fn, js_string!("querySelectorAll"), 1)
         .property(js_string!("__nodeId"), JsValue::from(node.id), Attribute::all())
         .accessor(
             js_string!("value"),
@@ -4513,6 +4623,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_element_query_selector() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div><p class="intro">Hello</p><a href="/link">click</a></div><a href="/other">other</a></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        // element.querySelector should find child element
+        let result = rt
+            .evaluate("document.querySelector('div').querySelector('a').href")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("/link".into())));
+
+        // element.querySelector should not find elements outside subtree
+        let result = rt
+            .evaluate("document.querySelector('div').querySelector('span')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn test_element_query_selector_all() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><ul><li>a</li><li>b</li></ul><li>c</li></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        // element.querySelectorAll should find only descendants
+        let result = rt
+            .evaluate("document.querySelector('ul').querySelectorAll('li').length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(serde_json::json!(2)));
+
+        // document.querySelectorAll should find all
+        let result = rt
+            .evaluate("document.querySelectorAll('li').length")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(serde_json::json!(3)));
+    }
+
+    #[tokio::test]
+    async fn test_element_query_selector_class() {
+        let mut rt = JsRuntime::new();
+        let html = r#"<html><body><div class="outer"><span class="inner">yes</span><span class="other">no</span></div></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("document.querySelector('.outer').querySelector('.inner').textContent")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("yes".into())));
+    }
+
+    #[tokio::test]
     async fn test_document_query_selector_all() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>";
@@ -5136,6 +5312,29 @@ mod tests {
         let mut rt = JsRuntime::new();
         let result = rt.evaluate("new URLSearchParams('foo=bar&baz=1').get('foo')").await.unwrap();
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_array_from() {
+        let mut rt = JsRuntime::new();
+
+        // Array.from with array
+        let result = rt.evaluate("Array.from([1, 2, 3]).length").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), 3);
+
+        // Array.from with array-like object
+        let result = rt
+            .evaluate("Array.from({length: 2, 0: 'a', 1: 'b'}).join(',')")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), "a,b");
+
+        // Array.from with single string value → iterates chars (array-like with .length)
+        let result = rt.evaluate("Array.from('hello').length").await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), 5);
     }
 }
 

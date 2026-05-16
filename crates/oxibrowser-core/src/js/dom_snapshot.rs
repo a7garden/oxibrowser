@@ -170,6 +170,42 @@ impl DomSnapshot {
         results
     }
 
+    /// Query selector scoped to a subtree rooted at `root_id`.
+    /// Skips the root node itself — only searches descendants.
+    pub fn query_selector_from(&self, root_id: u32, selector: &str) -> Option<u32> {
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if id != root_id && self.node_matches_selector(node, selector) {
+                    return Some(id);
+                }
+                for &child in node.children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        None
+    }
+
+    /// Query all matching nodes scoped to a subtree rooted at `root_id`.
+    /// Skips the root node itself — only searches descendants.
+    pub fn query_selector_all_from(&self, root_id: u32, selector: &str) -> Vec<u32> {
+        let mut results = Vec::new();
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if id != root_id && self.node_matches_selector(node, selector) {
+                    results.push(id);
+                }
+                for &child in node.children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        results.reverse();
+        results
+    }
+
     /// Get an element by its ID attribute.
     pub fn get_element_by_id(&self, id: &str) -> Option<u32> {
         self.nodes
@@ -219,6 +255,104 @@ impl DomSnapshot {
         }
         results.reverse();
         results
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured data extraction (for OXI.getStructuredPage)
+    // -----------------------------------------------------------------------
+
+    /// Extract all headings from the document.
+    ///
+    /// Returns a list of `(level, text)` tuples where level is 1–6.
+    /// Includes both `<h1>`–`<h6>` tags and elements with `role="heading"`.
+    pub fn headings(&self) -> Vec<(u8, String)> {
+        let heading_tags = ["h1", "h2", "h3", "h4", "h5", "h6"];
+        let mut result = Vec::new();
+        let mut stack = vec![self.root_id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.node_type == 1 {
+                    let tag_lower = node.tag.to_lowercase();
+                    if let Some(idx) = heading_tags.iter().position(|t| *t == tag_lower) {
+                        result.push((idx as u8 + 1, self.deep_text_content(node.id)));
+                    } else if node.attributes.get("role").map(|s| s.as_str()) == Some("heading") {
+                        let level: u8 = node.attributes
+                            .get("aria-level")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(2);
+                        result.push((level.clamp(1, 6), self.deep_text_content(node.id)));
+                    }
+                }
+                for &child in node.children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        // No reverse needed: children are pushed in reverse so first child
+        // is popped first, producing correct document order.
+        result
+    }
+
+    /// Extract all links from the document.
+    ///
+    /// Returns `(text, href)` pairs.
+    pub fn links(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        let mut stack = vec![self.root_id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.node_type == 1 && node.tag.to_lowercase() == "a" {
+                    let href = node.attributes.get("href").cloned().unwrap_or_default();
+                    let text = self.deep_text_content(node.id);
+                    result.push((text, href));
+                }
+                for &child in node.children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        // No reverse: children pushed in reverse → first child popped first → document order.
+        result
+    }
+
+    /// Extract meta tags from the document.
+    ///
+    /// Returns name/property → content pairs (e.g. description, og:title).
+    pub fn meta_tags(&self) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+        for node in self.nodes.values() {
+            if node.node_type == 1 && node.tag.to_lowercase() == "meta" {
+                let name = node.attributes.get("name")
+                    .or_else(|| node.attributes.get("property"));
+                let content = node.attributes.get("content");
+                if let (Some(n), Some(c)) = (name, content) {
+                    result.insert(n.clone(), c.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Recursively collect all text content from a node and its descendants.
+    fn deep_text_content(&self, node_id: u32) -> String {
+        let mut text = String::new();
+        self.collect_text_recursive(node_id, &mut text);
+        text.trim().to_string()
+    }
+
+    fn collect_text_recursive(&self, node_id: u32, text: &mut String) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            if node.node_type == 3 {
+                // Text node: text_content holds the text
+                text.push_str(&node.text_content);
+                text.push(' ');
+            } else if node.node_type == 1 {
+                // Element node: recurse into children
+                for &child in &node.children {
+                    self.collect_text_recursive(child, text);
+                }
+            }
+        }
     }
 
     /// Check if a node matches a CSS selector.
@@ -625,5 +759,86 @@ mod tests {
             "div should have p as child"
         );
         assert_eq!(p_node.parent, Some(div_id), "p's parent should be div");
+    }
+
+    // -----------------------------------------------------------------------
+    // Structured data extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_headings_extraction() {
+        let html = r#"<html><body>
+            <h1>Main Title</h1>
+            <h2>Subtitle</h2>
+            <h3>Section</h3>
+            <p>Not a heading</p>
+        </body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+
+        let headings = snapshot.headings();
+        assert_eq!(headings.len(), 3, "should find 3 headings");
+        assert_eq!(headings[0].0, 1, "first heading should be h1");
+        assert!(headings[0].1.contains("Main Title"));
+        assert_eq!(headings[1].0, 2, "second heading should be h2");
+        assert_eq!(headings[2].0, 3, "third heading should be h3");
+    }
+
+    #[test]
+    fn test_headings_with_aria_role() {
+        let html = r#"<html><body>
+            <span role="heading" aria-level="2">ARIA Heading</span>
+            <div role="heading">Default Level</div>
+        </body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+
+        let headings = snapshot.headings();
+        assert_eq!(headings.len(), 2, "should find 2 ARIA headings");
+        assert_eq!(headings[0].0, 2, "first should be level 2");
+        assert!(headings[0].1.contains("ARIA Heading"));
+        assert_eq!(headings[1].0, 2, "default level should be 2");
+    }
+
+    #[test]
+    fn test_links_extraction() {
+        let html = r#"<html><body>
+            <a href="https://example.com">Example</a>
+            <a href="/about">About Us</a>
+            <a>No href</a>
+        </body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+
+        let links = snapshot.links();
+        assert_eq!(links.len(), 3, "should find 3 links");
+        assert_eq!(links[0].1, "https://example.com");
+        assert!(links[0].0.contains("Example"));
+        assert_eq!(links[1].1, "/about");
+        assert_eq!(links[2].1, "", "link without href should have empty string");
+    }
+
+    #[test]
+    fn test_meta_tags_extraction() {
+        let html = r#"<html><head>
+            <meta name="description" content="A test page">
+            <meta property="og:title" content="OG Title">
+            <meta name="viewport" content="width=device-width">
+        </head><body></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+
+        let meta = snapshot.meta_tags();
+        assert_eq!(meta.get("description").unwrap(), "A test page");
+        assert_eq!(meta.get("og:title").unwrap(), "OG Title");
+        assert_eq!(meta.get("viewport").unwrap(), "width=device-width");
+    }
+
+    #[test]
+    fn test_structured_data_empty_page() {
+        let snapshot = DomSnapshot::empty();
+        assert!(snapshot.headings().is_empty());
+        assert!(snapshot.links().is_empty());
+        assert!(snapshot.meta_tags().is_empty());
     }
 }

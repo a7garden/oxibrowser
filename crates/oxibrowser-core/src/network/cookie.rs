@@ -374,6 +374,57 @@ impl CookieJar {
             .join("; ")
     }
 
+    /// Returns cookies visible to JavaScript (excludes HttpOnly cookies).
+    /// Per RFC 6265 §5.4, HttpOnly cookies must not be accessible via
+    /// `document.cookie` or other script APIs.
+    pub fn cookies_for_js(&self, url: &Url) -> String {
+        let host = url.host_str().unwrap_or("unknown").to_lowercase();
+        let url_path = url.path();
+        let is_secure = url.scheme() == "https";
+
+        let mut matching: Vec<&CookieEntry> = Vec::new();
+
+        for (domain, entries) in &self.cookies {
+            if !domain_matches(&host, domain) && domain != &host {
+                continue;
+            }
+
+            for cookie in entries {
+                // HttpOnly cookies are never visible to JavaScript
+                if cookie.http_only {
+                    continue;
+                }
+
+                if cookie.secure && !is_secure {
+                    continue;
+                }
+
+                let cookie_path = cookie.path.as_deref().unwrap_or("/");
+                if !path_matches(url_path, cookie_path) {
+                    continue;
+                }
+
+                match cookie.same_site {
+                    Some(SameSite::Strict) | Some(SameSite::Lax) | Some(SameSite::None) | None => {}
+                }
+
+                matching.push(cookie);
+            }
+        }
+
+        matching.sort_by(|a, b| {
+            let pa = a.path.as_deref().unwrap_or("/").len();
+            let pb = b.path.as_deref().unwrap_or("/").len();
+            pb.cmp(&pa)
+        });
+
+        matching
+            .iter()
+            .map(|c| c.to_cookie_header())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     /// Clear all cookies.
     pub fn clear(&mut self) {
         self.cookies.clear();
@@ -790,5 +841,61 @@ mod tests {
                 "cookie value should be truncated to max size"
             );
         }
+    }
+
+    #[test]
+    fn test_httponly_excluded_from_js() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+
+        // Store a regular cookie and an HttpOnly cookie
+        jar.store(&url, "session=abc123; Path=/");
+        jar.store(&url, "hidden=secret456; Path=/; HttpOnly");
+
+        // cookies_for_url (HTTP request) should include both
+        let http_cookies = jar.cookies_for_url(&url);
+        assert!(
+            http_cookies.contains("session=abc123"),
+            "regular cookie should be in HTTP request"
+        );
+        assert!(
+            http_cookies.contains("hidden=secret456"),
+            "HttpOnly cookie should be in HTTP request"
+        );
+
+        // cookies_for_js (document.cookie) should exclude HttpOnly
+        let js_cookies = jar.cookies_for_js(&url);
+        assert!(
+            js_cookies.contains("session=abc123"),
+            "regular cookie should be visible to JS"
+        );
+        assert!(
+            !js_cookies.contains("hidden=secret456"),
+            "HttpOnly cookie should NOT be visible to JS"
+        );
+    }
+
+    #[test]
+    fn test_all_httponly_cookies_hidden_from_js() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+
+        // Store only HttpOnly cookies
+        jar.store(&url, "a=1; HttpOnly");
+        jar.store(&url, "b=2; HttpOnly; Path=/");
+
+        // JS should see nothing
+        let js_cookies = jar.cookies_for_js(&url);
+        assert!(
+            js_cookies.is_empty(),
+            "all HttpOnly cookies should be hidden from JS"
+        );
+
+        // HTTP request should still get them
+        let http_cookies = jar.cookies_for_url(&url);
+        assert!(
+            http_cookies.contains("a=1") && http_cookies.contains("b=2"),
+            "HttpOnly cookies should be sent in HTTP requests"
+        );
     }
 }
