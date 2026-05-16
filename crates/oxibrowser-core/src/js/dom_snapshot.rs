@@ -491,6 +491,38 @@ impl DomSnapshot {
         // Simple tag name
         node.tag.eq_ignore_ascii_case(selector)
     }
+
+    /// Get the first child node ID.
+    pub fn first_child(&self, node_id: u32) -> Option<u32> {
+        self.nodes.get(&node_id)
+            .and_then(|n| n.children.first().copied())
+    }
+
+    /// Get the last child node ID.
+    pub fn last_child(&self, node_id: u32) -> Option<u32> {
+        self.nodes.get(&node_id)
+            .and_then(|n| n.children.last().copied())
+    }
+
+    /// Get the next sibling node ID.
+    pub fn next_sibling(&self, node_id: u32) -> Option<u32> {
+        let parent_id = self.nodes.get(&node_id).and_then(|n| n.parent)?;
+        let parent = self.nodes.get(&parent_id)?;
+        let idx = parent.children.iter().position(|&id| id == node_id)?;
+        parent.children.get(idx + 1).copied()
+    }
+
+    /// Get the previous sibling node ID.
+    pub fn previous_sibling(&self, node_id: u32) -> Option<u32> {
+        let parent_id = self.nodes.get(&node_id).and_then(|n| n.parent)?;
+        let parent = self.nodes.get(&parent_id)?;
+        let idx = parent.children.iter().position(|&id| id == node_id)?;
+        if idx > 0 {
+            parent.children.get(idx - 1).copied()
+        } else {
+            None
+        }
+    }
 }
 
 /// Recursively collect all nodes from the document tree into the snapshot.

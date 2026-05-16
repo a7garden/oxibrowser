@@ -2308,6 +2308,116 @@ fn create_context(
         "if (typeof Array.from === 'undefined') { Array.from = ArrayFrom; delete globalThis.ArrayFrom; }"
     ));
 
+    // --- requestAnimationFrame ---
+    let raf_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let callback = args.first().cloned().unwrap_or(JsValue::undefined());
+            static RAF_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let raf_id = RAF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as f64;
+            if let Some(cb) = callback.as_object() {
+                let _ = cb.call(&JsValue::Undefined, &[JsValue::from(raf_id)], _ctx);
+            }
+            Ok(JsValue::from(raf_id))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("requestAnimationFrame"), 1, raf_fn);
+
+    // --- cancelAnimationFrame ---
+    let cancel_raf_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = context.register_global_callable(js_string!("cancelAnimationFrame"), 1, cancel_raf_fn);
+
+    // --- Event constructor ---
+    let event_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
+                .property(js_string!("bubbles"), JsValue::from(false), Attribute::all())
+                .property(js_string!("cancelable"), JsValue::from(false), Attribute::all())
+                .property(js_string!("defaultPrevented"), JsValue::from(false), Attribute::all())
+                .property(js_string!("target"), JsValue::null(), Attribute::all())
+                .property(js_string!("currentTarget"), JsValue::null(), Attribute::all())
+                .property(js_string!("eventPhase"), JsValue::from(0), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("Event"), 1, event_ctor);
+
+    // --- MouseEvent constructor ---
+    let mouse_event_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
+                .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
+                .property(js_string!("cancelable"), JsValue::from(true), Attribute::all())
+                .property(js_string!("clientX"), JsValue::from(0), Attribute::all())
+                .property(js_string!("clientY"), JsValue::from(0), Attribute::all())
+                .property(js_string!("button"), JsValue::from(0), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("MouseEvent"), 1, mouse_event_ctor);
+
+    // --- KeyboardEvent constructor ---
+    let keyboard_event_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
+                .property(js_string!("key"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("code"), JsValue::from(JsString::from("")), Attribute::all())
+                .property(js_string!("keyCode"), JsValue::from(0), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("KeyboardEvent"), 1, keyboard_event_ctor);
+
+    // --- FocusEvent constructor ---
+    let focus_event_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args.first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("type"), JsValue::from(JsString::from(event_type.as_str())), Attribute::all())
+                .property(js_string!("bubbles"), JsValue::from(false), Attribute::all())
+                .property(js_string!("cancelable"), JsValue::from(false), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("FocusEvent"), 1, focus_event_ctor);
+
+    // --- document.createDocumentFragment (via eval) ---
+    let _ = context.eval(Source::from_bytes(r#"
+        document.createDocumentFragment = function() {
+            var fragId = 1100000;
+            return {
+                nodeType: 11,
+                __nodeId: fragId,
+                appendChild: function(child) { return child; }
+            };
+        };
+    "#));
+
     (context, job_queue)
 }
 
@@ -3656,6 +3766,32 @@ fn create_element_object(
         .function(remove_child_obj_fn, js_string!("removeChild"), 1)
         .function(element_qs_fn, js_string!("querySelector"), 1)
         .function(element_qsa_fn, js_string!("querySelectorAll"), 1)
+        .function(
+            {
+                let snap_cn = dom_snapshot_arc.clone();
+                let nid_cn = node.id;
+                let mut_cn = mutations.clone();
+                unsafe {
+                    NativeFunction::from_closure(move |_this, _args, ctx| {
+                        let dom = snap_cn.read();
+                        if let Some(ref snap) = *dom {
+                            if let Some(cur) = snap.nodes.get(&nid_cn) {
+                                let items: Vec<JsValue> = cur.children.iter()
+                                    .filter_map(|&cid| snap.nodes.get(&cid))
+                                    .map(|child| create_element_object(snap, child, ctx, &mut_cn, &snap_cn))
+                                    .collect();
+                                let arr = JsArray::from_iter(items, ctx);
+                                return Ok(arr.into());
+                            }
+                        }
+                        let arr = JsArray::new(ctx);
+                        Ok(arr.into())
+                    })
+                }
+            },
+            js_string!("childNodes"),
+            0,
+        )
         .property(js_string!("__nodeId"), JsValue::from(node.id), Attribute::all())
         .accessor(
             js_string!("value"),
