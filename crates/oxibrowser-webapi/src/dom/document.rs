@@ -638,6 +638,36 @@ impl Document {
             node.set_text_content(text);
         }
     }
+
+    /// Create an element node with the given ID and tag.
+    ///
+    /// Inserts the node into the node map but does NOT attach it to the tree.
+    /// Call `tree_mut().append_child(parent, id)` separately.
+    pub fn create_element_node(&mut self, id: NodeId, tag: &str) {
+        let node = Node::new(id, NodeType::Element {
+            tag: tag.to_string(),
+            attributes: Vec::new(),
+        });
+        self.nodes.insert(id, node);
+    }
+
+    /// Create a text node with the given ID and text.
+    ///
+    /// Inserts the node into the node map but does NOT attach it to the tree.
+    pub fn create_text_node(&mut self, id: NodeId, text: &str) {
+        let node = Node::new(id, NodeType::Text(text.to_string()));
+        self.nodes.insert(id, node);
+    }
+
+    /// Get a mutable reference to the tree structure.
+    pub fn tree_mut(&mut self) -> &mut Tree {
+        &mut self.tree
+    }
+
+    /// Get a mutable reference to the node map.
+    pub fn nodes_mut(&mut self) -> &mut HashMap<NodeId, Node> {
+        &mut self.nodes
+    }
 }
 
 /// A resource URL extracted from the document.

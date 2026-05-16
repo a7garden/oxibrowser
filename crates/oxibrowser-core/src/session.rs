@@ -587,6 +587,12 @@ impl Session {
                             oxibrowser_webapi::dom::NodeId(*node_id as usize),
                             text,
                         );
+                        // Also set data-oxi-text so from_frame snapshot picks it up
+                        page.root_frame_mut().set_attribute(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            "data-oxi-text",
+                            text,
+                        );
                     }
                 }
                 DomMutation::ClickElement { node_id } => {
@@ -602,12 +608,55 @@ impl Session {
                         );
                     }
                 }
-                // DOM structure mutations (not yet supported)
-                DomMutation::CreateElement { .. }
-                | DomMutation::CreateTextNode { .. }
-                | DomMutation::AppendChild { .. }
-                | DomMutation::RemoveChild { .. }
-                | DomMutation::SetInnerHtml { .. } => {}
+                // DOM structure mutations — apply to webapi DOM
+                DomMutation::CreateElement { node_id, tag } => {
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().document_mut()
+                            .create_element_node(
+                                oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                                tag,
+                            );
+                    }
+                }
+                DomMutation::CreateTextNode { node_id, text } => {
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().document_mut()
+                            .create_text_node(
+                                oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                                text,
+                            );
+                    }
+                }
+                DomMutation::AppendChild { parent_id, child_id } => {
+                    if let Some(page) = &mut self.active_page {
+                        let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
+                        let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
+                        page.root_frame_mut().document_mut()
+                            .tree_mut().append_child(pid, cid);
+                    }
+                }
+                DomMutation::RemoveChild { parent_id, child_id } => {
+                    if let Some(page) = &mut self.active_page {
+                        let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
+                        let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
+                        if let Some(children) = page.root_frame_mut().document_mut()
+                            .tree_mut().children_mut(pid)
+                        {
+                            children.retain(|&c| c != cid);
+                        }
+                        page.root_frame_mut().document_mut()
+                            .tree_mut().remove_parent(cid);
+                    }
+                }
+                DomMutation::SetInnerHtml { node_id, html } => {
+                    // Simplified: treat as text content update
+                    if let Some(page) = &mut self.active_page {
+                        page.root_frame_mut().set_text_content(
+                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
+                            html,
+                        );
+                    }
+                }
             }
         }
     }

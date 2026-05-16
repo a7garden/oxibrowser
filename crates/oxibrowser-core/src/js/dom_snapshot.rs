@@ -560,7 +560,13 @@ fn collect_nodes(
         };
 
         // Collect text content from direct text children
-        let text_content = collect_text_content(node_id, doc, tree);
+        let mut text_content = collect_text_content(node_id, doc, tree);
+        // For elements with data-oxi-text (set by textContent setter), prefer that
+        if text_content.is_empty() {
+            if let Some(v) = node.get_attribute("data-oxi-text") {
+                text_content = v.to_string();
+            }
+        }
 
         let children: Vec<u32> = tree.children(node_id).iter().map(|c| c.0 as u32).collect();
         let parent = tree.parent(node_id).map(|p| p.0 as u32);

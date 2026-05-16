@@ -4124,6 +4124,15 @@ fn create_element_object(
         })
     };
 
+    // style/classList를 accessor로 사용하기 위해 FunctionObjectBuilder로 변환
+    // (ObjectInitializer::new(ctx)가 ctx를 mutable borrow하므로 미리 변환 필요)
+    let style_getter_fn = FunctionObjectBuilder::new(ctx.realm(), style_fn)
+        .name(js_string!("get style"))
+        .build();
+    let classlist_getter_fn = FunctionObjectBuilder::new(ctx.realm(), classlist_fn)
+        .name(js_string!("get classList"))
+        .build();
+
     // ── 포커스/폼 (noop) ──
 
     let focus_fn = unsafe {
@@ -4186,6 +4195,100 @@ fn create_element_object(
     };
     let value_setter_fn = FunctionObjectBuilder::new(ctx.realm(), value_setter)
         .name(js_string!("set value"))
+        .build();
+
+    // textContent getter — reads from live snapshot
+    let dom_snap_tcg = dom_snapshot_arc.clone();
+    let nid_tcg = node.id;
+    let text_content_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = dom_snap_tcg.read();
+            if let Some(ref s) = *dom {
+                if let Some(n) = s.nodes.get(&nid_tcg) {
+                    return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
+                }
+            }
+            Ok(JsValue::from(JsString::from("")))
+        })
+    };
+    let text_content_getter_fn = FunctionObjectBuilder::new(ctx.realm(), text_content_getter)
+        .name(js_string!("get textContent"))
+        .build();
+
+    // textContent setter — updates snapshot + records mutation
+    let dom_snap_tcs = dom_snapshot_arc.clone();
+    let nid_tcs = node.id;
+    let mut_tcs = mutations.clone();
+    let text_content_setter = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let text = args.first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            {
+                let mut dom = dom_snap_tcs.write();
+                if let Some(ref mut s) = *dom {
+                    if let Some(n) = s.nodes.get_mut(&nid_tcs) {
+                        n.text_content = text.clone();
+                    }
+                }
+            }
+            mut_tcs.write().push(DomMutation::SetTextContent {
+                node_id: nid_tcs,
+                text,
+            });
+            Ok(JsValue::undefined())
+        })
+    };
+    let text_content_setter_fn = FunctionObjectBuilder::new(ctx.realm(), text_content_setter)
+        .name(js_string!("set textContent"))
+        .build();
+
+    // innerHTML getter — reads from live snapshot (same as textContent)
+    let dom_snap_ihg = dom_snapshot_arc.clone();
+    let nid_ihg = node.id;
+    let inner_html_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = dom_snap_ihg.read();
+            if let Some(ref s) = *dom {
+                if let Some(n) = s.nodes.get(&nid_ihg) {
+                    return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
+                }
+            }
+            Ok(JsValue::from(JsString::from("")))
+        })
+    };
+    let inner_html_getter_fn = FunctionObjectBuilder::new(ctx.realm(), inner_html_getter)
+        .name(js_string!("get innerHTML"))
+        .build();
+
+    // innerHTML setter — updates snapshot + records mutation
+    let dom_snap_ihs = dom_snapshot_arc.clone();
+    let nid_ihs = node.id;
+    let mut_ihs = mutations.clone();
+    let inner_html_setter = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let html = args.first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            {
+                let mut dom = dom_snap_ihs.write();
+                if let Some(ref mut s) = *dom {
+                    if let Some(n) = s.nodes.get_mut(&nid_ihs) {
+                        n.text_content = html.clone();
+                    }
+                }
+            }
+            mut_ihs.write().push(DomMutation::SetInnerHtml {
+                node_id: nid_ihs,
+                html,
+            });
+            Ok(JsValue::undefined())
+        })
+    };
+    let inner_html_setter_fn = FunctionObjectBuilder::new(ctx.realm(), inner_html_setter)
+        .name(js_string!("set innerHTML"))
         .build();
 
     // children → [element children IDs as lightweight objects]
@@ -4259,14 +4362,16 @@ fn create_element_object(
             JsValue::from(JsString::from(tag_upper.as_str())),
             Attribute::all(),
         )
-        .property(
+        .accessor(
             js_string!("textContent"),
-            JsValue::from(JsString::from(node.text_content.as_str())),
+            Some(text_content_getter_fn),
+            Some(text_content_setter_fn),
             Attribute::all(),
         )
-        .property(
+        .accessor(
             js_string!("innerHTML"),
-            JsValue::from(JsString::from(node.text_content.as_str())),
+            Some(inner_html_getter_fn),
+            Some(inner_html_setter_fn),
             Attribute::all(),
         )
         .property(
@@ -4368,8 +4473,19 @@ fn create_element_object(
         .function(clone_node_fn, js_string!("cloneNode"), 1)
         .function(remove_fn, js_string!("remove"), 0)
         // ── 스타일/클래스 (함수 — 호출 시 객체 반환) ──
-        .function(style_fn, js_string!("style"), 0)
-        .function(classlist_fn, js_string!("classList"), 0)
+        // style/classList accessors — el.style (not el.style())
+        .accessor(
+            js_string!("style"),
+            Some(style_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("classList"),
+            Some(classlist_getter_fn),
+            None,
+            Attribute::all(),
+        )
         // ── 포커스/폼 ──
         .function(focus_fn, js_string!("focus"), 0)
         .function(blur_fn, js_string!("blur"), 0)
