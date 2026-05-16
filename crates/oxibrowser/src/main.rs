@@ -303,10 +303,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Run {
-            script,
-            timeout,
-        } => {
+        Commands::Run { script, timeout } => {
             let op = run_script(&script, timeout);
             tokio::select! {
                 result = op => result?,
@@ -750,8 +747,9 @@ async fn run_browse(
             "markdown" | "md" => print!("{}", content.markdown),
             "html" => print!("{}", content.html),
             "text" => {
-                if let serde_json::Value::String(body) =
-                    tab.evaluate("document.body ? document.body.textContent : ''").await?
+                if let serde_json::Value::String(body) = tab
+                    .evaluate("document.body ? document.body.textContent : ''")
+                    .await?
                 {
                     print!("{body}");
                 }
@@ -842,11 +840,17 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> Result<()> {
     let browser = oxibrowser_core::Browser::new(browser_config).await?;
 
     // Create a tab for the script
-    let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!("failed to create tab: {e}"))?;
+    let tab = browser
+        .new_tab()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create tab: {e}"))?;
 
     // Run the script
     let mut runner = ScriptRunner::new(&tab);
-    let result = runner.run_config(&script_config).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let result = runner
+        .run_config(&script_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Print the result
     println!("{}", serde_json::to_string_pretty(&result).unwrap());

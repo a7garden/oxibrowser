@@ -247,11 +247,8 @@ impl Tab {
     /// Right-click an element matching a CSS selector.
     pub async fn right_click(&self, selector: &str) -> Result<()> {
         let js = js::mouse::js_right_click(selector);
-        self.eval_dom_action(
-            js,
-            format!("right_click: no element matching '{selector}'"),
-        )
-        .await?;
+        self.eval_dom_action(js, format!("right_click: no element matching '{selector}'"))
+            .await?;
         Ok(())
     }
 
@@ -274,7 +271,8 @@ impl Tab {
     /// Scroll by (delta_x, delta_y) pixels.
     pub async fn scroll(&self, delta_x: f64, delta_y: f64) -> Result<()> {
         let js = js::mouse::js_scroll(delta_x, delta_y);
-        self.eval_dom_action(js, "scroll failed".to_string()).await?;
+        self.eval_dom_action(js, "scroll failed".to_string())
+            .await?;
         Ok(())
     }
 
@@ -333,33 +331,24 @@ impl Tab {
     /// Uncheck a checkbox or radio input.
     pub async fn uncheck(&self, selector: &str) -> Result<()> {
         let js = js::form::js_check(selector, false);
-        self.eval_dom_action(
-            js,
-            format!("uncheck: no element matching '{selector}'"),
-        )
-        .await?;
+        self.eval_dom_action(js, format!("uncheck: no element matching '{selector}'"))
+            .await?;
         Ok(())
     }
 
     /// Upload a file (synthetic) to an <input type="file"> element.
     pub async fn upload_file(&self, selector: &str, file_path: &str) -> Result<()> {
         let js = js::form::js_upload_file(selector, file_path);
-        self.eval_dom_action(
-            js,
-            format!("upload_file: no element matching '{selector}'"),
-        )
-        .await?;
+        self.eval_dom_action(js, format!("upload_file: no element matching '{selector}'"))
+            .await?;
         Ok(())
     }
 
     /// Clear an input or textarea value.
     pub async fn clear_input(&self, selector: &str) -> Result<()> {
         let js = js::form::js_clear(selector);
-        self.eval_dom_action(
-            js,
-            format!("clear_input: no element matching '{selector}'"),
-        )
-        .await?;
+        self.eval_dom_action(js, format!("clear_input: no element matching '{selector}'"))
+            .await?;
         Ok(())
     }
 

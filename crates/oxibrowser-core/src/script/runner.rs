@@ -14,9 +14,8 @@ use std::time::Instant;
 
 use super::parser::ScriptError;
 use super::types::{
-    ErrorAction, ErrorStrategy, ExtractStep, FillStep, IfStep, PressStep, RetryStep,
-    ScriptConfig, ScriptResult, ScrollStep, SelectStep, SetStep, SleepStep, Step, StepResult,
-    TypeStep,
+    ErrorAction, ErrorStrategy, ExtractStep, FillStep, IfStep, PressStep, RetryStep, ScriptConfig,
+    ScriptResult, ScrollStep, SelectStep, SetStep, SleepStep, Step, StepResult, TypeStep,
 };
 
 use super::parser::parse_script as parse_script_fn;
@@ -123,19 +122,15 @@ impl<'a> ScriptRunner<'a> {
     async fn execute_step(&mut self, step: &Step, index: usize) -> Result<StepResult, ScriptError> {
         match step {
             // Navigation
-            Step::Goto { data } => {
-                self.step_goto(data).await.map(|br| {
-                    StepResult::success(index, "goto", Some(serde_json::to_value(br).unwrap()))
-                })
-            }
+            Step::Goto { data } => self.step_goto(data).await.map(|br| {
+                StepResult::success(index, "goto", Some(serde_json::to_value(br).unwrap()))
+            }),
             Step::Back => self.step_back(index).await,
             Step::Forward => self.step_forward(index).await,
             Step::Reload => self.step_reload(index).await,
-            Step::Post { data } => {
-                self.step_post(data).await.map(|br| {
-                    StepResult::success(index, "post", Some(serde_json::to_value(br).unwrap()))
-                })
-            }
+            Step::Post { data } => self.step_post(data).await.map(|br| {
+                StepResult::success(index, "post", Some(serde_json::to_value(br).unwrap()))
+            }),
 
             // Interaction
             Step::Click { data } => {
@@ -143,11 +138,17 @@ impl<'a> ScriptRunner<'a> {
                 Ok(StepResult::success(index, "click", None))
             }
             Step::DblClick { data } => {
-                self.tab.double_click(&data.click).await.map_err(map_core_err)?;
+                self.tab
+                    .double_click(&data.click)
+                    .await
+                    .map_err(map_core_err)?;
                 Ok(StepResult::success(index, "dbl-click", None))
             }
             Step::RightClick { data } => {
-                self.tab.right_click(&data.click).await.map_err(map_core_err)?;
+                self.tab
+                    .right_click(&data.click)
+                    .await
+                    .map_err(map_core_err)?;
                 Ok(StepResult::success(index, "right-click", None))
             }
             Step::Hover { data } => {
@@ -187,35 +188,34 @@ impl<'a> ScriptRunner<'a> {
                 Ok(StepResult::success(index, "scroll", None))
             }
             Step::Drag { data } => {
-                self.tab.drag(&data.from, &data.to).await.map_err(map_core_err)?;
+                self.tab
+                    .drag(&data.from, &data.to)
+                    .await
+                    .map_err(map_core_err)?;
                 Ok(StepResult::success(index, "drag", None))
             }
 
             // Content
-            Step::Evaluate { data } => {
-                self.step_evaluate(data).await.map(|val| {
-                    StepResult::success(index, "evaluate", Some(val))
-                })
-            }
+            Step::Evaluate { data } => self
+                .step_evaluate(data)
+                .await
+                .map(|val| StepResult::success(index, "evaluate", Some(val))),
             Step::Wait { data } => {
                 self.step_wait(data).await?;
                 Ok(StepResult::success(index, "wait", None))
             }
-            Step::Extract { data } => {
-                self.step_extract(data).await.map(|val| {
-                    StepResult::success(index, "extract", Some(val))
-                })
-            }
-            Step::Content { data } => {
-                self.step_content(data).await.map(|val| {
-                    StepResult::success(index, "content", Some(val))
-                })
-            }
-            Step::Screenshot { data } => {
-                self.step_screenshot(data).await.map(|val| {
-                    StepResult::success(index, "screenshot", Some(val))
-                })
-            }
+            Step::Extract { data } => self
+                .step_extract(data)
+                .await
+                .map(|val| StepResult::success(index, "extract", Some(val))),
+            Step::Content { data } => self
+                .step_content(data)
+                .await
+                .map(|val| StepResult::success(index, "content", Some(val))),
+            Step::Screenshot { data } => self
+                .step_screenshot(data)
+                .await
+                .map(|val| StepResult::success(index, "screenshot", Some(val))),
             Step::LoadResources => {
                 let count = self.tab.load_resources().await.map_err(map_core_err)?;
                 Ok(StepResult::success(
@@ -238,9 +238,10 @@ impl<'a> ScriptRunner<'a> {
                 self.step_sleep(data).await?;
                 Ok(StepResult::success(index, "sleep", None))
             }
-            Step::If { data } => {
-                self.step_if(data).await.map(|_| StepResult::success(index, "if", None))
-            }
+            Step::If { data } => self
+                .step_if(data)
+                .await
+                .map(|_| StepResult::success(index, "if", None)),
             Step::Retry { data } => {
                 self.step_retry(data).await?;
                 Ok(StepResult::success(index, "retry", None))
@@ -262,13 +263,19 @@ impl<'a> ScriptRunner<'a> {
     // Navigation steps
     // ---------------------------------------------------------------------------
 
-    async fn step_goto(&self, data: &super::types::GotoStep) -> Result<crate::browse_result::BrowseResult, ScriptError> {
+    async fn step_goto(
+        &self,
+        data: &super::types::GotoStep,
+    ) -> Result<crate::browse_result::BrowseResult, ScriptError> {
         let url = self.interpolate(&data.goto);
         self.tab.goto(&url).await.map_err(map_core_err)?;
 
         if let Some(ref selector) = data.wait {
             let timeout = self.on_error.retry.as_ref().map_or(5000, |_| 5000);
-            self.tab.wait_for(selector, timeout).await.map_err(map_core_err)?;
+            self.tab
+                .wait_for(selector, timeout)
+                .await
+                .map_err(map_core_err)?;
         }
 
         self.tab.content().await.map_err(map_core_err)
@@ -289,10 +296,16 @@ impl<'a> ScriptRunner<'a> {
         Ok(StepResult::success(index, "reload", None))
     }
 
-    async fn step_post(&self, data: &super::types::PostStep) -> Result<crate::browse_result::BrowseResult, ScriptError> {
+    async fn step_post(
+        &self,
+        data: &super::types::PostStep,
+    ) -> Result<crate::browse_result::BrowseResult, ScriptError> {
         let url = self.interpolate(&data.url);
         let body = self.interpolate(&data.body);
-        self.tab.post(&url, &body, &data.content_type).await.map_err(map_core_err)?;
+        self.tab
+            .post(&url, &body, &data.content_type)
+            .await
+            .map_err(map_core_err)?;
         self.tab.content().await.map_err(map_core_err)
     }
 
@@ -309,19 +322,28 @@ impl<'a> ScriptRunner<'a> {
         let selector = self.interpolate(&data.selector);
         let value = self.interpolate_value(&data.value);
         let value_str = value.as_str().unwrap_or_default();
-        self.tab.fill(&selector, value_str).await.map_err(map_core_err)
+        self.tab
+            .fill(&selector, value_str)
+            .await
+            .map_err(map_core_err)
     }
 
     async fn step_type(&self, data: &TypeStep) -> Result<(), ScriptError> {
         let selector = self.interpolate(&data.selector);
         let text = self.interpolate(&data.text);
-        self.tab.r#type(&selector, &text).await.map_err(map_core_err)
+        self.tab
+            .r#type(&selector, &text)
+            .await
+            .map_err(map_core_err)
     }
 
     async fn step_select(&self, data: &SelectStep) -> Result<(), ScriptError> {
         let selector = self.interpolate(&data.selector);
         let value = self.interpolate(&data.value);
-        self.tab.select_option(&selector, &value).await.map_err(map_core_err)
+        self.tab
+            .select_option(&selector, &value)
+            .await
+            .map_err(map_core_err)
     }
 
     async fn step_press(&self, data: &PressStep) -> Result<(), ScriptError> {
@@ -330,10 +352,7 @@ impl<'a> ScriptRunner<'a> {
     }
 
     async fn step_scroll(&self, data: &ScrollStep) -> Result<(), ScriptError> {
-        self.tab
-            .scroll(data.x, data.y)
-            .await
-            .map_err(map_core_err)
+        self.tab.scroll(data.x, data.y).await.map_err(map_core_err)
     }
 
     // ---------------------------------------------------------------------------
@@ -365,13 +384,13 @@ impl<'a> ScriptRunner<'a> {
     async fn step_wait(&self, data: &super::types::WaitStep) -> Result<(), ScriptError> {
         let selector = self.interpolate(&data.wait);
         let timeout = data.timeout.unwrap_or(5000);
-        self.tab.wait_for(&selector, timeout).await.map_err(map_core_err)
+        self.tab
+            .wait_for(&selector, timeout)
+            .await
+            .map_err(map_core_err)
     }
 
-    async fn step_extract(
-        &mut self,
-        data: &ExtractStep,
-    ) -> Result<serde_json::Value, ScriptError> {
+    async fn step_extract(&mut self, data: &ExtractStep) -> Result<serde_json::Value, ScriptError> {
         let selector = self.interpolate(&data.selector);
         let selector_str = selector.as_str();
 
@@ -421,9 +440,7 @@ impl<'a> ScriptRunner<'a> {
                     .to_string();
                 serde_json::json!(body.trim())
             }
-            "json" => {
-                serde_json::to_value(&content).unwrap_or(serde_json::Value::Null)
-            }
+            "json" => serde_json::to_value(&content).unwrap_or(serde_json::Value::Null),
             _ => serde_json::json!(content.markdown),
         };
 
@@ -445,9 +462,8 @@ impl<'a> ScriptRunner<'a> {
         // Save screenshot to file if path is provided
         if let Some(ref path) = data.file {
             let path = self.interpolate(path);
-            std::fs::write(&path, &png).map_err(|e| {
-                ScriptError::Exec(format!("failed to write screenshot: {e}"))
-            })?;
+            std::fs::write(&path, &png)
+                .map_err(|e| ScriptError::Exec(format!("failed to write screenshot: {e}")))?;
             Ok(serde_json::json!({ "path": path, "size": png.len() }))
         } else {
             // Return base64-encoded PNG
@@ -484,11 +500,7 @@ impl<'a> ScriptRunner<'a> {
 
     async fn step_if(&mut self, data: &IfStep) -> Result<(), ScriptError> {
         let expr = self.interpolate(&data.expression);
-        let result = self
-            .tab
-            .evaluate(&expr)
-            .await
-            .map_err(map_core_err)?;
+        let result = self.tab.evaluate(&expr).await.map_err(map_core_err)?;
 
         let branch = if result.is_null() || result == serde_json::Value::Bool(false) {
             &data.r#else
@@ -500,11 +512,9 @@ impl<'a> ScriptRunner<'a> {
             // Execute sub-steps inline to avoid recursion
             let step_result = match step {
                 // We only inline navigation/interaction steps — complex steps just use ?
-                Step::Goto { data } => {
-                    self.step_goto(data).await.map(|br| {
-                        StepResult::success(i, "goto", Some(serde_json::to_value(br).unwrap()))
-                    })
-                }
+                Step::Goto { data } => self.step_goto(data).await.map(|br| {
+                    StepResult::success(i, "goto", Some(serde_json::to_value(br).unwrap()))
+                }),
                 Step::Click { data } => {
                     self.step_click(&data.click).await?;
                     Ok(StepResult::success(i, "click", None))
@@ -529,16 +539,14 @@ impl<'a> ScriptRunner<'a> {
                     self.step_wait(data).await?;
                     Ok(StepResult::success(i, "wait", None))
                 }
-                Step::Evaluate { data } => {
-                    self.step_evaluate(data).await.map(|val| {
-                        StepResult::success(i, "evaluate", Some(val))
-                    })
-                }
-                Step::Screenshot { data } => {
-                    self.step_screenshot(data).await.map(|val| {
-                        StepResult::success(i, "screenshot", Some(val))
-                    })
-                }
+                Step::Evaluate { data } => self
+                    .step_evaluate(data)
+                    .await
+                    .map(|val| StepResult::success(i, "evaluate", Some(val))),
+                Step::Screenshot { data } => self
+                    .step_screenshot(data)
+                    .await
+                    .map(|val| StepResult::success(i, "screenshot", Some(val))),
                 Step::Echo { data } => {
                     self.step_echo(&data.echo);
                     Ok(StepResult::success(i, "echo", None))
@@ -547,26 +555,24 @@ impl<'a> ScriptRunner<'a> {
                     self.step_sleep(data).await?;
                     Ok(StepResult::success(i, "sleep", None))
                 }
-                Step::Back => {
-                    self.step_back(i).await
-                }
-                Step::Forward => {
-                    self.step_forward(i).await
-                }
-                Step::Reload => {
-                    self.step_reload(i).await
-                }
-                Step::Post { data } => {
-                    self.step_post(data).await.map(|br| {
-                        StepResult::success(i, "post", Some(serde_json::to_value(br).unwrap()))
-                    })
-                }
+                Step::Back => self.step_back(i).await,
+                Step::Forward => self.step_forward(i).await,
+                Step::Reload => self.step_reload(i).await,
+                Step::Post { data } => self.step_post(data).await.map(|br| {
+                    StepResult::success(i, "post", Some(serde_json::to_value(br).unwrap()))
+                }),
                 Step::DblClick { data } => {
-                    self.tab.double_click(&data.click).await.map_err(map_core_err)?;
+                    self.tab
+                        .double_click(&data.click)
+                        .await
+                        .map_err(map_core_err)?;
                     Ok(StepResult::success(i, "dbl-click", None))
                 }
                 Step::RightClick { data } => {
-                    self.tab.right_click(&data.click).await.map_err(map_core_err)?;
+                    self.tab
+                        .right_click(&data.click)
+                        .await
+                        .map_err(map_core_err)?;
                     Ok(StepResult::success(i, "right-click", None))
                 }
                 Step::Hover { data } => {
@@ -590,22 +596,27 @@ impl<'a> ScriptRunner<'a> {
                     Ok(StepResult::success(i, "select", None))
                 }
                 Step::Drag { data } => {
-                    self.tab.drag(&data.from, &data.to).await.map_err(map_core_err)?;
+                    self.tab
+                        .drag(&data.from, &data.to)
+                        .await
+                        .map_err(map_core_err)?;
                     Ok(StepResult::success(i, "drag", None))
                 }
-                Step::Extract { data } => {
-                    self.step_extract(data).await.map(|val| {
-                        StepResult::success(i, "extract", Some(val))
-                    })
-                }
-                Step::Content { data } => {
-                    self.step_content(data).await.map(|val| {
-                        StepResult::success(i, "content", Some(val))
-                    })
-                }
+                Step::Extract { data } => self
+                    .step_extract(data)
+                    .await
+                    .map(|val| StepResult::success(i, "extract", Some(val))),
+                Step::Content { data } => self
+                    .step_content(data)
+                    .await
+                    .map(|val| StepResult::success(i, "content", Some(val))),
                 Step::LoadResources => {
                     let count = self.tab.load_resources().await.map_err(map_core_err)?;
-                    Ok(StepResult::success(i, "load_resources", Some(serde_json::json!(count))))
+                    Ok(StepResult::success(
+                        i,
+                        "load_resources",
+                        Some(serde_json::json!(count)),
+                    ))
                 }
                 Step::Set { data } => {
                     self.step_set(data)?;
@@ -646,29 +657,31 @@ impl<'a> ScriptRunner<'a> {
             let mut step_failed = false;
             for (i, step) in data.steps.iter().enumerate() {
                 let step_result = match step {
-                    Step::Goto { data } => {
-                        self.step_goto(data).await.map(|br| {
-                            StepResult::success(i, "goto", Some(serde_json::to_value(br).unwrap()))
-                        })
-                    }
+                    Step::Goto { data } => self.step_goto(data).await.map(|br| {
+                        StepResult::success(i, "goto", Some(serde_json::to_value(br).unwrap()))
+                    }),
                     Step::Back => self.step_back(i).await,
                     Step::Forward => self.step_forward(i).await,
                     Step::Reload => self.step_reload(i).await,
-                    Step::Post { data } => {
-                        self.step_post(data).await.map(|br| {
-                            StepResult::success(i, "post", Some(serde_json::to_value(br).unwrap()))
-                        })
-                    }
+                    Step::Post { data } => self.step_post(data).await.map(|br| {
+                        StepResult::success(i, "post", Some(serde_json::to_value(br).unwrap()))
+                    }),
                     Step::Click { data } => {
                         self.step_click(&data.click).await?;
                         Ok(StepResult::success(i, "click", None))
                     }
                     Step::DblClick { data } => {
-                        self.tab.double_click(&data.click).await.map_err(map_core_err)?;
+                        self.tab
+                            .double_click(&data.click)
+                            .await
+                            .map_err(map_core_err)?;
                         Ok(StepResult::success(i, "dbl-click", None))
                     }
                     Step::RightClick { data } => {
-                        self.tab.right_click(&data.click).await.map_err(map_core_err)?;
+                        self.tab
+                            .right_click(&data.click)
+                            .await
+                            .map_err(map_core_err)?;
                         Ok(StepResult::success(i, "right-click", None))
                     }
                     Step::Hover { data } => {
@@ -708,36 +721,39 @@ impl<'a> ScriptRunner<'a> {
                         Ok(StepResult::success(i, "scroll", None))
                     }
                     Step::Drag { data } => {
-                        self.tab.drag(&data.from, &data.to).await.map_err(map_core_err)?;
+                        self.tab
+                            .drag(&data.from, &data.to)
+                            .await
+                            .map_err(map_core_err)?;
                         Ok(StepResult::success(i, "drag", None))
                     }
-                    Step::Evaluate { data } => {
-                        self.step_evaluate(data).await.map(|val| {
-                            StepResult::success(i, "evaluate", Some(val))
-                        })
-                    }
+                    Step::Evaluate { data } => self
+                        .step_evaluate(data)
+                        .await
+                        .map(|val| StepResult::success(i, "evaluate", Some(val))),
                     Step::Wait { data } => {
                         self.step_wait(data).await?;
                         Ok(StepResult::success(i, "wait", None))
                     }
-                    Step::Extract { data } => {
-                        self.step_extract(data).await.map(|val| {
-                            StepResult::success(i, "extract", Some(val))
-                        })
-                    }
-                    Step::Content { data } => {
-                        self.step_content(data).await.map(|val| {
-                            StepResult::success(i, "content", Some(val))
-                        })
-                    }
-                    Step::Screenshot { data } => {
-                        self.step_screenshot(data).await.map(|val| {
-                            StepResult::success(i, "screenshot", Some(val))
-                        })
-                    }
+                    Step::Extract { data } => self
+                        .step_extract(data)
+                        .await
+                        .map(|val| StepResult::success(i, "extract", Some(val))),
+                    Step::Content { data } => self
+                        .step_content(data)
+                        .await
+                        .map(|val| StepResult::success(i, "content", Some(val))),
+                    Step::Screenshot { data } => self
+                        .step_screenshot(data)
+                        .await
+                        .map(|val| StepResult::success(i, "screenshot", Some(val))),
                     Step::LoadResources => {
                         let count = self.tab.load_resources().await.map_err(map_core_err)?;
-                        Ok(StepResult::success(i, "load_resources", Some(serde_json::json!(count))))
+                        Ok(StepResult::success(
+                            i,
+                            "load_resources",
+                            Some(serde_json::json!(count)),
+                        ))
                     }
                     Step::Set { data } => {
                         self.step_set(data)?;
@@ -807,9 +823,8 @@ impl<'a> ScriptRunner<'a> {
         let path = format!("error_step{}_{}.png", step_index, timestamp);
 
         let png = self.tab.screenshot(800).await.map_err(map_core_err)?;
-        std::fs::write(&path, &png).map_err(|e| {
-            ScriptError::Exec(format!("failed to write error screenshot: {e}"))
-        })?;
+        std::fs::write(&path, &png)
+            .map_err(|e| ScriptError::Exec(format!("failed to write error screenshot: {e}")))?;
 
         Ok(path)
     }

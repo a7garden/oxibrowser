@@ -74,8 +74,8 @@ impl std::error::Error for ScriptError {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{ErrorAction, Step};
+    use super::*;
 
     #[test]
     fn test_parse_minimal_script() {
@@ -173,7 +173,8 @@ mod tests {
 
     #[test]
     fn test_parse_wait() {
-        let yaml = "steps:\n  - step_type: wait\n    data:\n      wait: \".modal\"\n      timeout: 5000";
+        let yaml =
+            "steps:\n  - step_type: wait\n    data:\n      wait: \".modal\"\n      timeout: 5000";
         let config = parse_script(yaml).unwrap();
         match &config.steps[0] {
             Step::Wait { data } => {
