@@ -282,6 +282,7 @@ impl Session {
         // Fetch the document
         let response = self.http_client.fetch(&parsed).await?;
         let status = response.status().as_u16();
+        let final_url = response.url().clone();
 
         // Check for HTTP errors
         if status >= 400 {
@@ -311,8 +312,8 @@ impl Session {
             self.store_response_body(&request_id, html.clone(), &ct_header);
         }
 
-        // Create a new page for this navigation
-        let page = Page::from_html(parsed.clone(), &html, status, ct_header).await?;
+        // Create a new page for this navigation (use final URL after redirects)
+        let page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
 
         // Update history
         if self.history.is_empty() {
@@ -320,7 +321,7 @@ impl Session {
         } else if self.history_index < self.history.len() - 1 {
             self.history.truncate(self.history_index + 1);
         }
-        self.history.push(parsed);
+        self.history.push(final_url);
         self.history_index = self.history.len() - 1;
 
         self.active_page = Some(page);
@@ -494,6 +495,8 @@ impl Session {
             .unwrap_or("text/html")
             .to_string();
 
+        let final_url = response.url().clone();
+
         let bytes = response
             .bytes()
             .await
@@ -501,8 +504,8 @@ impl Session {
 
         let html = crate::encoding::decode_html(&bytes, Some(&ct));
 
-        // Create a new page for this navigation
-        let page = Page::from_html(parsed.clone(), &html, status, ct).await?;
+        // Create a new page for this navigation (use final URL after redirects)
+        let page = Page::from_html(final_url.clone(), &html, status, ct).await?;
 
         // Update history
         if self.history.is_empty() {
@@ -510,7 +513,7 @@ impl Session {
         } else if self.history_index < self.history.len() - 1 {
             self.history.truncate(self.history_index + 1);
         }
-        self.history.push(parsed);
+        self.history.push(final_url);
         self.history_index = self.history.len() - 1;
 
         self.active_page = Some(page);
@@ -534,10 +537,22 @@ impl Session {
         &mut self,
         expression: &str,
     ) -> Result<crate::js::runtime::JsEvalResult> {
+        self.evaluate_js_with_await(expression, false).await
+    }
+
+    /// Evaluate a JS expression, optionally awaiting Promise resolution.
+    pub async fn evaluate_js_with_await(
+        &mut self,
+        expression: &str,
+        await_promise: bool,
+    ) -> Result<crate::js::runtime::JsEvalResult> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
         }
-        let result = self.js_runtime.evaluate(expression).await?;
+        let result = self
+            .js_runtime
+            .evaluate_with_await(expression, await_promise)
+            .await?;
 
         // Collect and apply DOM mutations
         let mutations = self.js_runtime.drain_mutations();

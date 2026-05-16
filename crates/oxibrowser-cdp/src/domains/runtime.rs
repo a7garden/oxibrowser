@@ -72,10 +72,14 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
         .get("returnByValue")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let await_promise = params
+        .get("awaitPromise")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut guard = ctx.session.write().await;
 
-    match guard.evaluate_js(expression).await {
+    match guard.evaluate_js_with_await(expression, await_promise).await {
         Ok(result) => {
             // Handle exceptions
             if let Some(exception) = &result.exception {

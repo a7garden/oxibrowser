@@ -134,6 +134,9 @@ enum JsCommand {
         max_recursion: Option<usize>,
         /// Max operand stack size. None = use default.
         max_stack_size: Option<usize>,
+        /// If true, drain the microtask queue after eval to resolve Promises.
+        /// When the eval result is a Promise, re-read the resolved value.
+        await_promise: bool,
     },
     /// Set a global variable in the persistent Context.
     SetGlobal { name: String, value: Value },
@@ -378,6 +381,19 @@ impl JsRuntime {
         self.evaluate_with_timeout(expression, None).await
     }
 
+    /// Evaluate a JavaScript expression, optionally awaiting Promise resolution.
+    ///
+    /// When `await_promise` is true and the result is a Promise, the runtime
+    /// drains microtasks to resolve it and returns the settled value.
+    pub async fn evaluate_with_await(
+        &mut self,
+        expression: &str,
+        await_promise: bool,
+    ) -> Result<JsEvalResult> {
+        self.evaluate_with_timeout_and_await(expression, None, await_promise)
+            .await
+    }
+
     /// Evaluate a JavaScript expression with an explicit timeout override.
     ///
     /// If `timeout_ms` is `None`, uses the default from config.
@@ -385,6 +401,17 @@ impl JsRuntime {
         &mut self,
         expression: &str,
         timeout_ms: Option<u64>,
+    ) -> Result<JsEvalResult> {
+        self.evaluate_with_timeout_and_await(expression, timeout_ms, false)
+            .await
+    }
+
+    /// Evaluate a JavaScript expression with timeout and optional Promise awaiting.
+    pub async fn evaluate_with_timeout_and_await(
+        &mut self,
+        expression: &str,
+        timeout_ms: Option<u64>,
+        await_promise: bool,
     ) -> Result<JsEvalResult> {
         // Clear shared console buffer
         self.console_output.write().clear();
@@ -397,6 +424,7 @@ impl JsRuntime {
                 max_loop_iterations: Some(self.config.max_loop_iterations),
                 max_recursion: Some(self.config.max_recursion),
                 max_stack_size: Some(self.config.max_stack_size),
+                await_promise,
             })
             .expect("JS thread has died");
 
@@ -598,6 +626,7 @@ fn js_thread_loop(
                 max_loop_iterations,
                 max_recursion,
                 max_stack_size,
+                await_promise,
             } => {
                 // Clear console buffer before eval
                 console_output.write().clear();
@@ -660,7 +689,14 @@ fn js_thread_loop(
 
                 match result {
                     Ok(value) => {
-                        let json_value = js_value_to_json(&value, &mut ctx);
+                        // If awaitPromise is requested, check if the result is a Promise
+                        // and drain microtasks until it resolves.
+                        let final_value = if await_promise {
+                            await_promise_value(value, &mut ctx, &job_queue)
+                        } else {
+                            value
+                        };
+                        let json_value = js_value_to_json(&final_value, &mut ctx);
                         let _ = resp_tx.send(JsResponse::EvalResult {
                             value: Some(json_value),
                             exception: None,
@@ -781,6 +817,97 @@ fn js_thread_loop(
 /// For interval timers, the callback is re-scheduled with the original interval.
 /// After each batch of timer callbacks, we also drain any microtasks they
 /// enqueued. Repeats until no more due timers remain (up to a safety limit).
+/// When `Runtime.evaluate` is called with `awaitPromise: true`, this function:
+/// 1. Checks if the value is a Promise (has a `.then` method)
+/// 2. Attaches `.then()`/`.catch()` handlers to capture the settled value
+/// 3. Drains the microtask queue repeatedly until the Promise settles
+/// 4. Returns the resolved value (or the rejection error as a string)
+///
+/// If the value is not a Promise, returns it unchanged.
+fn await_promise_value(
+    value: JsValue,
+    ctx: &mut Context,
+    job_queue: &Rc<TokioJobQueue>,
+) -> JsValue {
+    // Check if the value is thenable (has a .then method)
+    let is_thenable = value.as_object().is_some_and(|obj| {
+        obj.get(js_string!("then"), ctx)
+            .ok()
+            .and_then(|v| v.as_object().map(|o| o.is_callable()))
+            .unwrap_or(false)
+    });
+
+    if !is_thenable {
+        return value;
+    }
+
+    // Set up __promiseResult / __promiseSettled globals
+    // then attach .then() and .catch() handlers
+    let setup_result = ctx.eval(Source::from_bytes(
+        "globalThis.__promiseResult = undefined; globalThis.__promiseSettled = false; globalThis.__promiseError = null;"
+    ));
+    if setup_result.is_err() {
+        return value; // fallback: return the Promise object
+    }
+
+    // Store the promise and attach handlers via eval
+    let _ = ctx.register_global_property(
+        js_string!("__pendingPromise"),
+        value.clone(),
+        boa_engine::property::Attribute::all(),
+    );
+
+    let handler_code = r#"
+        (function() {
+            var p = globalThis.__pendingPromise;
+            p.then(
+                function(v) { globalThis.__promiseResult = v; globalThis.__promiseSettled = true; },
+                function(e) { globalThis.__promiseError = e instanceof Error ? e.message : String(e); globalThis.__promiseSettled = true; }
+            );
+        })()
+    "#;
+    let _ = ctx.eval(Source::from_bytes(handler_code));
+
+    // Drain microtasks repeatedly until the Promise settles
+    // (up to 50 iterations to prevent infinite loops)
+    for _ in 0..50 {
+        ctx.run_jobs();
+        drain_timers(job_queue, ctx);
+
+        let settled = ctx
+            .global_object()
+            .get(js_string!("__promiseSettled"), ctx)
+            .ok()
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false);
+
+        if settled {
+            break;
+        }
+    }
+
+    // Read the settled value
+    let error = ctx
+        .global_object()
+        .get(js_string!("__promiseError"), ctx)
+        .ok();
+    let has_error = error
+        .as_ref()
+        .and_then(|v| v.as_string())
+        .map(|s| !s.to_std_string_escaped().is_empty())
+        .unwrap_or(false);
+
+    if has_error {
+        // Return the error as a string value — the CDP handler will detect
+        // this as an exception-like result
+        error.unwrap_or(JsValue::undefined())
+    } else {
+        ctx.global_object()
+            .get(js_string!("__promiseResult"), ctx)
+            .unwrap_or(value)
+    }
+}
+
 fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
     let mut iterations = 0u32;
     loop {
@@ -813,6 +940,58 @@ fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
         if iterations > 100 {
             // Safety limit to prevent infinite timer loops
             break;
+        }
+    }
+}
+
+/// Push a mutation record to all active MutationObservers.
+fn notify_mutation_observers(
+    ctx: &mut Context,
+    mutation_type: &str,
+    target_id: u32,
+) {
+    let registry = ctx.global_object().get(js_string!("__moRegistry"), ctx);
+    if let Ok(reg_val) = registry {
+        if let Some(reg_obj) = reg_val.as_object() {
+            if let Ok(reg_arr) = JsArray::from_object(reg_obj.clone()) {
+                if let Ok(len) = reg_arr.length(ctx) {
+                    for i in 0..len {
+                        if let Ok(observer_val) = reg_arr.at(i as i64, ctx) {
+                            if let Some(obs_obj) = observer_val.as_object() {
+                                let observing = obs_obj
+                                    .get(js_string!("__observing"), ctx)
+                                    .ok()
+                                    .and_then(|v| v.as_boolean())
+                                    .unwrap_or(false);
+                                if observing {
+                                    // Create MutationRecord
+                                    let record = boa_engine::object::ObjectInitializer::new(ctx)
+                                        .property(
+                                            js_string!("type"),
+                                            JsValue::from(JsString::from(mutation_type)),
+                                            Attribute::all(),
+                                        )
+                                        .property(
+                                            js_string!("target"),
+                                            JsValue::from(target_id),
+                                            Attribute::all(),
+                                        )
+                                        .build();
+                                    // Push to __records
+                                    let records_val = obs_obj
+                                        .get(js_string!("__records"), ctx)
+                                        .unwrap_or(JsValue::Null);
+                                    if let Some(rec_obj) = records_val.as_object() {
+                                        if let Ok(rec_arr) = JsArray::from_object(rec_obj.clone()) {
+                                            let _ = rec_arr.push(JsValue::from(record), ctx);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1449,6 +1628,15 @@ fn create_context(
 
                     if let Some(obj) = _this.as_object() {
                         let _ = obj.set(js_string!("__observing"), JsValue::from(true), true, ctx);
+
+                        // Register in global __moRegistry
+                        let registry = ctx.global_object().get(js_string!("__moRegistry"), ctx)
+                            .unwrap_or(JsValue::Null);
+                        if let Some(reg_obj) = registry.as_object() {
+                            if let Ok(reg_arr) = JsArray::from_object(reg_obj.clone()) {
+                                let _ = reg_arr.push(JsValue::from(obj.clone()), ctx);
+                            }
+                        }
                     }
                     Ok(JsValue::undefined())
                 })
@@ -1482,6 +1670,14 @@ fn create_context(
         })
     };
     let _ = context.register_global_callable(js_string!("MutationObserver"), 1, mo_ctor);
+
+    // Global MutationObserver registry — tracks all active observers
+    let mo_registry = JsArray::new(&mut context);
+    let _ = context.register_global_property(
+        js_string!("__moRegistry"),
+        JsValue::from(mo_registry),
+        Attribute::all(),
+    );
 
     // --- Document object ---
 
@@ -1951,18 +2147,21 @@ fn create_context(
     let _ = context.register_global_callable(js_string!("URL"), 1, url_ctor);
 
     // --- crypto.getRandomValues (CSPRNG) ---
+    // Supports both JsArray and TypedArray (Uint8Array, Int32Array, etc.)
+    // by using object.get("length") + object.set(index, value) directly.
     let get_random_values_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let arr = args.first().cloned().unwrap_or(JsValue::undefined());
             if let Some(arr_obj) = arr.as_object() {
-                if let Ok(js_arr) = JsArray::from_object(arr_obj.clone()) {
-                    if let Ok(len) = js_arr.length(ctx) {
-                        let arr_len = len.min(65536) as usize;
+                // Try to get length from the object (works for both JsArray and TypedArray)
+                if let Ok(len_val) = arr_obj.get(js_string!("length"), ctx) {
+                    if let Some(len) = len_val.as_number() {
+                        let arr_len = (len as usize).min(65536);
                         let mut buf = vec![0u8; arr_len];
                         // Use real CSPRNG instead of predictable time-based PRNG
                         let _ = getrandom::fill(&mut buf);
                         for (i, val) in buf.iter().enumerate().take(arr_len) {
-                            let _ = js_arr.set(i as u32, JsValue::from(*val as i32), true, ctx);
+                            let _ = arr_obj.set(i as u32, JsValue::from(*val as i32), true, ctx);
                         }
                     }
                 }
@@ -2642,12 +2841,22 @@ fn register_document_object(
             let mut_set_attr = mutations_el.clone();
             let mut_set_id = id_for_obj;
             let attrs_for_set = attrs_map.clone();
+            let dom_snap_for_setattr = dom_snap_el.clone();
             let set_attr_fn = {
                 NativeFunction::from_closure(move |_this, args, _ctx| {
                     let name = args.first().and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                     let value = args.get(1).and_then(|v| v.as_string()).map(|s| s.to_std_string_escaped()).unwrap_or_default();
                     // Update shared attribute map so getAttribute sees the change
                     attrs_for_set.write().insert(name.clone(), value.clone());
+                    // Sync to snapshot so querySelector can find the attribute
+                    {
+                        let mut dom = dom_snap_for_setattr.write();
+                        if let Some(ref mut snap) = *dom {
+                            if let Some(node) = snap.nodes.get_mut(&mut_set_id) {
+                                node.attributes.insert(name.clone(), value.clone());
+                            }
+                        }
+                    }
                     mut_set_attr.write().push(DomMutation::SetAttribute { node_id: mut_set_id, name, value });
                     Ok(JsValue::undefined())
                 })
@@ -2687,19 +2896,23 @@ fn register_document_object(
 
                     if let Some(cid) = child_id {
                         // Update snapshot
-                        let mut dom = dom_snap_ac.write();
-                        if let Some(ref mut snap) = *dom {
-                            // Add child to parent's children list
-                            if let Some(parent) = snap.nodes.get_mut(&parent_id_ac) {
-                                if !parent.children.contains(&cid) {
-                                    parent.children.push(cid);
+                        {
+                            let mut dom = dom_snap_ac.write();
+                            if let Some(ref mut snap) = *dom {
+                                // Add child to parent's children list
+                                if let Some(parent) = snap.nodes.get_mut(&parent_id_ac) {
+                                    if !parent.children.contains(&cid) {
+                                        parent.children.push(cid);
+                                    }
+                                }
+                                // Set child's parent
+                                if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                                    child_node.parent = Some(parent_id_ac);
                                 }
                             }
-                            // Set child's parent
-                            if let Some(child_node) = snap.nodes.get_mut(&cid) {
-                                child_node.parent = Some(parent_id_ac);
-                            }
                         }
+                        // Notify MutationObservers
+                        notify_mutation_observers(ctx, "childList", parent_id_ac);
                     }
 
                     Ok(child)
@@ -3116,6 +3329,7 @@ fn create_element_object(
     // setAttribute(name, value) → records DomMutation::SetAttribute
     let node_id_sa = node.id;
     let mutations_sa = mutations.clone();
+    let dom_snap_sa = dom_snapshot_arc.clone();
     let set_attribute_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
             let name = args
@@ -3128,6 +3342,15 @@ fn create_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            // Sync to snapshot so querySelector can find the attribute
+            {
+                let mut dom = dom_snap_sa.write();
+                if let Some(ref mut snap) = *dom {
+                    if let Some(node) = snap.nodes.get_mut(&node_id_sa) {
+                        node.attributes.insert(name.clone(), value.clone());
+                    }
+                }
+            }
             mutations_sa.write().push(DomMutation::SetAttribute {
                 node_id: node_id_sa,
                 name,
@@ -3149,21 +3372,25 @@ fn create_element_object(
                 .and_then(|v| v.as_number().map(|n| n as u32));
 
             if let Some(cid) = child_id {
-                let mut dom = dom_snap_ac.write();
-                if let Some(ref mut snap) = *dom {
-                    if let Some(parent) = snap.nodes.get_mut(&node_id_ac) {
-                        if !parent.children.contains(&cid) {
-                            parent.children.push(cid);
+                {
+                    let mut dom = dom_snap_ac.write();
+                    if let Some(ref mut snap) = *dom {
+                        if let Some(parent) = snap.nodes.get_mut(&node_id_ac) {
+                            if !parent.children.contains(&cid) {
+                                parent.children.push(cid);
+                            }
                         }
-                    }
-                    if let Some(child_node) = snap.nodes.get_mut(&cid) {
-                        child_node.parent = Some(node_id_ac);
+                        if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                            child_node.parent = Some(node_id_ac);
+                        }
                     }
                 }
                 mutations_ac.write().push(DomMutation::AppendChild {
                     parent_id: node_id_ac,
                     child_id: cid,
                 });
+                // Notify MutationObservers
+                notify_mutation_observers(ctx, "childList", node_id_ac);
             }
             Ok(child)
         })
@@ -3181,19 +3408,23 @@ fn create_element_object(
                 .and_then(|v| v.as_number().map(|n| n as u32));
 
             if let Some(cid) = child_id {
-                let mut dom = dom_snap_rc.write();
-                if let Some(ref mut snap) = *dom {
-                    if let Some(parent) = snap.nodes.get_mut(&node_id_rc) {
-                        parent.children.retain(|&id| id != cid);
-                    }
-                    if let Some(child_node) = snap.nodes.get_mut(&cid) {
-                        child_node.parent = None;
+                {
+                    let mut dom = dom_snap_rc.write();
+                    if let Some(ref mut snap) = *dom {
+                        if let Some(parent) = snap.nodes.get_mut(&node_id_rc) {
+                            parent.children.retain(|&id| id != cid);
+                        }
+                        if let Some(child_node) = snap.nodes.get_mut(&cid) {
+                            child_node.parent = None;
+                        }
                     }
                 }
                 mutations_rc.write().push(DomMutation::RemoveChild {
                     parent_id: node_id_rc,
                     child_id: cid,
                 });
+                // Notify MutationObservers
+                notify_mutation_observers(ctx, "childList", node_id_rc);
             }
             Ok(child)
         })

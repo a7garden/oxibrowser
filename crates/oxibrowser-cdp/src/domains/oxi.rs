@@ -41,9 +41,11 @@ async fn get_page_info(ctx: &DispatchContext) -> DomainResult {
         .page()
         .and_then(|p| p.title().map(|t| t.to_string()))
         .unwrap_or_default();
+    let status = guard.page().map(|p| p.status()).unwrap_or(0);
     Ok(Some(json!({
         "url": url,
         "title": title,
+        "status": status,
         "readyState": "complete"
     })))
 }

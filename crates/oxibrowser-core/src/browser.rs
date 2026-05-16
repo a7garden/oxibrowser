@@ -205,6 +205,25 @@ impl Browser {
         &self.sessions
     }
 
+    /// Remove closed sessions from the active session list.
+    ///
+    /// Called by CDP session handlers after a WebSocket disconnects
+    /// so that the session slot is freed for new connections.
+    pub fn cleanup_closed_sessions(&self) {
+        let mut sessions = self.sessions.write();
+        let before = sessions.len();
+        sessions.retain(|s| {
+            match s.try_read() {
+                Ok(guard) => !guard.is_closed(),
+                Err(_) => true, // locked — keep it for now
+            }
+        });
+        let removed = before - sessions.len();
+        if removed > 0 {
+            info!(removed, session_count = sessions.len(), "cleaned up closed sessions");
+        }
+    }
+
     /// Whether the browser is still open.
     pub fn is_open(&self) -> bool {
         !self.closed.load(Ordering::SeqCst)

@@ -146,6 +146,13 @@ impl CdpSession {
             }
         }
 
+        // Close the underlying Session so is_closed() returns true.
+        self.session.write().await.close().await.ok();
+
+        // Free the session slot so new connections are not rejected
+        // when max_sessions is reached.
+        self.browser.cleanup_closed_sessions();
+
         info!(session_id = %self.session_id, "CDP session ended");
         Ok(())
     }
