@@ -28,8 +28,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      # Run integration tests (require network) only on main pushes
-      - run: cargo test --test integration -- --ignored
+      # Integration tests (require network) are marked #[ignore] — run only on main pushes
+      # Note: integration tests require actual network access and external servers,
+      # so they are intentionally ignored by default. Run manually with -- --ignored.
+      - run: cargo test -p oxibrowser --test integration -- --ignored
         if: github.ref == 'refs/heads/main'
 
   clippy:
