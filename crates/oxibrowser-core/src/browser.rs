@@ -3,13 +3,15 @@
 //! Mirrors Lightpanda's `Browser.zig`: owns sessions, the HTTP client,
 //! and global browser state.
 
+use crate::browse_result::BrowseResult;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::session::Session;
+use crate::tab::Tab;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -19,7 +21,7 @@ use tracing::{info, warn};
 pub struct BrowserId(u64);
 
 impl BrowserId {
-    fn next() -> Self {
+    pub(crate) fn next() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
@@ -49,6 +51,8 @@ pub struct Browser {
     cookie_jar: Arc<RwLock<CookieJar>>,
     /// Whether the browser has been closed.
     closed: std::sync::atomic::AtomicBool,
+    /// Number of active Tab sessions (not in the sessions vec).
+    tab_count: Arc<AtomicUsize>,
     /// Shutdown signal — broadcast to all session holders.
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -90,6 +94,7 @@ impl Browser {
             sessions: RwLock::new(Vec::new()),
             cookie_jar,
             closed: std::sync::atomic::AtomicBool::new(false),
+            tab_count: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
         })
     }
@@ -101,15 +106,12 @@ impl Browser {
     pub async fn new_session(&self) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         self.ensure_open()?;
 
-        // Check capacity under a short-lived read lock, then create the session
-        // *outside* any lock to avoid holding a parking_lot::RwLock across .await.
-        {
-            let sessions = self.sessions.read();
-            if sessions.len() >= self.config.max_sessions {
-                return Err(CoreError::SessionError(
-                    "maximum number of sessions reached".into(),
-                ));
-            }
+        // Check capacity: both CDP sessions and Tab sessions count.
+        let total = self.sessions.read().len() + self.tab_count.load(Ordering::Relaxed);
+        if total >= self.config.max_sessions {
+            return Err(CoreError::SessionError(
+                "maximum number of sessions reached".into(),
+            ));
         }
 
         let session = Session::new(
@@ -128,6 +130,61 @@ impl Browser {
             "new session created"
         );
         Ok(session)
+    }
+
+    /// One-shot: URL → content.
+    ///
+    /// Creates a temporary session, navigates to the URL, extracts the
+    /// `BrowseResult`, and cleans up. Cookies persist across calls via
+    /// the browser's shared cookie jar.
+    ///
+    /// This covers the 90% agent use case: "read this URL".
+    pub async fn browse(&self, url: &str) -> Result<BrowseResult> {
+        self.ensure_open()?;
+        let session = self.new_session().await?;
+        let mut s = session.write().await;
+        s.navigate(url).await?;
+        let result = match s.page() {
+            Some(page) => BrowseResult::from_page(page),
+            None => BrowseResult::empty(),
+        };
+        // Close the temporary session to free the slot.
+        // Non-fatal — we already have the result.
+        let _ = s.close().await;
+        drop(s);
+        Ok(result)
+    }
+
+    /// Open an interactive tab for agent use.
+    ///
+    /// Returns a `Tab` that is `Clone` and takes `&self` only — no lock
+    /// management needed by the consumer.
+    ///
+    /// The session counts toward `max_sessions` but is not tracked for
+    /// CDP cleanup — use `Tab::close()` to release the slot.
+    pub async fn new_tab(&self) -> Result<Tab> {
+        self.ensure_open()?;
+
+        // Check capacity against tracked sessions
+        let session_count = self.sessions.read().len() + self.tab_count.load(Ordering::Relaxed);
+        if session_count >= self.config.max_sessions {
+            return Err(CoreError::SessionError(
+                "maximum number of sessions reached".into(),
+            ));
+        }
+
+        self.tab_count.fetch_add(1, Ordering::Relaxed);
+
+        let session = Session::new(
+            self.id,
+            self.config.clone(),
+            self.http_client.clone(),
+            self.cookie_jar.clone(),
+        )
+        .await?;
+
+        tracing::info!(session_count = self.sessions.read().len(), "new tab created");
+        Ok(Tab::new_with_cleanup(session, self.tab_count.clone()))
     }
 
     /// Convenience: create a session and navigate to a URL.
@@ -325,5 +382,65 @@ mod tests {
             matches!(result, Err(CoreError::BrowserClosed)),
             "error should be BrowserClosed"
         );
+    }
+
+    #[tokio::test]
+    async fn test_browser_browse_after_close_returns_error() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        browser.close().await.unwrap();
+
+        let result = browser.browse("https://example.com").await;
+        assert!(result.is_err(), "browse() after close should fail");
+        assert!(
+            matches!(result, Err(CoreError::BrowserClosed)),
+            "error should be BrowserClosed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_tab_creates_tab() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        let tab = browser.new_tab().await;
+        assert!(tab.is_ok(), "new_tab() should create a tab");
+        let tab = tab.unwrap();
+        assert!(!tab.is_closed(), "new tab should not be closed");
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_tab_clonable() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        let tab = browser.new_tab().await.unwrap();
+        let tab2 = tab.clone();
+        assert!(!tab2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_tab_after_close_returns_error() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        browser.close().await.unwrap();
+
+        let result = browser.new_tab().await;
+        assert!(result.is_err(), "new_tab() after close should fail");
+        assert!(
+            matches!(result, Err(CoreError::BrowserClosed)),
+            "error should be BrowserClosed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_new_tab_respects_max_sessions() {
+        let mut config = BrowserConfig::headless();
+        config.max_sessions = 2;
+        let browser = Browser::new(config).await.unwrap();
+
+        let _s1 = browser.new_session().await.unwrap();
+        let _t1 = browser.new_tab().await.unwrap();
+        let t2 = browser.new_tab().await;
+
+        assert!(t2.is_err(), "exceeding max_sessions via new_tab should fail");
     }
 }

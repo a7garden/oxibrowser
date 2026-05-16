@@ -778,6 +778,13 @@ impl Session {
         self.closed.load(Ordering::SeqCst)
     }
 
+    /// Replace the active page and inject DOM snapshot (for testing).
+    #[cfg(test)]
+    pub fn inject_dom_snapshot_for_test(&mut self, page: Page) {
+        self.active_page = Some(page);
+        self.inject_dom_snapshot();
+    }
+
     /// Fetch sub-resources (JS, CSS, images) referenced by the current page.
     ///
     /// Extracts resource URLs from the DOM, fetches them over HTTP,
