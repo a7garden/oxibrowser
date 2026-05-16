@@ -3607,6 +3607,484 @@ fn create_element_object(
         })
     };
 
+    // ── 트리 탐색 접근자 (firstChild, lastChild, nextSibling, previousSibling) ──
+
+    let snap_fc = dom_snapshot_arc.clone();
+    let nid_fc = node.id;
+    let mut_fc = mutations.clone();
+    let first_child_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let dom = snap_fc.read();
+            if let Some(ref s) = *dom {
+                if let Some(fid) = s.first_child(nid_fc) {
+                    if let Some(c) = s.nodes.get(&fid) {
+                        return Ok(create_element_object(s, c, ctx, &mut_fc, &snap_fc));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+    let first_child_getter_fn = FunctionObjectBuilder::new(ctx.realm(), first_child_getter)
+        .name(js_string!("get firstChild"))
+        .build();
+
+    let snap_lc = dom_snapshot_arc.clone();
+    let nid_lc = node.id;
+    let mut_lc = mutations.clone();
+    let last_child_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let dom = snap_lc.read();
+            if let Some(ref s) = *dom {
+                if let Some(lid) = s.last_child(nid_lc) {
+                    if let Some(c) = s.nodes.get(&lid) {
+                        return Ok(create_element_object(s, c, ctx, &mut_lc, &snap_lc));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+    let last_child_getter_fn = FunctionObjectBuilder::new(ctx.realm(), last_child_getter)
+        .name(js_string!("get lastChild"))
+        .build();
+
+    let snap_ns = dom_snapshot_arc.clone();
+    let nid_ns = node.id;
+    let mut_ns = mutations.clone();
+    let next_sibling_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let dom = snap_ns.read();
+            if let Some(ref s) = *dom {
+                if let Some(nid) = s.next_sibling(nid_ns) {
+                    if let Some(c) = s.nodes.get(&nid) {
+                        return Ok(create_element_object(s, c, ctx, &mut_ns, &snap_ns));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+    let next_sibling_getter_fn = FunctionObjectBuilder::new(ctx.realm(), next_sibling_getter)
+        .name(js_string!("get nextSibling"))
+        .build();
+
+    let snap_ps = dom_snapshot_arc.clone();
+    let nid_ps = node.id;
+    let mut_ps = mutations.clone();
+    let prev_sibling_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let dom = snap_ps.read();
+            if let Some(ref s) = *dom {
+                if let Some(pid) = s.previous_sibling(nid_ps) {
+                    if let Some(c) = s.nodes.get(&pid) {
+                        return Ok(create_element_object(s, c, ctx, &mut_ps, &snap_ps));
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+    let prev_sibling_getter_fn = FunctionObjectBuilder::new(ctx.realm(), prev_sibling_getter)
+        .name(js_string!("get previousSibling"))
+        .build();
+
+    // ── 트리 조작 메서드 (insertBefore, replaceChild, removeAttribute, cloneNode, remove) ──
+
+    let snap_ib = dom_snapshot_arc.clone();
+    let nid_ib = node.id;
+    let mut_ib = mutations.clone();
+    let insert_before_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_child = args.first().cloned().unwrap_or(JsValue::undefined());
+            let ref_child = args.get(1).cloned().unwrap_or(JsValue::null());
+            let new_id = new_child.as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+            let ref_id = if ref_child.is_null() || ref_child.is_undefined() {
+                None
+            } else {
+                ref_child.as_object()
+                    .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                    .and_then(|v| v.as_number().map(|n| n as u32))
+            };
+            if let Some(nid) = new_id {
+                let mut dom = snap_ib.write();
+                if let Some(ref mut s) = *dom {
+                    // 기존 부모에서 제거
+                    if let Some(old_parent) = s.nodes.get(&nid).and_then(|n| n.parent) {
+                        if old_parent != nid_ib {
+                            if let Some(p) = s.nodes.get_mut(&old_parent) {
+                                p.children.retain(|&c| c != nid);
+                            }
+                        }
+                    }
+                    // ref_id 위치에 삽입 또는 맨 뒤에 append
+                    let children = s.nodes.get(&nid_ib)
+                        .map(|p| p.children.clone())
+                        .unwrap_or_default();
+                    if let Some(rid) = ref_id {
+                        if let Some(pos) = children.iter().position(|&c| c == rid) {
+                            if let Some(p) = s.nodes.get_mut(&nid_ib) {
+                                p.children.retain(|&c| c != nid);
+                                p.children.insert(pos, nid);
+                            }
+                        }
+                    } else {
+                        if let Some(p) = s.nodes.get_mut(&nid_ib) {
+                            p.children.retain(|&c| c != nid);
+                            p.children.push(nid);
+                        }
+                    }
+                    if let Some(c) = s.nodes.get_mut(&nid) {
+                        c.parent = Some(nid_ib);
+                    }
+                    mut_ib.write().push(DomMutation::AppendChild {
+                        parent_id: nid_ib,
+                        child_id: nid,
+                    });
+                }
+            }
+            Ok(new_child)
+        })
+    };
+
+    let snap_rc = dom_snapshot_arc.clone();
+    let nid_rc = node.id;
+    let mut_rc = mutations.clone();
+    let replace_child_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_child = args.first().cloned().unwrap_or(JsValue::undefined());
+            let old_child = args.get(1).cloned().unwrap_or(JsValue::undefined());
+            let new_id = new_child.as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+            let old_id = old_child.as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+            if let (Some(nid), Some(oid)) = (new_id, old_id) {
+                let mut dom = snap_rc.write();
+                if let Some(ref mut s) = *dom {
+                    if let Some(p) = s.nodes.get_mut(&nid_rc) {
+                        p.children.retain(|&c| c != oid);
+                        if let Some(pos) = p.children.iter().position(|&c| c == oid) {
+                            p.children.insert(pos, nid);
+                        } else {
+                            p.children.push(nid);
+                        }
+                    }
+                    if let Some(c) = s.nodes.get_mut(&nid) { c.parent = Some(nid_rc); }
+                    if let Some(o) = s.nodes.get_mut(&oid) { o.parent = None; }
+                    mut_rc.write().push(DomMutation::RemoveChild { parent_id: nid_rc, child_id: oid });
+                    mut_rc.write().push(DomMutation::AppendChild { parent_id: nid_rc, child_id: nid });
+                }
+            }
+            Ok(new_child)
+        })
+    };
+
+    let snap_ra = dom_snapshot_arc.clone();
+    let nid_ra = node.id;
+    let mut_ra = mutations.clone();
+    let remove_attr_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args.first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let mut dom = snap_ra.write();
+                if let Some(ref mut s) = *dom {
+                    if let Some(n) = s.nodes.get_mut(&nid_ra) {
+                        n.attributes.remove(&name);
+                    }
+                }
+                mut_ra.write().push(DomMutation::SetAttribute {
+                    node_id: nid_ra,
+                    name,
+                    value: String::new(),
+                });
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let snap_rm = dom_snapshot_arc.clone();
+    let nid_rm = node.id;
+    let mut_rm = mutations.clone();
+    let remove_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let mut dom = snap_rm.write();
+            if let Some(ref mut s) = *dom {
+                let pid = s.nodes.get(&nid_rm).and_then(|n| n.parent);
+                if let Some(pid2) = pid {
+                    if let Some(p) = s.nodes.get_mut(&pid2) {
+                        p.children.retain(|&c| c != nid_rm);
+                    }
+                    mut_rm.write().push(DomMutation::RemoveChild {
+                        parent_id: pid2,
+                        child_id: nid_rm,
+                    });
+                }
+                if let Some(n) = s.nodes.get_mut(&nid_rm) {
+                    n.parent = None;
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let snap_cl = dom_snapshot_arc.clone();
+    let nid_cl = node.id;
+    let mut_cl = mutations.clone();
+    let clone_node_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let deep = args.first().and_then(|v| v.as_boolean()).unwrap_or(false);
+            let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
+            // 먼저 필요한 값들을 clone (borrow 해제 후 insert)
+            let (tag, attrs, text, ntype) = {
+                let dom = snap_cl.read();
+                if let Some(ref s) = *dom {
+                    if let Some(src) = s.nodes.get(&nid_cl) {
+                        (
+                            src.tag.clone(),
+                            if deep { src.attributes.clone() } else { HashMap::new() },
+                            if deep { src.text_content.clone() } else { String::new() },
+                            src.node_type,
+                        )
+                    } else { return Ok(JsValue::null()); }
+                } else { return Ok(JsValue::null()); }
+            };
+            let cloned = DomNode {
+                id: new_id,
+                tag: tag.clone(),
+                attributes: attrs,
+                text_content: text,
+                children: Vec::new(),
+                parent: None,
+                node_type: ntype,
+            };
+            {
+                let mut dom = snap_cl.write();
+                if let Some(ref mut s) = *dom {
+                    s.nodes.insert(new_id, cloned);
+                }
+            }
+            mut_cl.write().push(DomMutation::CreateElement {
+                node_id: new_id,
+                tag: tag.clone(),
+            });
+            let dom = snap_cl.read();
+            if let Some(ref s) = *dom {
+                if let Some(n) = s.nodes.get(&new_id) {
+                    return Ok(create_element_object(s, n, ctx, &mut_cl, &snap_cl));
+                }
+            }
+            Ok(JsValue::null())
+        })
+    };
+
+    // ── 스타일/클래스 접근자 (style, classList) ──
+    // .function()으로 등록 — 호출 시 객체 반환
+
+    let snap_st = dom_snapshot_arc.clone();
+    let nid_st = node.id;
+    let style_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let sp_arc = snap_st.clone();
+            let sp_id = nid_st;
+            let set_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let prop = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let val = args2.get(1).and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    if !prop.is_empty() {
+                        let mut dom = sp_arc.write();
+                        if let Some(ref mut s) = *dom {
+                            if let Some(n) = s.nodes.get_mut(&sp_id) {
+                                n.attributes.insert(format!("style:{}", prop), val);
+                            }
+                        }
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let gp_arc = snap_st.clone();
+            let gp_id = nid_st;
+            let get_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let prop = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let dom = gp_arc.read();
+                    if let Some(ref s) = *dom {
+                        if let Some(n) = s.nodes.get(&gp_id) {
+                            let key = format!("style:{}", prop);
+                            if let Some(v) = n.attributes.get(&key) {
+                                return Ok(JsValue::from(JsString::from(v.as_str())));
+                            }
+                        }
+                    }
+                    Ok(JsValue::from(JsString::from("")))
+                })
+            };
+            let rp_arc = snap_st.clone();
+            let rp_id = nid_st;
+            let rm_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let prop = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    if !prop.is_empty() {
+                        let mut dom = rp_arc.write();
+                        if let Some(ref mut s) = *dom {
+                            if let Some(n) = s.nodes.get_mut(&rp_id) {
+                                let key = format!("style:{}", prop);
+                                n.attributes.remove(&key);
+                            }
+                        }
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+            let style_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .function(set_fn, js_string!("setProperty"), 2)
+                .function(get_fn, js_string!("getPropertyValue"), 1)
+                .function(rm_fn, js_string!("removeProperty"), 1)
+                .build();
+            Ok(JsValue::from(style_obj))
+        })
+    };
+
+    let snap_cls = dom_snapshot_arc.clone();
+    let nid_cls = node.id;
+    let classlist_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // 현재 class 속성 읽기
+            let current = {
+                let dom = snap_cls.read();
+                if let Some(ref s) = *dom {
+                    if let Some(n) = s.nodes.get(&nid_cls) {
+                        n.attributes.get("class").cloned().unwrap_or_default()
+                    } else { String::new() }
+                } else { String::new() }
+            };
+            let count = current.split_whitespace().count() as i32;
+
+            let ca_arc = snap_cls.clone();
+            let ca_id = nid_cls;
+            let add_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let cls = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    if !cls.is_empty() {
+                        let mut dom = ca_arc.write();
+                        if let Some(ref mut s) = *dom {
+                            if let Some(n) = s.nodes.get_mut(&ca_id) {
+                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                                if !cur.split_whitespace().any(|c| c == cls) {
+                                    let new_cls = if cur.is_empty() { cls.clone() } else { format!("{} {}", cur, cls) };
+                                    n.attributes.insert("class".to_string(), new_cls);
+                                }
+                            }
+                        }
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            let cr_arc = snap_cls.clone();
+            let cr_id = nid_cls;
+            let rm_cls_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let cls = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    if !cls.is_empty() {
+                        let mut dom = cr_arc.write();
+                        if let Some(ref mut s) = *dom {
+                            if let Some(n) = s.nodes.get_mut(&cr_id) {
+                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                                let new_cls = cur.split_whitespace().filter(|c| *c != cls).collect::<Vec<_>>().join(" ");
+                                n.attributes.insert("class".to_string(), new_cls);
+                            }
+                        }
+                    }
+                    Ok(JsValue::undefined())
+                })
+            };
+
+            let ch_arc = snap_cls.clone();
+            let ch_id = nid_cls;
+            let has_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let cls = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let dom = ch_arc.read();
+                    if let Some(ref s) = *dom {
+                        if let Some(n) = s.nodes.get(&ch_id) {
+                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                            return Ok(JsValue::from(cur.split_whitespace().any(|c| c == cls)));
+                        }
+                    }
+                    Ok(JsValue::from(false))
+                })
+            };
+
+            let ct_arc = snap_cls.clone();
+            let ct_id = nid_cls;
+            let toggle_fn = {
+                NativeFunction::from_closure(move |_this2, args2, _ctx2| {
+                    let cls = args2.first().and_then(|v| v.as_string())
+                        .map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let dom = ct_arc.read();
+                    let mut found = false;
+                    if let Some(ref s) = *dom {
+                        if let Some(n) = s.nodes.get(&ct_id) {
+                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                            found = cur.split_whitespace().any(|c| c == cls);
+                        }
+                    }
+                    drop(dom);
+                    if !cls.is_empty() {
+                        let mut dom2 = ct_arc.write();
+                        if let Some(ref mut s) = *dom2 {
+                            if let Some(n) = s.nodes.get_mut(&ct_id) {
+                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                                let new_cls = if found {
+                                    cur.split_whitespace().filter(|c| *c != cls).collect::<Vec<_>>().join(" ")
+                                } else {
+                                    if cur.is_empty() { cls.clone() } else { format!("{} {}", cur, cls) }
+                                };
+                                n.attributes.insert("class".to_string(), new_cls);
+                            }
+                        }
+                    }
+                    Ok(JsValue::from(!found))
+                })
+            };
+
+            let cl_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("length"), JsValue::from(count), Attribute::all())
+                .function(add_fn, js_string!("add"), 1)
+                .function(rm_cls_fn, js_string!("remove"), 1)
+                .function(has_fn, js_string!("contains"), 1)
+                .function(toggle_fn, js_string!("toggle"), 1)
+                .build();
+            Ok(JsValue::from(cl_obj))
+        })
+    };
+
+    // ── 포커스/폼 (noop) ──
+
+    let focus_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
+    };
+    let blur_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
+    };
+    let submit_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
+    };
+
     // value getter
     let value_val = node
         .attributes
@@ -3792,6 +4270,44 @@ fn create_element_object(
             js_string!("childNodes"),
             0,
         )
+        // ── 트리 탐색 접근자 ──
+        .accessor(
+            js_string!("firstChild"),
+            Some(first_child_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lastChild"),
+            Some(last_child_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nextSibling"),
+            Some(next_sibling_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("previousSibling"),
+            Some(prev_sibling_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        // ── 트리 조작 메서드 ──
+        .function(insert_before_fn, js_string!("insertBefore"), 2)
+        .function(replace_child_fn, js_string!("replaceChild"), 2)
+        .function(remove_attr_fn, js_string!("removeAttribute"), 1)
+        .function(clone_node_fn, js_string!("cloneNode"), 1)
+        .function(remove_fn, js_string!("remove"), 0)
+        // ── 스타일/클래스 (함수 — 호출 시 객체 반환) ──
+        .function(style_fn, js_string!("style"), 0)
+        .function(classlist_fn, js_string!("classList"), 0)
+        // ── 포커스/폼 ──
+        .function(focus_fn, js_string!("focus"), 0)
+        .function(blur_fn, js_string!("blur"), 0)
+        .function(submit_fn, js_string!("submit"), 0)
         .property(js_string!("__nodeId"), JsValue::from(node.id), Attribute::all())
         .accessor(
             js_string!("value"),
