@@ -40,6 +40,7 @@ use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
 
 use crate::error::{CoreError, Result};
+use crate::css::LayoutEngine;
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
@@ -4675,6 +4676,63 @@ fn create_element_object(
         .name(js_string!("get classList"))
         .build();
 
+    // ── getBoundingClientRect ──
+    let gbr_dom = dom_snapshot_arc.clone();
+    let gbr_id = node.id;
+    let get_bounding_client_rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = gbr_dom.read();
+            let snapshot = match dom.as_ref() {
+                Some(s) => s,
+                None => return Ok(JsValue::null()),
+            };
+            let rect = LayoutEngine::compute_rect(snapshot, gbr_id);
+            let obj = boa_engine::object::ObjectInitializer::new(_ctx)
+                .property(js_string!("x"), JsValue::from(rect.x), Attribute::all())
+                .property(js_string!("y"), JsValue::from(rect.y), Attribute::all())
+                .property(js_string!("width"), JsValue::from(rect.width), Attribute::all())
+                .property(js_string!("height"), JsValue::from(rect.height), Attribute::all())
+                .property(js_string!("top"), JsValue::from(rect.top), Attribute::all())
+                .property(js_string!("right"), JsValue::from(rect.right), Attribute::all())
+                .property(js_string!("bottom"), JsValue::from(rect.bottom), Attribute::all())
+                .property(js_string!("left"), JsValue::from(rect.left), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    // ── offsetWidth / offsetHeight ──
+    let ow_dom = dom_snapshot_arc.clone();
+    let ow_id = node.id;
+    let offset_width_getter_raw = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = ow_dom.read();
+            if let Some(ref snap) = *dom {
+                let rect = LayoutEngine::compute_rect(snap, ow_id);
+                return Ok(JsValue::from(rect.width));
+            }
+            Ok(JsValue::from(0.0))
+        })
+    };
+    let offset_width_getter = FunctionObjectBuilder::new(ctx.realm(), offset_width_getter_raw)
+        .name(js_string!("get offsetWidth"))
+        .build();
+    let oh_dom = dom_snapshot_arc.clone();
+    let oh_id = node.id;
+    let offset_height_getter_raw = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = oh_dom.read();
+            if let Some(ref snap) = *dom {
+                let rect = LayoutEngine::compute_rect(snap, oh_id);
+                return Ok(JsValue::from(rect.height));
+            }
+            Ok(JsValue::from(0.0))
+        })
+    };
+    let offset_height_getter = FunctionObjectBuilder::new(ctx.realm(), offset_height_getter_raw)
+        .name(js_string!("get offsetHeight"))
+        .build();
+
     // ── 포커스/폼 (noop) ──
 
     let focus_fn =
@@ -5142,6 +5200,20 @@ fn create_element_object(
         .accessor(
             js_string!("classList"),
             Some(classlist_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        // ── 레이아웃 평가 ──
+        .function(get_bounding_client_rect_fn, js_string!("getBoundingClientRect"), 0)
+        .accessor(
+            js_string!("offsetWidth"),
+            Some(offset_width_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetHeight"),
+            Some(offset_height_getter),
             None,
             Attribute::all(),
         )
@@ -5848,6 +5920,86 @@ fn register_window_globals(
         .get(js_string!("console"), ctx)
         .unwrap_or(JsValue::undefined());
 
+    // ── getComputedStyle(element) ──
+    let gcs_dom = dom_snapshot.clone();
+    let get_computed_style_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let element = args.first().cloned().unwrap_or(JsValue::null());
+            let node_id = element
+                .as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as u32));
+
+            let node_id = match node_id {
+                Some(id) => id,
+                None => return Ok(JsValue::null()),
+            };
+
+            let dom = gcs_dom.read();
+            let snapshot = match dom.as_ref() {
+                Some(s) => s,
+                None => return Ok(JsValue::null()),
+            };
+
+            let cs = match LayoutEngine::compute_style(snapshot, node_id) {
+                Some(c) => c,
+                None => return Ok(JsValue::null()),
+            };
+
+            let gcs_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("display"), JsValue::from(JsString::from(cs.display.clone())), Attribute::all())
+                .property(js_string!("visibility"), JsValue::from(JsString::from(cs.visibility.clone())), Attribute::all())
+                .property(js_string!("opacity"), JsValue::from(cs.opacity), Attribute::all())
+                .property(js_string!("color"), JsValue::from(JsString::from(cs.color.clone())), Attribute::all())
+                .property(js_string!("backgroundColor"), JsValue::from(JsString::from(cs.background_color.clone())), Attribute::all())
+                .property(js_string!("fontSize"), JsValue::from(JsString::from(format!("{}px", cs.font_size))), Attribute::all())
+                .property(js_string!("fontWeight"), JsValue::from(JsString::from(cs.font_weight.clone())), Attribute::all())
+                .property(js_string!("textAlign"), JsValue::from(JsString::from(cs.text_align.clone())), Attribute::all())
+                .property(js_string!("overflow"), JsValue::from(JsString::from(cs.overflow.clone())), Attribute::all())
+                .property(js_string!("pointerEvents"), JsValue::from(JsString::from(cs.pointer_events.clone())), Attribute::all())
+                .property(js_string!("position"), JsValue::from(JsString::from(cs.position.clone())), Attribute::all())
+                .property(js_string!("width"), cs.width.map(|w| JsValue::from(JsString::from(format!("{}px", w)))).unwrap_or(JsValue::from(JsString::from("auto"))), Attribute::all())
+                .property(js_string!("height"), cs.height.map(|h| JsValue::from(JsString::from(format!("{}px", h)))).unwrap_or(JsValue::from(JsString::from("auto"))), Attribute::all())
+                .property(js_string!("zIndex"), cs.z_index.map(|z| JsValue::from(JsString::from(z.to_string()))).unwrap_or(JsValue::from(JsString::from("auto"))), Attribute::all())
+                .property(js_string!("_visible"), JsValue::from(cs.visible), Attribute::all())
+                .property(js_string!("_interactive"), JsValue::from(cs.interactive), Attribute::all())
+                // getPropertyValue(name) — look up property by camelCase name
+                .function({
+                    let props = serde_json::json!({
+                        "display": cs.display,
+                        "visibility": cs.visibility,
+                        "opacity": cs.opacity,
+                        "color": cs.color,
+                        "backgroundColor": cs.background_color,
+                        "fontSize": format!("{}px", cs.font_size),
+                        "fontWeight": cs.font_weight,
+                        "textAlign": cs.text_align,
+                        "overflow": cs.overflow,
+                        "position": cs.position,
+                        "pointerEvents": cs.pointer_events,
+                        "width": cs.width.map(|w| format!("{}px", w)).unwrap_or_else(|| "auto".to_string()),
+                        "height": cs.height.map(|h| format!("{}px", h)).unwrap_or_else(|| "auto".to_string()),
+                        "zIndex": cs.z_index.map(|z| z.to_string()).unwrap_or_else(|| "auto".to_string()),
+                    });
+                    {
+                        NativeFunction::from_closure(move |_this, args, _ctx| {
+                            let name = args.first()
+                                .and_then(|v| v.as_string())
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_default();
+                            let val = props.get(&name)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            Ok(JsValue::from(JsString::from(val)))
+                        })
+                    }
+                }, js_string!("getPropertyValue"), 1)
+                .build();
+
+            Ok(JsValue::from(gcs_obj))
+        })
+    };
+
     let window_final = boa_engine::object::ObjectInitializer::new(ctx)
         // Copy viewport props
         .property(
@@ -5905,6 +6057,7 @@ fn register_window_globals(
         .function(body_getter, js_string!("getBody"), 0)
         .function(head_getter, js_string!("getHead"), 0)
         .function(document_element_getter, js_string!("getDocumentElement"), 0)
+        .function(get_computed_style_fn, js_string!("getComputedStyle"), 1)
         .build();
 
     let _ = ctx.register_global_property(
@@ -5912,11 +6065,20 @@ fn register_window_globals(
         JsValue::from(window_final.clone()),
         Attribute::all(),
     );
+    // Register getComputedStyle as a standalone global before moving window_final
+    let gcs_fn_val = window_final.get(js_string!("getComputedStyle"), ctx)
+        .unwrap_or(JsValue::undefined());
+    let _ = ctx.register_global_property(
+        js_string!("getComputedStyle"),
+        gcs_fn_val,
+        Attribute::all(),
+    );
     let _ = ctx.register_global_property(
         js_string!("self"),
         JsValue::from(window_final),
         Attribute::all(),
     );
+
     // Also register navigator and location as standalone globals (browser spec)
     let _ = ctx.register_global_property(
         js_string!("navigator"),
@@ -7179,5 +7341,127 @@ mod tests {
         let result = rt.evaluate("Array.from('hello').length").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value.unwrap(), 5);
+    }
+
+    // ── Layout evaluation integration tests ──
+
+    #[tokio::test]
+    async fn test_get_computed_style_display_none() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><div id="box" style="display:none">hidden</div></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("box"))._visible"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_get_computed_style_visible_div() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><div id="box">visible</div></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("box"))._visible"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn test_get_computed_style_color() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><p id="red" style="color:red">Red</p></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("red")).color"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), "#ff0000");
+    }
+
+    #[tokio::test]
+    async fn test_get_computed_style_interactive_button() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><button id="btn">Click</button></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("btn"))._interactive"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn test_get_computed_style_disabled_button() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><button id="btn" disabled>Click</button></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("btn"))._interactive"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn test_get_computed_style_get_property_value() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><div id="box" style="position:absolute">Abs</div></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"getComputedStyle(document.getElementById("box")).getPropertyValue("position")"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), "absolute");
+    }
+
+    #[tokio::test]
+    async fn test_get_bounding_client_rect() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><div id="box" style="width:200px;height:100px">Box</div></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"var r = document.getElementById("box").getBoundingClientRect(); r.width + "x" + r.height"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), "200x100");
+    }
+
+    #[tokio::test]
+    async fn test_offset_width_height() {
+        let mut rt = JsRuntime::new();
+        let html = r##"<html><body><div id="box" style="width:300px;height:150px">Box</div></body></html>"##;
+        let frame = make_frame(html);
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
+        let result = rt
+            .evaluate(r#"document.getElementById("box").offsetWidth + "x" + document.getElementById("box").offsetHeight"#)
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value.unwrap(), "300x150");
     }
 }

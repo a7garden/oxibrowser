@@ -4,6 +4,8 @@
 //! - `OXI.getMarkdown` — page content as Markdown
 //! - `OXI.getPageInfo` — URL, title, status
 //! - `OXI.getStructuredPage` — headings, links, meta as structured JSON
+//! - `OXI.getAccessibilityTree` — semantic tree of what's on the page
+//! - `OXI.getBoxModelScreenshot` — PNG with colored boxes for each element
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
@@ -15,6 +17,8 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "getMarkdown" => get_markdown(ctx).await,
         "getPageInfo" => get_page_info(ctx).await,
         "getStructuredPage" => get_structured_page(params, ctx).await,
+        "getAccessibilityTree" => get_accessibility_tree(ctx).await,
+        "getBoxModelScreenshot" => get_box_model_screenshot(params, ctx).await,
         _ => Err(CdpError {
             code: -32601,
             message: format!("unknown method: OXI.{}", method),
@@ -122,5 +126,59 @@ async fn get_structured_page(_params: Option<Value>, ctx: &DispatchContext) -> D
         "meta": meta,
         "linkCount": links.len(),
         "headingCount": headings.len(),
+    })))
+}
+
+/// OXI.getAccessibilityTree — return semantic tree of page content.
+///
+/// Shows what a user (or screen reader) would perceive:
+/// roles, labels, visibility, interactivity, approximate positions.
+async fn get_accessibility_tree(ctx: &DispatchContext) -> DomainResult {
+    let guard = ctx.session.read().await;
+    let snapshot = guard
+        .page()
+        .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
+
+    let tree = match snapshot {
+        Some(s) => oxibrowser_core::css::render_accessibility_tree(&s),
+        None => "(no page loaded)".into(),
+    };
+
+    Ok(Some(json!({ "tree": tree })))
+}
+
+/// OXI.getBoxModelScreenshot — PNG with colored boxes for each element.
+///
+/// Uses LayoutEngine to estimate positions and draws:
+/// - Background-colored rectangles for each visible element
+/// - Text content inside boxes
+/// - Element borders
+async fn get_box_model_screenshot(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let viewport_width = params
+        .get("viewportWidth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1280) as u32;
+
+    let guard = ctx.session.read().await;
+    let snapshot = guard
+        .page()
+        .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
+
+    let png_bytes = match snapshot {
+        Some(s) => oxibrowser_core::css::render_box_model_png(&s, viewport_width)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+
+    Ok(Some(json!({
+        "data": data,
+        "metadata": {
+            "pageScaleFactor": 1,
+            "deviceWidth": viewport_width,
+        }
     })))
 }
