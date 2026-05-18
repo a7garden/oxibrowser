@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-05-18
+
+### Added
+- **OXI.getAccessibilityTree** CDP method — semantic tree of page content with roles, labels, visibility, interactivity, and approximate Y positions
+- **OXI.getBoxModelScreenshot** CDP method — PNG screenshot with colored boxes representing each DOM element
+- **Box Model Renderer** (`css/visual.rs`) — renders elements as colored rectangles with background colors, borders, and text
+- **Color parser** — full CSS color support: `#RGB`, `#RRGGBB`, `rgb()`, `rgba()`, `hsl()`, `hsla()`, `currentColor`, and 100+ named colors
+
+### Added (JS API)
+- **`getComputedStyle(el)`** — global function and `window.getComputedStyle`, returns CSSStyleDeclaration with computed values
+- **`element.getBoundingClientRect()`** — returns DOMRect with x, y, width, height, top, right, bottom, left
+- **`element.offsetWidth` / `element.offsetHeight`** — layout-based dimensions
+- **`element._visible`** — boolean: `display !== none && visibility !== hidden && opacity !== 0`
+- **`element._interactive`** — boolean: not `disabled` + `pointerEvents !== none`
+- **`style.getPropertyValue(name)`** — get computed property value
+
+### Added (CSS Layout Engine)
+- **`LayoutEngine`** (`css/layout.rs`) — pure-Rust CSS layout approximation:
+  - Tag defaults (block, inline, replaced elements)
+  - Inline style parsing (`style="color:red"`)
+  - CSS inheritance (font, color, visibility)
+  - Color/length normalization
+  - Width estimation with wrapping
+  - Y-position estimation from DOM order
+- **`ComputedStyle`** struct — full computed style map with visibility, interactive, colors, dimensions
+- **`LayoutRect`** struct — position and size for each element
+
+### Fixed
+- Text duplication in accessibility tree (same text no longer shown twice)
+- `parse_color_to_rgba` division by zero on scale=0
+- Duplicate ID counter bug in test helper
+- `take_while` consuming delimiter in test helper parser
+- `parent_w - style.margin_top` bug in width estimation
+- Clippy warnings throughout codebase
+
 ## [0.9.1] - 2026-05-16
 
 ### Fixed

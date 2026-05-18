@@ -251,23 +251,278 @@ fn draw_scaled_text(img: &mut RgbaImage, text: &str, px: u32, py: u32, color: Rg
 
 /// Parse a CSS color string to RGBA.
 fn parse_color_to_rgba(color: &str, is_background: bool) -> Rgba<u8> {
-    if color == "transparent" {
+    let c = color.trim().to_lowercase();
+
+    if c == "transparent" || c == "none" {
         return Rgba([0, 0, 0, 0]);
     }
-    if color.starts_with('#') && color.len() == 7 {
-        if let (Ok(r), Ok(g), Ok(b)) = (
-            u8::from_str_radix(&color[1..3], 16),
-            u8::from_str_radix(&color[3..5], 16),
-            u8::from_str_radix(&color[5..7], 16),
+    if c == "currentcolor" {
+        return if is_background {
+            Rgba([255, 255, 255, 0])
+        } else {
+            Rgba([0, 0, 0, 255])
+        };
+    }
+
+    // Named colors (subset of CSS named colors)
+    match c.as_str() {
+        "white" => return Rgba([255, 255, 255, 255]),
+        "black" => return Rgba([0, 0, 0, 255]),
+        "red" => return Rgba([255, 0, 0, 255]),
+        "green" => return Rgba([0, 128, 0, 255]),
+        "blue" => return Rgba([0, 0, 255, 255]),
+        "yellow" => return Rgba([255, 255, 0, 255]),
+        "cyan" => return Rgba([0, 255, 255, 255]),
+        "magenta" => return Rgba([255, 0, 255, 255]),
+        "gray" | "grey" => return Rgba([128, 128, 128, 255]),
+        "silver" => return Rgba([192, 192, 192, 255]),
+        "orange" => return Rgba([255, 165, 0, 255]),
+        "purple" => return Rgba([128, 0, 128, 255]),
+        "pink" => return Rgba([255, 192, 203, 255]),
+        "brown" => return Rgba([165, 42, 42, 255]),
+        "navy" => return Rgba([0, 0, 128, 255]),
+        "teal" => return Rgba([0, 128, 128, 255]),
+        "olive" => return Rgba([128, 128, 0, 255]),
+        "maroon" => return Rgba([128, 0, 0, 255]),
+        "lime" => return Rgba([0, 255, 0, 255]),
+        "aqua" => return Rgba([0, 255, 255, 255]),
+        "fuchsia" => return Rgba([255, 0, 255, 255]),
+        "limegreen" => return Rgba([50, 205, 50, 255]),
+        "hotpink" => return Rgba([255, 105, 180, 255]),
+        "gold" => return Rgba([255, 215, 0, 255]),
+        "indianred" => return Rgba([205, 92, 92, 255]),
+        "khaki" => return Rgba([240, 230, 140, 255]),
+        "coral" => return Rgba([255, 127, 80, 255]),
+        "salmon" => return Rgba([250, 128, 114, 255]),
+        "wheat" => return Rgba([245, 222, 179, 255]),
+        "violet" => return Rgba([238, 130, 238, 255]),
+        "plum" => return Rgba([221, 160, 221, 255]),
+        "orchid" => return Rgba([218, 112, 214, 255]),
+        "tomato" => return Rgba([255, 99, 71, 255]),
+        "crimson" => return Rgba([220, 20, 60, 255]),
+        "forestgreen" => return Rgba([34, 139, 34, 255]),
+        "seagreen" => return Rgba([46, 139, 87, 255]),
+        "darkgreen" => return Rgba([0, 100, 0, 255]),
+        "skyblue" => return Rgba([135, 206, 235, 255]),
+        "steelblue" => return Rgba([70, 130, 180, 255]),
+        "royalblue" => return Rgba([65, 105, 225, 255]),
+        "midnightblue" => return Rgba([25, 25, 112, 255]),
+        "slateblue" => return Rgba([106, 90, 205, 255]),
+        "dodgerblue" => return Rgba([30, 144, 255, 255]),
+        "deepskyblue" => return Rgba([0, 191, 255, 255]),
+        "turquoise" => return Rgba([64, 224, 208, 255]),
+        "darkorange" => return Rgba([255, 140, 0, 255]),
+        "chocolate" => return Rgba([210, 105, 30, 255]),
+        "sandybrown" => return Rgba([244, 164, 96, 255]),
+        "tan" => return Rgba([210, 180, 140, 255]),
+        "peru" => return Rgba([205, 133, 63, 255]),
+        "sienna" => return Rgba([160, 82, 45, 255]),
+        "rosybrown" => return Rgba([188, 143, 143, 255]),
+        "thistle" => return Rgba([216, 191, 216, 255]),
+        "lavender" => return Rgba([230, 230, 250, 255]),
+        "mistyrose" => return Rgba([255, 228, 225, 255]),
+        "snow" => return Rgba([255, 250, 250, 255]),
+        "honeydew" => return Rgba([240, 255, 240, 255]),
+        "azure" => return Rgba([240, 255, 255, 255]),
+        "ivory" => return Rgba([255, 255, 240, 255]),
+        "beige" => return Rgba([245, 245, 220, 255]),
+        "linen" => return Rgba([250, 240, 230, 255]),
+        "ghostwhite" => return Rgba([248, 248, 255, 255]),
+        "floralwhite" => return Rgba([255, 250, 240, 255]),
+        "aliceblue" => return Rgba([240, 248, 255, 255]),
+        "oldlace" => return Rgba([253, 245, 230, 255]),
+        "cornsilk" => return Rgba([255, 248, 220, 255]),
+        "papayawhip" => return Rgba([255, 239, 213, 255]),
+        "antiquewhite" => return Rgba([250, 235, 215, 255]),
+        "blanchedalmond" => return Rgba([255, 235, 205, 255]),
+        "bisque" => return Rgba([255, 228, 196, 255]),
+        "peachpuff" => return Rgba([255, 218, 185, 255]),
+        "navajowhite" => return Rgba([255, 222, 173, 255]),
+        "moccasin" => return Rgba([255, 228, 181, 255]),
+        "gainsboro" => return Rgba([220, 220, 220, 255]),
+        "lightgray" | "lightgrey" => return Rgba([211, 211, 211, 255]),
+        "darkgray" | "darkgrey" => return Rgba([169, 169, 169, 255]),
+        "dimgray" | "dimgrey" => return Rgba([105, 105, 105, 255]),
+        "lightsteelblue" => return Rgba([176, 196, 222, 255]),
+        "lightblue" => return Rgba([173, 216, 230, 255]),
+        "powderblue" => return Rgba([176, 224, 230, 255]),
+        "cadetblue" => return Rgba([95, 158, 160, 255]),
+        "darkturquoise" => return Rgba([0, 206, 209, 255]),
+        "mediumturquoise" => return Rgba([72, 209, 204, 255]),
+        "darkcyan" => return Rgba([0, 139, 139, 255]),
+        "lightcyan" => return Rgba([224, 255, 255, 255]),
+        "paleturquoise" => return Rgba([175, 238, 238, 255]),
+        "aquamarine" => return Rgba([127, 255, 212, 255]),
+        "mediumaquamarine" => return Rgba([102, 205, 170, 255]),
+        "darkseagreen" => return Rgba([143, 188, 143, 255]),
+        "mediumseagreen" => return Rgba([60, 179, 113, 255]),
+        "lightgreen" => return Rgba([144, 238, 144, 255]),
+        "palegreen" => return Rgba([152, 251, 152, 255]),
+        "springgreen" => return Rgba([0, 255, 127, 255]),
+        "lawngreen" => return Rgba([124, 252, 0, 255]),
+        "chartreuse" => return Rgba([127, 255, 0, 255]),
+        "greenyellow" => return Rgba([173, 255, 47, 255]),
+        "darkolivegreen" => return Rgba([85, 107, 47, 255]),
+        "yellowgreen" => return Rgba([154, 205, 50, 255]),
+        "olivedrab" => return Rgba([107, 142, 35, 255]),
+        "darkkhaki" => return Rgba([189, 183, 107, 255]),
+        "palegoldenrod" => return Rgba([238, 232, 170, 255]),
+        "lightgoldenrod" => return Rgba([250, 250, 210, 255]),
+        "darkgoldenrod" => return Rgba([184, 134, 11, 255]),
+        "goldenrod" => return Rgba([218, 165, 32, 255]),
+        "darkred" => return Rgba([139, 0, 0, 255]),
+        _ => {}
+    }
+
+    // #RGB → #RRGGBB
+    if c.starts_with('#') && c.len() == 4 {
+        let r = &c[1..2];
+        let g = &c[2..3];
+        let b = &c[3..4];
+        let hex = format!("{}{}{}{}{}{}", r, r, g, g, b, b);
+        if let (Ok(rv), Ok(gv), Ok(bv)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
         ) {
-            return Rgba([r, g, b, 255]);
+            return Rgba([rv, gv, bv, 255]);
         }
     }
-    if is_background {
-        Rgba([255, 255, 255, 0]) // transparent for unknown backgrounds
-    } else {
-        Rgba([0, 0, 0, 255]) // black for unknown text
+
+    // #RRGGBB
+    if c.starts_with('#') && c.len() == 7 {
+        if let (Ok(rv), Ok(gv), Ok(bv)) = (
+            u8::from_str_radix(&c[1..3], 16),
+            u8::from_str_radix(&c[3..5], 16),
+            u8::from_str_radix(&c[5..7], 16),
+        ) {
+            return Rgba([rv, gv, bv, 255]);
+        }
     }
+
+    // rgb(r, g, b) or rgba(r, g, b, a) — supports 0-255, 0-100%, or 0.0-1.0
+    if c.starts_with("rgba(") || c.starts_with("rgb(") {
+        let inner = &c[4..c.len() - 1];
+        if let Some((r_str, rest)) = split_first_comma(inner) {
+            if let Some((g_str, rest2)) = split_first_comma(rest) {
+                let (b_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
+                if let (Some(rv), Some(gv), Some(bv)) = (
+                    parse_color_component(r_str),
+                    parse_color_component(g_str),
+                    parse_color_component(b_str),
+                ) {
+                    let a = if c.starts_with("rgba(") {
+                        parse_alpha(a_str).unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+                    return Rgba([
+                        (rv * 255.0) as u8,
+                        (gv * 255.0) as u8,
+                        (bv * 255.0) as u8,
+                        (a * 255.0) as u8,
+                    ]);
+                }
+            }
+        }
+    }
+
+    // hsl(h, s%, l%) or hsla(h, s%, l%, a)
+    if c.starts_with("hsla(") || c.starts_with("hsl(") {
+        let inner = &c[4..c.len() - 1];
+        if let Some((h_str, rest)) = split_first_comma(inner) {
+            if let Some((s_str, rest2)) = split_first_comma(rest) {
+                let (l_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
+                if let (Some(h), Some(s), Some(l)) = (
+                    h_str.trim().parse::<f64>().ok(),
+                    parse_percent(s_str),
+                    parse_percent(l_str),
+                ) {
+                    let a = if c.starts_with("hsla(") {
+                        parse_alpha(a_str).unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+                    let (r, g, b) = hsl_to_rgb(h, s, l);
+                    return Rgba([r, g, b, (a * 255.0) as u8]);
+                }
+            }
+        }
+    }
+
+    if is_background {
+        Rgba([255, 255, 255, 0])
+    } else {
+        Rgba([0, 0, 0, 255])
+    }
+}
+
+fn split_first_comma(s: &str) -> Option<(&str, &str)> {
+    for (i, ch) in s.char_indices() {
+        if ch == ',' {
+            return Some((s[..i].trim(), &s[i + 1..]));
+        }
+    }
+    None
+}
+
+fn parse_color_component(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(inner) = s.strip_suffix('%') {
+        inner.parse::<f64>().ok().map(|v| v / 100.0)
+    } else {
+        s.parse::<f64>().ok().map(|v| {
+            if v > 1.0 { v / 255.0 } else { v }
+        })
+    }
+}
+
+fn parse_percent(s: &str) -> Option<f64> {
+    let s = s.trim();
+    s.strip_suffix('%').and_then(|inner| inner.parse::<f64>().ok().map(|v| v / 100.0))
+}
+
+fn parse_alpha(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(inner) = s.strip_suffix('%') {
+        inner.parse::<f64>().ok().map(|v| v / 100.0)
+    } else {
+        s.parse::<f64>().ok()
+    }
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let h = h / 360.0;
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+
+    if s == 0.0 {
+        let v = (l * 255.0) as u8;
+        return (v, v, v);
+    }
+
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
+fn hue_to_rgb(p: f64, q: f64, t: f64) -> f64 {
+    let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 /// Encode RGBA image as PNG bytes.
@@ -355,8 +610,22 @@ fn build_a11y_node(snapshot: &DomSnapshot, node_id: u32, output: &mut String, de
         indent, connector, role, label_str, ann_str
     ));
 
-    // Recurse into children
+    // Collect the text already shown in label so we don't duplicate it in children
+    let label_trimmed = label.trim().to_lowercase();
+
+    // Recurse into children — skip text nodes that match the parent's label
     for &child_id in &node.children {
+        let child_is_duplicate_text = snapshot
+            .nodes
+            .get(&child_id)
+            .map(|cn| {
+                cn.node_type == 3
+                    && cn.text_content.trim().to_lowercase() == label_trimmed
+            })
+            .unwrap_or(false);
+        if child_is_duplicate_text {
+            continue; // skip duplicate text
+        }
         build_a11y_node(snapshot, child_id, output, depth + 1);
     }
 }
