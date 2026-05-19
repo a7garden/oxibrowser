@@ -2,7 +2,7 @@ GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
 
 Copyright (c) 2024 lightpanda contributors (https://github.com/lightpanda-io/browser)
-Copyright (c) 2024-2026 a7garden / OxiBrowser contributors
+Copyright (c) 2026 a7garden
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
