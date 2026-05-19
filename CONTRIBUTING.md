@@ -178,4 +178,8 @@ When reporting bugs, please include:
 ## License
 
 By contributing to OxiBrowser, you agree that your contributions will be
-licensed under the [MIT License](../LICENSE).
+licensed under the [GNU Affero General Public License v3](LICENSE).
+
+OxiBrowser is a derivative work of [Lightpanda](https://github.com/lightpanda-io/browser)
+(AGPL-3.0, Copyright © 2024 lightpanda contributors). All contributions are made
+under the same AGPL-3.0 license.

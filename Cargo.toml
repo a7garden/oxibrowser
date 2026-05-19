@@ -10,7 +10,7 @@ members = [
 [workspace.package]
 version = "0.10.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 authors = ["Oxios Team"]
 repository = "https://github.com/a7garden/oxibrowser"
 homepage = "https://github.com/a7garden/oxibrowser"

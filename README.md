@@ -9,7 +9,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 
 [![crates.io](https://img.shields.io/crates/v/oxibrowser?style=flat-square&logo=rust&color=orange)](https://crates.io/crates/oxibrowser)
 [![docs.rs](https://img.shields.io/docsrs/oxibrowser?style=flat-square&color=blue)](https://docs.rs/oxibrowser)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/a7garden/oxibrowser?style=flat-square&logo=github&color=yellow)](https://github.com/a7garden/oxibrowser/stargazers)
 [![CI](https://img.shields.io/github/actions/workflow/status/a7garden/oxibrowser/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/a7garden/oxibrowser/actions)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
@@ -59,7 +59,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <td align="center">Zig (V8)</td>
 </tr>
 <tr>
-<td align="center">MIT License</td>
+<td align="center">AGPL-3.0-only</td>
 <td align="center">BSD / ToS</td>
 <td align="center">AGPL-3.0</td>
 </tr>
@@ -420,7 +420,10 @@ cargo clippy --workspace -- -D warnings
 
 ## 📄 License
 
-OxiBrowser is licensed under the [MIT License](LICENSE).
+OxiBrowser is a derivative work of [Lightpanda](https://github.com/lightpanda-io/browser) (AGPL-3.0).
+As such, OxiBrowser is licensed under the [GNU Affero General Public License v3](LICENSE).
+
+See [NOTICE.md](NOTICE.md) for detailed attribution.
 
 ---
 
