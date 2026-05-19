@@ -139,19 +139,18 @@ impl DomSnapshot {
     /// Query all matching nodes by CSS selector.
     pub fn query_selector_all(&self, selector: &str) -> Vec<u32> {
         let mut results = Vec::new();
-        let mut stack = vec![self.root_id];
-        while let Some(id) = stack.pop() {
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(self.root_id);
+        while let Some(id) = queue.pop_front() {
             if let Some(node) = self.nodes.get(&id) {
                 if self.node_matches_selector(node, selector) {
                     results.push(id);
                 }
-                for &child in node.children.iter().rev() {
-                    stack.push(child);
+                for &child in &node.children {
+                    queue.push_back(child);
                 }
             }
         }
-        // Reverse to maintain document order (since we used a stack)
-        results.reverse();
         results
     }
 

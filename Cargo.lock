@@ -1938,6 +1938,7 @@ dependencies = [
  "markup5ever",
  "oxibrowser-webapi",
  "parking_lot",
+ "percent-encoding",
  "pollster",
  "regex",
  "reqwest",

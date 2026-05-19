@@ -36,7 +36,9 @@ use base64::Engine;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
-use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
+use boa_engine::{
+    js_string, Context, JsString, JsValue, NativeFunction, Source,
+};
 use serde_json::Value;
 
 use crate::error::{CoreError, Result};
@@ -5217,6 +5219,45 @@ fn create_element_object(
             None,
             Attribute::all(),
         )
+        // ── _visible / _interactive — methods that read live from DomSnapshot ──
+        .function(
+            {
+                let vis_dom = dom_snapshot_arc.clone();
+                let vis_id = node.id;
+                unsafe {
+                    NativeFunction::from_closure(move |_this, _args, _ctx| {
+                        let dom = vis_dom.read();
+                        if let Some(ref snap) = *dom {
+                            if let Some(cs) = LayoutEngine::compute_style(snap, vis_id) {
+                                return Ok(JsValue::from(cs.visible));
+                            }
+                        }
+                        Ok(JsValue::from(true))
+                    })
+                }
+            },
+            js_string!("_visible"),
+            0,
+        )
+        .function(
+            {
+                let int_dom = dom_snapshot_arc.clone();
+                let int_id = node.id;
+                unsafe {
+                    NativeFunction::from_closure(move |_this, _args, _ctx| {
+                        let dom = int_dom.read();
+                        if let Some(ref snap) = *dom {
+                            if let Some(cs) = LayoutEngine::compute_style(snap, int_id) {
+                                return Ok(JsValue::from(cs.interactive));
+                            }
+                        }
+                        Ok(JsValue::from(false))
+                    })
+                }
+            },
+            js_string!("_interactive"),
+            0,
+        )
         // ── 포커스/폼 ──
         .function(focus_fn, js_string!("focus"), 0)
         .function(blur_fn, js_string!("blur"), 0)
@@ -5234,6 +5275,8 @@ fn create_element_object(
         )
         .build();
 
+    // ── _visible / _interactive — live computed visibility from DomSnapshot ──
+    // Define after .build() to avoid borrow conflicts with ObjectInitializer::new(ctx)
     obj.into()
 }
 
