@@ -99,12 +99,6 @@ impl CliResponse {
         }
     }
 
-    /// Attach metadata to an existing response.
-    pub fn with_meta(mut self, tab_id: Option<String>, elapsed_ms: u64) -> Self {
-        self.meta = Some(Meta { tab_id, elapsed_ms });
-        self
-    }
-
     /// Create CliResponse from an InputError.
     pub fn from_validation(e: crate::validate::InputError) -> Self {
         CliResponse::error(e.to_string(), e.error_code())
@@ -364,30 +358,6 @@ pub fn core_exit_code(error: &oxibrowser_core::error::CoreError) -> i32 {
 // Print helpers for non-JSON mode
 // ---------------------------------------------------------------------------
 
-/// Print a BrowseResult in human-readable format.
-pub fn print_human_result(
-    page: &oxibrowser_core::page::Page,
-    format: &str,
-    show_headers: bool,
-) {
-    if show_headers {
-        eprintln!("HTTP {}", page.status());
-        eprintln!("Content-Type: {}", page.content_type());
-    }
-
-    match format {
-        "markdown" | "md" => print!("{}", page.to_markdown()),
-        "text" => {
-            let body = page
-                .root_frame()
-                .document()
-                .query_text("body")
-                .unwrap_or_default();
-            print!("{body}");
-        }
-        _ => print!("{}", page.content()),
-    }
-}
 
 #[cfg(test)]
 mod tests {

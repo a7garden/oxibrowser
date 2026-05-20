@@ -13,6 +13,7 @@ use tracing::info;
 
 mod describe;
 mod output;
+mod session;
 mod skill;
 mod validate;
 
@@ -201,7 +202,7 @@ async fn main() {
             ).await
         }
         Commands::Run { script, timeout } => run_script(&script, timeout).await,
-        Commands::Session => run_session(),
+        Commands::Session => session::run_session().await,
         Commands::Serve { host, port, cookie_file } => {
             run_serve(&host, port, cookie_file.as_deref()).await
         }
@@ -846,13 +847,8 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// session (Phase 2)
+// session (Phase 2) → see session/mod.rs
 // ---------------------------------------------------------------------------
-
-fn run_session() -> i32 {
-    eprintln!("Error: session mode is not yet implemented (Phase 2)");
-    1
-}
 
 // ---------------------------------------------------------------------------
 // serve (CDP server)
