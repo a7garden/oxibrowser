@@ -22,7 +22,7 @@ pub fn describe_all(compact: bool) -> CliResponse {
                 "args": ["script"]
             },
             "session": {
-                "commands": ["new","goto","back","forward","reload","click","fill","press","type","select","check","scroll","eval","extract","content","screenshot","wait","close","list","help","exit"]
+                "commands": ["new","goto","back","forward","reload","click","fill","press","type","select","check","uncheck","scroll","eval","extract","content","screenshot","wait","close","list","help","exit"]
             },
             "serve": {
                 "flags": ["host","port","cookie-file"]
@@ -119,6 +119,7 @@ pub fn describe_all(compact: bool) -> CliResponse {
                         "type": {"args": ["tab_id", "selector", "text"], "description": "Type text char by char"},
                         "select": {"args": ["tab_id", "selector", "value"], "description": "Select option"},
                         "check": {"args": ["tab_id", "selector"], "description": "Check checkbox"},
+                        "uncheck": {"args": ["tab_id", "selector"], "description": "Uncheck checkbox"},
                         "scroll": {"args": ["tab_id"], "flags": ["down", "up"], "description": "Scroll viewport"},
                         "eval": {"args": ["tab_id", "expression"], "flags": ["await"], "description": "Evaluate JS"},
                         "extract": {"args": ["tab_id"], "flags": ["selector","all","attrs","links","title","text","markdown","max-bytes"], "description": "Extract data"},
