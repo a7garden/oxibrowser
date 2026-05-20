@@ -24,10 +24,10 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 
 <table>
 <tr>
-<td align="center"><strong>21 MB</strong><br><sub>Single static binary</sub></td>
+<td align="center"><strong>24 MB</strong><br><sub>Single static binary</sub></td>
 <td align="center"><strong>~50 ms</strong><br><sub>Cold start time</sub></td>
 <td align="center"><strong>~8 MB</strong><br><sub>Base memory</sub></td>
-<td align="center"><strong>279 tests</strong><br><sub>Full coverage</sub></td>
+<td align="center"><strong>408 tests</strong><br><sub>Full coverage</sub></td>
 <td align="center"><strong>Zero C deps</strong><br><sub>Pure Rust</sub></td>
 </tr>
 </table>
@@ -39,7 +39,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <th>Lightpanda</th>
 </tr>
 <tr>
-<td align="center">21 MB binary</td>
+<td align="center">24 MB binary</td>
 <td align="center">~400 MB install</td>
 <td align="center">~80 MB binary</td>
 </tr>
@@ -75,12 +75,12 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 
 OxiBrowser is built for exactly that use case:
 
-- 🤖 **AI-Agent First** — Native `OXI` CDP domain with `getMarkdown()`, `getPageInfo()`, and text-first rendering
+- 🤖 **AI-Agent First** — CLI designed for agents: `--json` output, `describe` for schema, `skill` for prompts, `session` for multi-step
 - ⚡ **Blazing Fast** — Cold starts in ~50ms, no Chromium overhead, no Node.js required
 - 🦀 **Pure Rust** — Zero C dependencies. `boa_engine` for JS (no V8). Single static binary. Memory-safe.
 - 🔌 **CDP Compatible** — Puppeteer, Playwright, and any Chrome DevTools Protocol client works out of the box
 - 🛡️ **Secure by Default** — SSRF protection with CIDR blocking, `robots.txt` respect, no sandbox escape surface
-- 📦 **Tiny Footprint** — 21 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat
+- 📦 **Tiny Footprint** — 24 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat
 
 ---
 
@@ -88,81 +88,190 @@ OxiBrowser is built for exactly that use case:
 
 ### Install
 
-**Cargo (all platforms)**
-
 ```bash
 cargo install oxibrowser
 ```
 
-**Build from source**
+### Fetch a page (human-readable)
 
 ```bash
-git clone https://github.com/a7garden/oxibrowser.git
-cd oxibrowser
-cargo build --release
-# Binary at ./target/release/oxibrowser
+$ oxibrowser fetch https://example.com
+
+Example Domain
+
+# Example Domain
+
+This domain is for use in documentation examples...
+[Learn more](https://iana.org/domains/example)
 ```
 
-**Use as a library**
-
-```toml
-# Cargo.toml
-[dependencies]
-oxibrowser-core = "0.7"
-```
-
-### Fetch a page
+### Fetch a page (agent mode)
 
 ```bash
-oxibrowser fetch https://example.com
+$ oxibrowser fetch https://example.com --json
+{"ok":true,"data":{"url":"https://example.com/","title":"Example Domain","status":200,"markdown":"..."},"meta":{"elapsed_ms":152}}
 ```
 
-### Start CDP server
+### Extract structured data
+
+```bash
+$ oxibrowser extract https://example.com --links --json
+{"ok":true,"data":{"links":["https://iana.org/domains/example"],"title":"Example Domain"}}
+```
+
+### Multi-step session (stdin/stdout JSON REPL)
+
+```bash
+$ oxibrowser session
+new
+{"ok":true,"data":{"tab_id":"t1"}}
+goto t1 https://example.com
+{"ok":true,"data":{"status":200,"title":"Example Domain"}}
+eval t1 document.title
+{"ok":true,"data":{"value":"Example Domain"}}
+close t1
+{"ok":true,"data":{"closed":"t1"}}
+exit
+{"ok":true,"data":{"exit":true}}
+```
+
+### Start CDP server (Puppeteer/Playwright)
 
 ```bash
 oxibrowser serve --port 9222
 ```
 
-Then connect with Puppeteer:
-
 ```javascript
 import puppeteer from 'puppeteer-core';
 
 const browser = await puppeteer.connect({
-  browserWSEndpoint: 'ws://127.0.0.1:9222',
+    browserWSEndpoint: 'ws://127.0.0.1:9222',
 });
 
 const page = await browser.newPage();
 await page.goto('https://news.ycombinator.com');
-
-// Get markdown — OxiBrowser's AI-native feature
-const md = await page.evaluate(() => {
-  // OXI domain available in evaluate context
-});
-
 console.log(await page.title());
 await browser.close();
 ```
 
-### Rust API
+---
 
-```rust
-use oxibrowser_core::Browser;
-use oxibrowser_core::config::BrowserConfig;
+## 📋 CLI Reference
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let browser = Browser::new(BrowserConfig::default()).await?;
-    let session = browser.new_session().await?;
-    
-    session.navigate("https://example.com").await?;
-    
-    let title = session.evaluate("document.title").await?;
-    println!("Title: {:?}", title);
-    
-    Ok(())
+```
+oxibrowser <COMMAND>
+
+COMMANDS:
+  fetch      Fetch a URL and return content (markdown default)
+  extract    Extract structured data (links, text, elements)
+  run        Run a YAML automation script
+  session    Interactive stdin/stdout JSON REPL (22 commands)
+  serve      Start CDP WebSocket server
+  describe   Print CLI schema as JSON (for agents)
+  skill      Print agent skill guide
+  version    Print version information
+```
+
+### fetch — One-shot page fetch
+
+```bash
+# Human-readable (markdown, default)
+oxibrowser fetch https://example.com
+
+# Agent mode
+oxibrowser fetch https://example.com --json
+
+# Click then read
+oxibrowser fetch https://example.com --click button --wait .result --json
+
+# Quick page summary
+oxibrowser fetch https://example.com --summary --json
+
+# Run JS
+oxibrowser fetch https://example.com --eval "document.title" --json
+
+# Limit response size
+oxibrowser fetch https://example.com --max-bytes 8000 --json
+
+# Select specific fields
+oxibrowser fetch https://example.com --fields url,title,status --json
+```
+
+### extract — Structured data extraction
+
+```bash
+# Get all links
+oxibrowser extract https://example.com --links --json
+
+# Extract elements by CSS selector
+oxibrowser extract https://example.com --selector "a" --all --attrs text,href --json
+
+# Title + full text
+oxibrowser extract https://example.com --title --text --json
+```
+
+### session — Multi-step automation
+
+```bash
+oxibrowser session  # Start REPL
+
+# 22 commands:
+new, goto, back, forward, reload, click, fill, press, type,
+select, check, uncheck, scroll, eval, extract, content,
+screenshot, wait, close, close --all, list, help, exit
+```
+
+### describe — Agent introspection
+
+```bash
+# Compact (~200 tokens)
+oxibrowser describe --compact
+
+# Full command details
+oxibrowser describe fetch
+oxibrowser describe session
+```
+
+### run — YAML automation
+
+```yaml
+name: example
+steps:
+  - step_type: goto
+    data:
+      goto: https://example.com
+  - step_type: content
+    data:
+      format: markdown
+```
+
+```bash
+oxibrowser run script.yaml
+```
+
+### JSON Output Format
+
+All `--json` responses follow the same schema:
+
+```json
+{
+  "ok": true,
+  "data": { ... },
+  "meta": { "elapsed_ms": 152 }
 }
 ```
+
+On error:
+
+```json
+{
+  "ok": false,
+  "error": "URL scheme must be http or https",
+  "error_code": "INVALID_URL"
+}
+```
+
+**Exit codes**: 0=success, 1=runtime, 2=input validation, 3=timeout, 4=network
 
 ---
 
@@ -194,15 +303,30 @@ async fn main() -> anyhow::Result<()> {
 
 | Crate | Lines | Purpose |
 |-------|-------|---------|
-| [`oxibrowser`](crates/oxibrowser/) | 1,233 | Binary + CLI (`fetch`, `serve`, `version`) |
-| [`oxibrowser-core`](crates/oxibrowser-core/) | 12,953 | Browser engine: Session, Page, Frame, JS Runtime |
-| [`oxibrowser-cdp`](crates/oxibrowser-cdp/) | 4,392 | CDP WebSocket server with 10 domain handlers |
-| [`oxibrowser-webapi`](crates/oxibrowser-webapi/) | 1,549 | DOM tree, CSS selectors, Markdown conversion |
-| **Total** | **20,127** | |
+| [`oxibrowser`](crates/oxibrowser/) | 4,242 | Binary + CLI (8 subcommands, session REPL, agent features) |
+| [`oxibrowser-core`](crates/oxibrowser-core/) | 19,794 | Browser engine: Session, Page, Frame, JS Runtime |
+| [`oxibrowser-cdp`](crates/oxibrowser-cdp/) | 4,583 | CDP WebSocket server with 10 domain handlers |
+| [`oxibrowser-webapi`](crates/oxibrowser-webapi/) | 1,587 | DOM tree, CSS selectors, Markdown conversion |
+| **Total** | **30,206** | |
 
 ---
 
 ## 🌟 Features
+
+### Agent-First CLI
+
+Designed for AI agent workflows — no daemon, no socket, single binary:
+
+| Feature | Description |
+|---------|-------------|
+| **`--json`** | Machine-readable output (opt-in, human by default) |
+| **`--max-bytes N`** | Truncate response to N bytes |
+| **`--fields a,b,c`** | Select specific output fields |
+| **`--summary`** | Quick page metadata (title, links, headings) |
+| **`describe`** | CLI schema as JSON for agent introspection |
+| **`skill`** | Agent skill guide for prompt injection |
+| **`session`** | Stdin/stdout JSON REPL with 22 commands |
+| **Exit codes** | 0=success, 1=runtime, 2=input, 3=timeout, 4=network |
 
 ### JavaScript Runtime (ES2024+)
 
@@ -250,34 +374,22 @@ Powered by [`boa_engine`](https://boajs.dev/) — pure Rust, no V8 dependency:
 
 ### OXI Domain — Built for AI Agents
 
-The `OXI` CDP domain provides AI-optimized APIs that no other browser offers:
-
 ```python
 import websockets, json, asyncio
 
 async def ai_scrape():
     ws = await websockets.connect('ws://localhost:9222/ws')
     
-    # Navigate
     await ws.send(json.dumps({
         "id": 1, "method": "Page.navigate",
         "params": {"url": "https://news.ycombinator.com"}
     }))
     await asyncio.sleep(2)
     
-    # Get clean markdown — perfect for LLM ingestion
-    await ws.send(json.dumps({
-        "id": 2, "method": "OXI.getMarkdown"
-    }))
+    # Clean markdown — perfect for LLM ingestion
+    await ws.send(json.dumps({"id": 2, "method": "OXI.getMarkdown"}))
     resp = json.loads(await ws.recv())
-    print(resp['result']['markdown'])  # Clean markdown output
-    
-    # Get structured page info
-    await ws.send(json.dumps({
-        "id": 3, "method": "OXI.getPageInfo"
-    }))
-    info = json.loads(await ws.recv())
-    print(info['result'])  # title, url, status, content-type, etc.
+    print(resp['result']['markdown'])
 ```
 
 ### Network Layer
@@ -304,71 +416,56 @@ async def ai_scrape():
 ## 🧪 Testing
 
 ```bash
-# Run all 279 tests
+# Run all tests
 cargo test --workspace
 
-# E2E CDP tests (23 tests with real WebSocket)
+# CLI integration tests (fast, no network)
+cargo test -p oxibrowser --test cli
+
+# E2E CDP tests
 cargo test -p oxibrowser-cdp
 
-# Integration tests (real websites, --ignored)
+# Integration tests (real websites, requires internet)
 cargo test --workspace -- --ignored
-
-# Puppeteer smoke tests
-cargo test -p oxibrowser --test smoke
-```
-
----
-
-## 📋 CLI Reference
-
-```
-oxibrowser 0.7.0
-Headless browser with CDP support
-
-USAGE:
-    oxibrowser <COMMAND>
-
-COMMANDS:
-    fetch     Fetch and render a URL
-    serve     Start CDP WebSocket server
-    version   Print version information
-
-FETCH OPTIONS:
-    <URL>                  URL to fetch
-    --dump <FORMAT>        Output format: text, html, markdown [default: text]
-
-SERVE OPTIONS:
-    --host <HOST>          Bind address [default: 127.0.0.1]
-    --port <PORT>          Bind port [default: 9222]
-    --obey-robots          Respect robots.txt
-    --log-level <LEVEL>    Log level: trace, debug, info, warn, error [default: info]
 ```
 
 ---
 
 ## 🔧 Advanced Usage
 
-### Custom Browser Configuration
+### Rust API
 
 ```rust
-use oxibrowser_core::{Browser, config::BrowserConfig};
-use std::time::Duration;
+use oxibrowser_core::Browser;
+use oxibrowser_core::config::BrowserConfig;
 
-let config = BrowserConfig {
-    user_agent: "MyBot/1.0".to_string(),
-    timeout: Duration::from_secs(30),
-    obey_robots: true,
-    max_redirects: 10,
-    ..Default::default()
-};
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let browser = Browser::new(BrowserConfig::default()).await?;
+    let session = browser.new_session().await?;
+    
+    session.navigate("https://example.com").await?;
+    
+    let title = session.evaluate("document.title").await?;
+    println!("Title: {:?}", title);
+    
+    Ok(())
+)
+}
+```
 
-let browser = Browser::new(config).await?;
+### Use as a library
+
+```toml
+[dependencies]
+oxibrowser-core = "0.11"
+# Or the CDP server:
+oxibrowser-cdp = "0.11"
 ```
 
 ### Request Interception
 
 ```javascript
-// With Puppeteer
 const client = await page.target().createCDPSession();
 
 await client.send('Fetch.enable', {
@@ -376,7 +473,6 @@ await client.send('Fetch.enable', {
 });
 
 client.on('Fetch.requestPaused', async ({ requestId }) => {
-    // Block ad requests
     await client.send('Fetch.failRequest', {
         requestId,
         reason: 'BlockedByClient'
@@ -384,29 +480,11 @@ client.on('Fetch.requestPaused', async ({ requestId }) => {
 });
 ```
 
-### Screenshot Capture
-
-```javascript
-// PNG screenshot via CDP
-const { data } = await client.send('Page.captureScreenshot', {
-    format: 'png'
-});
-// data is base64-encoded PNG
-```
-
 ---
-
 
 ## 🤝 Contributing
 
-Contributions are welcome! Whether it's:
-
-- 🐛 **Bug reports** — [Open an issue](https://github.com/a7garden/oxibrowser/issues)
-- 💡 **Feature requests** — [Start a discussion](https://github.com/a7garden/oxibrowser/issues)
-- 🔧 **Pull requests** — Fork, branch, PR. All PRs need passing tests.
-- 📖 **Documentation** — Fix typos, add examples, improve guides
-
-### Development Setup
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
 
 ```bash
 git clone https://github.com/a7garden/oxibrowser.git
@@ -421,7 +499,7 @@ cargo clippy --workspace -- -D warnings
 ## 📄 License
 
 OxiBrowser is a derivative work of [Lightpanda](https://github.com/lightpanda-io/browser) (AGPL-3.0).
-As such, OxiBrowser is licensed under the [GNU Affero General Public License v3](LICENSE).
+Licensed under the [GNU Affero General Public License v3](LICENSE).
 
 See [NOTICE.md](NOTICE.md) for detailed attribution.
 

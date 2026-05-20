@@ -32,11 +32,20 @@ with thread-safe counters (`AtomicU64` / `AtomicU32`).
 ```
 oxibrowser/
 ├── crates/
-│   ├── oxibrowser/          # Binary + CLI
+│   ├── oxibrowser/          # Binary + CLI (4,242 lines)
 │   │   └── src/
-│   │       ├── main.rs      # CLI: fetch, serve, version (clap)
+│   │       ├── main.rs      # CLI: fetch, extract, run, session, serve, describe, skill, version
+│   │       ├── output.rs    # CliResponse JSON wrapper, truncation, field filtering
+│   │       ├── validate.rs  # Input validation (URL, selectors, control chars)
+│   │       ├── describe.rs  # CLI schema introspection (for agents)
+│   │       ├── skill.rs     # Agent skill guide markdown
+│   │       ├── session/     # Session REPL (stdin/stdout JSON)
+│   │       │   ├── mod.rs          # Event loop, signal handling
+│   │       │   ├── parser.rs       # 22 command parser (30 tests)
+│   │       │   ├── executor.rs     # Command → Tab method → CliResponse
+│   │       │   └── tab_manager.rs  # Multi-tab management
 │   │       └── lib.rs
-│   ├── oxibrowser-core/     # Core engine (12,953 lines)
+│   ├── oxibrowser-core/     # Core engine (19,794 lines)
 │   │   └── src/
 │   │       ├── browser.rs   # Browser singleton
 │   │       ├── session.rs   # Session: navigate, evaluate, apply_mutations
@@ -61,7 +70,7 @@ oxibrowser/
 │   │           ├── ip_filter.rs      # SSRF CIDR blocking
 │   │           ├── robots.rs         # RFC 9309 robots.txt
 │   │           └── intercept.rs      # PausedRequestRegistry
-│   ├── oxibrowser-cdp/     # CDP server (4,392 lines)
+│   ├── oxibrowser-cdp/     # CDP server (4,583 lines)
 │   │   └── src/
 │   │       ├── server.rs             # HTTP + WebSocket server
 │   │       ├── session.rs            # CDP session management
@@ -77,7 +86,7 @@ oxibrowser/
 │   │           ├── page.rs           # Page domain (navigate, screenshot)
 │   │           ├── runtime.rs        # Runtime domain (evaluate)
 │   │           └── target.rs         # Target domain
-│   └── oxibrowser-webapi/  # DOM (1,549 lines)
+│   └── oxibrowser-webapi/  # DOM (1,587 lines)
 │       └── src/dom/
 │           ├── document.rs           # Document: parse, query, mutate
 │           ├── node.rs               # Node, NodeId, NodeType

@@ -12,12 +12,13 @@ No Chromium, no V8, no C dependencies — single static binary.
 - **Pure Rust** — `boa_engine` (JS), `rustls` (TLS), `html5ever` (HTML). Zero C deps.
 - **CDP-compatible** — Puppeteer and Playwright connect without knowing they're talking to OxiBrowser.
 - **AI-agent extensions** — `OXI.getMarkdown`, `OXI.getPageInfo` via CDP.
+- **Agent-first CLI** — `--json` opt-in, `describe` for schema, `skill` for prompts, `session` for multi-step.
 
-4 crates, ~25K lines of Rust:
+4 crates, ~30K lines of Rust:
 
 | Crate | Role |
 |-------|------|
-| `oxibrowser` | CLI binary (`fetch`, `serve`, `version`) |
+| `oxibrowser` | CLI binary: `fetch`, `extract`, `run`, `session`, `serve`, `describe`, `skill`, `version` |
 | `oxibrowser-core` | Engine: Browser→Session→Page→Frame, JS runtime, CSS rendering, network |
 | `oxibrowser-cdp` | CDP server: WebSocket + 10 domain handlers |
 | `oxibrowser-webapi` | DOM: Document, Node, Tree |
@@ -38,14 +39,17 @@ Inspired by [Lightpanda](https://github.com/lightpanda-io/browser) (Zig), but fu
 cargo build                          # Build everything
 cargo test --workspace               # Run all tests
 cargo test --workspace -- --ignored   # Include real-website integration tests
-cargo run -- fetch <url>             # Fetch and render a URL
+cargo run -- fetch <url>             # Fetch and render a URL (markdown default)
 cargo run -- serve                   # Start CDP server (default :9222)
+cargo run -- session                 # Start interactive JSON REPL
 ```
 
 ### Key Entry Points
 
 | Task | Start here |
 |------|-----------|
+| Add a CLI subcommand | `crates/oxibrowser/src/main.rs` → add clap variant + handler |
+| Add a session command | `crates/oxibrowser/src/session/parser.rs` + `executor.rs` |
 | Add a CDP command | `crates/oxibrowser-cdp/src/domains/mod.rs` → add domain file |
 | Add a JS Web API | `crates/oxibrowser-core/src/js/runtime.rs` → `create_context()` |
 | Add DOM operation | `crates/oxibrowser-core/src/js/dom_snapshot.rs` → `DomSnapshot` + `DomMutation` |
@@ -71,4 +75,5 @@ All shared state uses `Arc<RwLock>` and `AtomicU64`. No exceptions.
 | Core hierarchy, thread model, JS↔Rust bridges | `docs/ARCHITECTURE.md` |
 | CDP protocol, domain handlers, event system | `docs/CDP.md` |
 | Feature history, what changed in each version | `CHANGELOG.md` |
-| Getting started, first-time setup | `docs/QUICKSTART.md` |
+| Getting started, CLI usage | `docs/QUICKSTART.md` |
+| CLI 2.0 design rationale | `docs/CLI-V2-DESIGN.md` |

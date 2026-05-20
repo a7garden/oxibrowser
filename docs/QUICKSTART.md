@@ -21,27 +21,111 @@ cargo build --release
 
 ```toml
 [dependencies]
-oxibrowser-core = "0.7"
+oxibrowser-core = "0.11"
 # Or the full CDP server:
-oxibrowser-cdp = "0.7"
+oxibrowser-cdp = "0.11"
 ```
 
 ## CLI Usage
 
-### Fetch a page
+OxiBrowser has 8 subcommands designed for both humans and AI agents.
+Human-readable output by default; add `--json` for machine-readable output.
+
+### fetch — Fetch and render a page
 
 ```bash
-# Render as text (default)
+# Default: markdown output (human-readable)
 oxibrowser fetch https://example.com
 
-# Output as markdown
-oxibrowser fetch --dump markdown https://example.com
+# Agent mode: JSON output
+oxibrowser fetch https://example.com --json
 
-# Output raw HTML
-oxibrowser fetch --dump html https://example.com
+# Text format
+oxibrowser fetch https://example.com --format text
+
+# Quick summary (title, links, headings)
+oxibrowser fetch https://example.com --summary
+
+# Summary in JSON
+oxibrowser fetch https://example.com --summary --json
+
+# Click an element, wait, then read
+oxibrowser fetch https://example.com --click button --wait .result --json
+
+# Evaluate JavaScript
+oxibrowser fetch https://example.com --eval "document.title" --json
+
+# Limit response size (for agents)
+oxibrowser fetch https://example.com --max-bytes 8000 --json
+
+# Select specific fields
+oxibrowser fetch https://example.com --fields url,title,status --json
 ```
 
-### Start CDP server
+### extract — Extract structured data
+
+```bash
+# Get all links
+oxibrowser extract https://example.com --links --json
+
+# Title + links (human-readable)
+oxibrowser extract https://example.com --title --links
+
+# Extract elements by CSS selector
+oxibrowser extract https://example.com --selector "a" --all --attrs text,href --json
+
+# Full page text
+oxibrowser extract https://example.com --text --json
+
+# Markdown content
+oxibrowser extract https://example.com --markdown --json
+```
+
+### session — Interactive JSON REPL
+
+Start a session for multi-step browser automation:
+
+```bash
+oxibrowser session
+```
+
+Then type commands (one per line). Each command produces a JSON response:
+
+```
+new                                    # Create tab → {"ok":true,"data":{"tab_id":"t1"}}
+goto t1 https://example.com            # Navigate → {"ok":true,"data":{"status":200}}
+eval t1 document.title                 # Run JS   → {"ok":true,"data":{"value":"Example Domain"}}
+click t1 a                             # Click    → {"ok":true}
+content t1 --format markdown           # Read     → {"ok":true,"data":{"markdown":"..."}}
+close t1                               # Close    → {"ok":true,"data":{"closed":"t1"}}
+exit                                   # Quit     → {"ok":true,"data":{"exit":true}}
+```
+
+**22 session commands**: `new`, `goto`, `back`, `forward`, `reload`, `click`, `fill`,
+`press`, `type`, `select`, `check`, `uncheck`, `scroll`, `eval`, `extract`, `content`,
+`screenshot`, `wait`, `close`, `close --all`, `list`, `help`, `exit`
+
+Clean shutdown on EOF (stdin close), `exit` command, Ctrl+C, or SIGTERM.
+
+### run — YAML automation
+
+```yaml
+name: example
+steps:
+  - step_type: goto
+    data:
+      goto: https://example.com
+  - step_type: content
+    data:
+      format: markdown
+```
+
+```bash
+oxibrowser run script.yaml
+# {"ok":true,"data":{"success":true,"name":"example","steps":[...]}, ...}
+```
+
+### serve — CDP server
 
 ```bash
 # Default: localhost:9222
@@ -50,17 +134,36 @@ oxibrowser serve
 # Custom host/port
 oxibrowser serve --host 0.0.0.0 --port 8080
 
-# Respect robots.txt
-oxibrowser serve --obey-robots
-
-# With debug logging
-oxibrowser serve --log-level debug
+# Cookie persistence
+oxibrowser serve --cookie-file cookies.json
 ```
 
-### Version info
+### describe — CLI schema (for agents)
 
 ```bash
-oxibrowser version
+# Compact: all commands (~200 tokens)
+oxibrowser describe --compact
+
+# Full details for one command
+oxibrowser describe fetch
+oxibrowser describe session
+```
+
+### skill — Agent skill guide
+
+```bash
+# Markdown (for prompt injection)
+oxibrowser skill
+
+# JSON (wrapped in CliResponse)
+oxibrowser skill --json
+```
+
+### version
+
+```bash
+oxibrowser version          # "oxibrowser 0.11.0"
+oxibrowser version --json   # {"ok":true,"data":{"version":"0.11.0","name":"oxibrowser"}}
 ```
 
 ## Using with Puppeteer
@@ -77,9 +180,6 @@ await page.goto('https://example.com');
 
 const title = await page.title();
 console.log('Title:', title);
-
-const content = await page.evaluate(() => document.body.innerHTML);
-console.log('Content:', content);
 
 await browser.close();
 ```
@@ -120,18 +220,9 @@ async def browse():
                 msg_id += 1
                 return r
     
-    # Navigate
     await cdp("Page.navigate", {"url": "https://example.com"})
     await asyncio.sleep(2)
     
-    # Evaluate JS
-    resp = await cdp("Runtime.evaluate", {
-        "expression": "document.title",
-        "returnByValue": True
-    })
-    print("Title:", resp['result']['result']['value'])
-    
-    # Get markdown (OXI domain)
     resp = await cdp("OXI.getMarkdown")
     print(resp['result']['markdown'][:500])
     
@@ -152,16 +243,10 @@ async fn main() -> anyhow::Result<()> {
     let browser = Browser::new(BrowserConfig::default()).await?;
     let session = browser.new_session().await?;
     
-    // Navigate
     session.navigate("https://example.com").await?;
     
-    // Evaluate JavaScript
-    let result = session.evaluate("document.title").await?;
-    println!("Title: {:?}", result);
-    
-    // Get page info
-    let url = session.current_url();
-    println!("URL: {:?}", url);
+    let title = session.evaluate("document.title").await?;
+    println!("Title: {:?}", title);
     
     Ok(())
 }
@@ -191,13 +276,8 @@ The `OXI` CDP domain is OxiBrowser's unique feature for AI workflows:
 
 ### Get Markdown
 
-Returns clean markdown from the current page — perfect for LLM ingestion:
-
 ```json
-{
-    "id": 1,
-    "method": "OXI.getMarkdown"
-}
+{"id": 1, "method": "OXI.getMarkdown"}
 ```
 
 Response:
@@ -212,13 +292,8 @@ Response:
 
 ### Get Page Info
 
-Returns structured page metadata:
-
 ```json
-{
-    "id": 2,
-    "method": "OXI.getPageInfo"
-}
+{"id": 2, "method": "OXI.getPageInfo"}
 ```
 
 Response:
@@ -235,6 +310,38 @@ Response:
 }
 ```
 
+## JSON Output Format
+
+All `--json` responses use the same schema:
+
+```json
+{
+  "ok": true,
+  "data": { ... },
+  "meta": { "elapsed_ms": 152 }
+}
+```
+
+On error:
+
+```json
+{
+  "ok": false,
+  "error": "URL scheme must be http or https",
+  "error_code": "INVALID_URL"
+}
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Runtime error |
+| 2 | Input validation error |
+| 3 | Timeout |
+| 4 | Network error |
+
 ## JavaScript API Support
 
 OxiBrowser supports a wide range of JavaScript Web APIs:
@@ -248,21 +355,18 @@ document.body.appendChild(el);
 
 // Query elements
 const found = document.querySelector('#test');
-console.log(found.textContent);  // "Hello, World!"
+console.log(found.textContent);
 
 // Style manipulation
 found.style.setProperty('color', 'red');
-console.log(found.style.getPropertyValue('color'));  // "red"
 
 // Class manipulation
-found.setAttribute('class', 'active highlight');
 found.classList.add('visible');
-console.log(found.classList.contains('active'));  // true
+console.log(found.classList.contains('active'));
 
 // Fetch API
 const resp = await fetch('https://httpbin.org/json');
 const data = await resp.json();
-console.log(data);
 
 // Events
 document.querySelector('button').addEventListener('click', (e) => {
@@ -271,50 +375,7 @@ document.querySelector('button').addEventListener('click', (e) => {
 
 // localStorage
 localStorage.setItem('key', 'value');
-console.log(localStorage.getItem('key'));  // "value"
-
-// Timers
-setTimeout(() => console.log('1 second later'), 1000);
-```
-
-## Screenshots
-
-Capture PNG screenshots of rendered page content:
-
-```json
-{
-    "id": 1,
-    "method": "Page.captureScreenshot",
-    "params": {"format": "png"}
-}
-```
-
-The response contains a base64-encoded PNG image using OxiBrowser's built-in
-8×16 bitmap font for text rendering.
-
-## Network Interception
-
-Block, modify, or respond to requests programmatically:
-
-```javascript
-const client = await page.target().createCDPSession();
-
-// Enable interception
-await client.send('Fetch.enable', {
-    patterns: [{ urlPattern: '*' }]
-});
-
-// Handle paused requests
-client.on('Fetch.requestPaused', async ({ requestId, request }) => {
-    if (request.url.includes('ads')) {
-        await client.send('Fetch.failRequest', {
-            requestId,
-            reason: 'BlockedByClient'
-        });
-    } else {
-        await client.send('Fetch.continueRequest', { requestId });
-    }
-});
+console.log(localStorage.getItem('key'));
 ```
 
 ## Configuration

@@ -87,6 +87,13 @@ docs: update architecture diagram
 
 ## How to Contribute
 
+### Adding a New CLI Subcommand
+
+1. Add clap variant to `Commands` enum in `crates/oxibrowser/src/main.rs`
+2. Add handler in the `match commands` block
+3. If session command: add to `parser.rs` + `executor.rs` + `describe.rs`
+4. Add tests in `crates/oxibrowser/tests/cli.rs`
+
 ### Adding a New CDP Domain
 
 1. Create `crates/oxibrowser-cdp/src/domains/<domain>.rs` with a `handle()` function
@@ -116,13 +123,23 @@ docs: update architecture diagram
 cargo test --workspace
 ```
 
+### CLI Integration Tests
+
+```bash
+# Fast tests (no network needed)
+cargo test -p oxibrowser --test cli
+
+# Full tests (requires internet)
+cargo test -p oxibrowser --test cli -- --ignored
+```
+
 ### E2E Tests
 
 ```bash
 # CDP WebSocket tests
 cargo test -p oxibrowser-cdp
 
-# Puppeteer smoke tests (requires Node.js)
+# Puppeteer smoke tests
 cargo test -p oxibrowser --test smoke
 ```
 
