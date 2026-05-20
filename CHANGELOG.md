@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-05-20
+
+### Added — CLI 2.0 (Agent-First Redesign)
+
+- **`fetch`** — universal one-shot command (absorbs `browse` and `eval`)
+  - `--format markdown|html|text` (markdown default, human-readable)
+  - `--click`, `--fill`, `--press`, `--wait` for interaction
+  - `--eval <expr>` for JS evaluation
+  - `--summary` for quick page metadata
+  - `--fields`, `--max-bytes` for agent-friendly output control
+  - `--json` for machine-readable output (opt-in, not automatic)
+- **`extract`** — structured data extraction: `--links`, `--title`, `--text`, `--selector`, `--attrs`, `--all`
+- **`session`** — stdin/stdout JSON REPL for multi-step automation
+  - 22 commands: `new`, `goto`, `back`, `forward`, `reload`, `click`, `fill`, `press`, `type`, `select`, `check`, `uncheck`, `scroll`, `eval`, `extract`, `content`, `screenshot`, `wait`, `close`, `list`, `help`, `exit`
+  - Clean shutdown on EOF, `exit`, Ctrl+C, SIGTERM
+  - Multi-tab support with tab IDs
+- **`run`** — YAML automation scripts with `CliResponse` JSON wrapping
+- **`describe`** — CLI schema as JSON (for agent introspection)
+- **`skill`** — agent skill guide (markdown or `--json`)
+- **`version`** — version info (text or `--json`)
+- **Input validation** (`validate.rs`) — URL scheme, control chars, CSS selectors
+- **`CliResponse` JSON wrapper** (`output.rs`) — consistent `{ok, data, meta, error, error_code}` format
+- **Exit codes**: 0=success, 1=runtime, 2=input validation, 3=timeout, 4=network
+
+### Fixed
+
+- **scroll** — use `scrollTop`/`scrollLeft` instead of `window.scrollBy` (not available in boa_engine)
+- **eval quotes** — session parser strips wrapping quotes from JS expressions
+- **`--json` consistency** — all commands accept `--json` without error
+- **text extraction** — block-level sibling separators for clean line breaks
+- **`describe` schema** — added missing `uncheck` command, corrected default format to `markdown`
+
+### Changed
+
+- Default output format is **markdown** (was `html`)
+- Human-readable by default; `--json` is opt-in for agents
+- Errors are plain text on stderr; JSON with `--json`
+- `describe` and `run` always output JSON (no `--json` needed)
+
 ## [0.10.0] - 2026-05-18
 
 ### Added
