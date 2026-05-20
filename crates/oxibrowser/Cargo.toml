@@ -20,6 +20,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+url = { workspace = true }
 
 oxibrowser-core = { version = "0.10.0", path = "../oxibrowser-core" }
 oxibrowser-cdp = { version = "0.10.0", path = "../oxibrowser-cdp" }

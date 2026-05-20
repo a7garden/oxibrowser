@@ -1,24 +1,25 @@
-//! OxiBrowser CLI — headless browser with CDP support.
+//! OxiBrowser CLI 2.0 — headless browser for AI agents.
 //!
-//! Subcommands:
-//! - `oxibrowser fetch <url>` — fetch a URL and dump HTML/markdown (enhanced)
-//! - `oxibrowser eval <url> <expr>` — evaluate JS on a page
-//! - `oxibrowser extract <url>` — extract structured data from a page
-//! - `oxibrowser browse <url>` — interactive Tab API browsing (CDP-free)
-//! - `oxibrowser serve` — start the CDP server
-//! - `oxibrowser version` — print version
+//! Human is the default. `--json` opts into machine-readable output.
+//!
+//! 7 subcommands: fetch, extract, run, session, serve, describe, skill, version
 
-use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::info;
 
-/// OxiBrowser — a headless browser engine with CDP support.
+mod describe;
+mod output;
+mod skill;
+mod validate;
+
+/// OxiBrowser — headless browser for AI agents.
 #[derive(Parser)]
 #[command(name = "oxibrowser")]
-#[command(version, about = "Headless browser engine with CDP support")]
+#[command(version, about = "Headless browser for AI agents — single static binary, no Chromium")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -26,112 +27,50 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Fetch a URL and dump its content.
+    /// Fetch a URL and return content. Supports interaction before output.
     Fetch {
         /// URL to fetch.
         url: String,
         /// Output format: html, markdown, or text.
-        #[arg(long, default_value = "html")]
-        format: String,
-        /// Print response headers to stderr.
-        #[arg(long)]
-        headers: bool,
-        /// Print only the HTTP status code.
-        #[arg(long)]
-        status: bool,
-        /// HTTP method (GET or POST).
-        #[arg(long, default_value = "GET")]
-        method: String,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Timeout in seconds.
-        #[arg(long, default_value_t = 30)]
-        timeout: u64,
-    },
-
-    /// Evaluate JavaScript on a page.
-    Eval {
-        /// URL to navigate to.
-        url: String,
-        /// JavaScript expression to evaluate.
-        expression: String,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Timeout in seconds.
-        #[arg(long, default_value_t = 30)]
-        timeout: u64,
-    },
-
-    /// Extract structured data from a page.
-    Extract {
-        /// URL to extract from.
-        url: String,
-        /// Extract all <a href> links (one per line).
-        #[arg(long)]
-        links: bool,
-        /// Extract the <title> text.
-        #[arg(long)]
-        title: bool,
-        /// Extract full text content.
-        #[arg(long)]
-        text: bool,
-        /// Convert page to Markdown.
-        #[arg(long)]
-        markdown: bool,
-        /// CSS selector to match elements.
-        #[arg(long)]
-        selector: Option<String>,
-        /// With --selector, print all matching elements (not just the first).
-        #[arg(long)]
-        all: bool,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Timeout in seconds.
-        #[arg(long, default_value_t = 30)]
-        timeout: u64,
-    },
-
-    /// Browse a page using the Tab API (CDP-free).
-    Browse {
-        /// URL to navigate to.
-        url: String,
-        /// Output format: markdown, html, text, json, links.
         #[arg(long, default_value = "markdown")]
         format: String,
-        /// Click an element matching a CSS selector.
+        /// Output as JSON (for agents / scripting).
+        #[arg(long)]
+        json: bool,
+        /// Truncate output at N bytes (JSON mode).
+        #[arg(long)]
+        max_bytes: Option<u64>,
+        /// Comma-separated fields to include: url,title,status,markdown,html,text,content_type.
+        #[arg(long)]
+        fields: Option<String>,
+        /// Page metadata only (headings, links_count, text_length).
+        #[arg(long)]
+        summary: bool,
+        /// Evaluate JS expression after page load.
+        #[arg(long)]
+        eval: Option<String>,
+        /// Click element matching CSS selector.
         #[arg(long)]
         click: Option<String>,
-        /// Fill an element (format: "selector:text").
+        /// Fill input (format: "selector:value").
         #[arg(long)]
-        input: Option<String>,
-        /// Press a key combo (e.g., Enter, Ctrl+C, Shift+Tab).
+        fill: Option<String>,
+        /// Press key (Enter, Tab, Ctrl+C, etc.).
         #[arg(long)]
         press: Option<String>,
-        /// Wait for a CSS selector before continuing.
+        /// Wait for CSS selector before output.
         #[arg(long)]
         wait: Option<String>,
         /// Wait timeout in ms.
         #[arg(long, default_value_t = 5000)]
         wait_timeout: u64,
-        /// Extract text from elements matching a selector.
+        /// Extract text from selector instead of full content.
         #[arg(long)]
         extract: Option<String>,
-        /// With --extract, print all matches.
+        /// With --extract: return all matches.
         #[arg(long)]
         all: bool,
-        /// Save PNG screenshot to a file.
-        #[arg(long)]
-        screenshot: Option<String>,
-        /// Screenshot width in pixels.
-        #[arg(long, default_value_t = 800)]
-        width: u32,
-        /// Evaluate JS and print result.
-        #[arg(long)]
-        eval: Option<String>,
-        /// Print response metadata to stderr.
+        /// Print HTTP headers to stderr.
         #[arg(long)]
         headers: bool,
         /// Timeout in seconds.
@@ -139,7 +78,55 @@ enum Commands {
         timeout: u64,
     },
 
-    /// Start the CDP server.
+    /// Extract structured data from a URL.
+    Extract {
+        /// URL to extract from.
+        url: String,
+        /// CSS selector to match elements.
+        #[arg(long)]
+        selector: Option<String>,
+        /// Return all matches (not just first).
+        #[arg(long)]
+        all: bool,
+        /// Comma-separated attributes to extract (text,href,data-*,src,...).
+        #[arg(long, default_value = "text")]
+        attrs: String,
+        /// Extract all <a href> values.
+        #[arg(long)]
+        links: bool,
+        /// Extract the <title> text.
+        #[arg(long)]
+        title: bool,
+        /// Extract body text.
+        #[arg(long)]
+        text: bool,
+        /// Extract page as markdown.
+        #[arg(long)]
+        markdown: bool,
+        /// Truncate output at N bytes (JSON mode).
+        #[arg(long)]
+        max_bytes: Option<u64>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
+
+    /// Run a YAML browser automation script.
+    Run {
+        /// Path to YAML script file or inline YAML.
+        script: String,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
+    /// Start interactive session (stdin/stdout JSON REPL).
+    Session,
+
+    /// Start CDP server for Puppeteer/Playwright.
     Serve {
         /// Host to bind to.
         #[arg(long, default_value = "127.0.0.1")]
@@ -150,337 +137,473 @@ enum Commands {
         /// Cookie persistence file.
         #[arg(long)]
         cookie_file: Option<String>,
-        /// Request timeout in seconds.
-        #[arg(long, default_value_t = 30)]
-        timeout: u64,
     },
 
-    /// Run a YAML script on a Tab.
-    Run {
-        /// Path to the YAML script file or inline YAML.
-        script: String,
-        /// Timeout in seconds.
-        #[arg(long, default_value_t = 60)]
-        timeout: u64,
+    /// Print CLI schema as JSON (for agents).
+    Describe {
+        /// Specific command to describe.
+        command: Option<String>,
+        /// Minimal output (~200 tokens).
+        #[arg(long)]
+        compact: bool,
     },
+
+    /// Print agent skill guide.
+    Skill,
 
     /// Print version information.
     Version,
 }
 
+// ---------------------------------------------------------------------------
+// Output decision: --json → agent, otherwise → human.
+// ---------------------------------------------------------------------------
+
+/// Whether to use JSON output. Only true when --json is explicitly set.
+fn use_json(explicit_json: bool) -> bool {
+    explicit_json
+}
+
+// ---------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
     let cli = Cli::parse();
 
-    // Set up Ctrl+C handler for graceful shutdown.
-    let ctrlc = tokio::signal::ctrl_c();
-    tokio::pin!(ctrlc);
-
-    match cli.command {
+    let exit_code = match cli.command {
         Commands::Fetch {
-            url,
-            format,
-            headers,
-            status,
-            method,
-            json,
-            timeout,
+            url, format, json, max_bytes, fields, summary, eval,
+            click, fill, press, wait, wait_timeout, extract, all, headers, timeout,
         } => {
-            let op = run_fetch(&url, &format, headers, status, &method, json, timeout);
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    eprintln!("\nInterrupted.");
-                    std::process::exit(130);
-                }
-            }
-        }
-        Commands::Eval {
-            url,
-            expression,
-            json,
-            timeout,
-        } => {
-            let op = run_eval(&url, &expression, json, timeout);
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    eprintln!("\nInterrupted.");
-                    std::process::exit(130);
-                }
-            }
+            run_fetch(
+                &url, &format, json, max_bytes, fields.as_deref(), summary,
+                eval.as_deref(), click.as_deref(), fill.as_deref(), press.as_deref(),
+                wait.as_deref(), wait_timeout, extract.as_deref(), all, headers, timeout,
+            ).await
         }
         Commands::Extract {
-            url,
-            links,
-            title,
-            text,
-            markdown,
-            selector,
-            all,
-            json,
-            timeout,
+            url, selector, all, attrs, links, title, text, markdown,
+            max_bytes, json, timeout,
         } => {
-            let op = run_extract(
-                &url,
-                links,
-                title,
-                text,
-                markdown,
-                selector.as_deref(),
-                all,
-                json,
-                timeout,
-            );
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    eprintln!("\nInterrupted.");
-                    std::process::exit(130);
-                }
-            }
+            run_extract(
+                &url, selector.as_deref(), all, &attrs,
+                links, title, text, markdown, max_bytes, json, timeout,
+            ).await
         }
-        Commands::Browse {
-            url,
-            format,
-            click,
-            input,
-            press,
-            wait,
-            wait_timeout,
-            extract,
-            all,
-            screenshot,
-            width,
-            eval,
-            headers,
-            timeout,
-        } => {
-            let op = run_browse(
-                &url,
-                &format,
-                click.as_deref(),
-                input.as_deref(),
-                press.as_deref(),
-                wait.as_deref(),
-                wait_timeout,
-                extract.as_deref(),
-                all,
-                screenshot.as_deref(),
-                width,
-                eval.as_deref(),
-                headers,
-                timeout,
-            );
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    eprintln!("\nInterrupted.");
-                    std::process::exit(130);
-                }
-            }
+        Commands::Run { script, timeout } => run_script(&script, timeout).await,
+        Commands::Session => run_session(),
+        Commands::Serve { host, port, cookie_file } => {
+            run_serve(&host, port, cookie_file.as_deref()).await
         }
-        Commands::Serve {
-            host,
-            port,
-            cookie_file,
-            timeout: _timeout,
-        } => {
-            let op = run_serve(&host, port, cookie_file.as_deref());
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    // Ctrl+C is handled inside run_serve via its own ctrl_c listener.
-                    // This branch is a fallback.
-                }
-            }
-        }
-        Commands::Run { script, timeout } => {
-            let op = run_script(&script, timeout);
-            tokio::select! {
-                result = op => result?,
-                _ = &mut ctrlc => {
-                    eprintln!("\nInterrupted.");
-                    std::process::exit(130);
-                }
-            }
-        }
-        Commands::Version => {
-            println!("oxibrowser {}", env!("CARGO_PKG_VERSION"));
-        }
-    }
+        Commands::Describe { command, compact } => run_describe(command.as_deref(), compact),
+        Commands::Skill => { print!("{}", skill::skill_text()); 0 }
+        Commands::Version => { println!("oxibrowser {}", env!("CARGO_PKG_VERSION")); 0 }
+    };
 
-    Ok(())
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error output — human vs JSON
+// ---------------------------------------------------------------------------
+
+/// Print an error and return the exit code.
+fn print_error(msg: &str, error_code: &str, json: bool) -> i32 {
+    let code = match error_code {
+        "INVALID_URL" | "INVALID_SELECTOR" | "INPUT_VALIDATION" | "PATH_TRAVERSAL" | "SSRF_BLOCKED" => 2,
+        "TIMEOUT" => 3,
+        "NETWORK_ERROR" | "HTTP_ERROR" => 4,
+        _ => 1,
+    };
+
+    if json {
+        let resp = output::CliResponse::error(msg, error_code);
+        resp.print_json();
+    } else {
+        eprintln!("Error: {msg}");
+    }
+    code
 }
 
 // ---------------------------------------------------------------------------
 // fetch
 // ---------------------------------------------------------------------------
 
-/// Fetch a URL and print the content.
+#[allow(clippy::too_many_arguments)]
 async fn run_fetch(
-    url: &str,
-    format: &str,
-    show_headers: bool,
-    status_only: bool,
-    method: &str,
-    json_output: bool,
-    timeout: u64,
-) -> Result<()> {
-    let _ = method; // Method selection is a future enhancement (HTTP client currently GETs only).
+    url: &str, format: &str, json: bool, max_bytes: Option<u64>,
+    fields: Option<&str>, summary: bool, eval: Option<&str>,
+    click: Option<&str>, fill: Option<&str>, press: Option<&str>,
+    wait: Option<&str>, wait_timeout: u64, extract_sel: Option<&str>,
+    all: bool, headers: bool, timeout: u64,
+) -> i32 {
+    let start = Instant::now();
+    let json = use_json(json);
 
-    info!(url = %url, format = %format, timeout, "fetching URL");
-
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = oxibrowser_core::Browser::new(config).await?;
-
-    let session_result =
-        tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
-
-    let session = match session_result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-        Err(_) => {
-            eprintln!("error: timed out after {timeout}s");
-            std::process::exit(1);
-        }
-    };
-
-    let session_guard = session.read().await;
-
-    match session_guard.page() {
-        Some(page) => {
-            if status_only {
-                if json_output {
-                    println!("{}", serde_json::json!({"status": page.status()}));
-                } else {
-                    println!("{}", page.status());
-                }
-            } else {
-                if show_headers {
-                    if json_output {
-                        eprintln!(
-                            "{}",
-                            serde_json::json!({
-                                "status": page.status(),
-                                "content_type": page.content_type(),
-                            })
-                        );
-                    } else {
-                        eprintln!("HTTP {}", page.status());
-                        eprintln!("Content-Type: {}", page.content_type());
-                    }
-                }
-
-                let body = match format {
-                    "markdown" | "md" => page.to_markdown(),
-                    "text" => page
-                        .root_frame()
-                        .document()
-                        .query_text("body")
-                        .unwrap_or_default(),
-                    _ => page.content().to_string(),
-                };
-
-                if json_output {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "status": page.status(),
-                            "content_type": page.content_type(),
-                            "format": format,
-                            "body": body,
-                        })
-                    );
-                } else {
-                    print!("{body}");
-                }
-            }
-        }
-        None => {
-            eprintln!("error: no page loaded");
-            std::process::exit(1);
-        }
+    // Validate
+    if let Some(e) = validate_fetch_inputs(url, click, fill, wait, extract_sel, eval) {
+        return print_error(&e.error.unwrap_or_default(), &e.error_code.unwrap_or_default(), json);
     }
 
-    drop(session_guard);
-    browser.close().await?;
+    let needs_tab = click.is_some() || fill.is_some() || press.is_some()
+        || wait.is_some() || eval.is_some();
+
+    let config = oxibrowser_core::BrowserConfig::headless();
+    let browser = match oxibrowser_core::Browser::new(config).await {
+        Ok(b) => b,
+        Err(e) => return print_error(&format!("browser init failed: {e}"), "RUNTIME_ERROR", json),
+    };
+
+    let result = if needs_tab {
+        fetch_with_tab(
+            start, &browser, url, format, json, max_bytes, fields, summary,
+            eval, click, fill, press, wait, wait_timeout, extract_sel, all, headers, timeout,
+        ).await
+    } else {
+        fetch_direct(
+            start, &browser, url, format, json, max_bytes, fields, summary,
+            extract_sel, all, headers,
+        ).await
+    };
+
+    browser.close().await.ok();
+
+    match result {
+        Ok(()) => 0,
+        Err(FetchError { msg, code }) => print_error(&msg, &code, json),
+    }
+}
+
+struct FetchError {
+    msg: String,
+    code: String,
+}
+
+impl From<oxibrowser_core::error::CoreError> for FetchError {
+    fn from(e: oxibrowser_core::error::CoreError) -> Self {
+        FetchError {
+            msg: format!("{e}"),
+            code: output::core_error_code(&e).to_string(),
+        }
+    }
+}
+
+/// Direct fetch: no interaction needed.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_direct(start: Instant, 
+    browser: &oxibrowser_core::Browser,
+    url: &str,
+    format: &str,
+    json: bool,
+    max_bytes: Option<u64>,
+    fields: Option<&str>,
+    summary: bool,
+    extract_sel: Option<&str>,
+    all: bool,
+    headers: bool,
+) -> Result<(), FetchError> {
+    let session = browser.new_page(url).await.map_err(FetchError::from)?;
+    let guard = session.read().await;
+    let page = guard.page().ok_or_else(|| FetchError {
+        msg: "no page loaded".into(),
+        code: "PAGE_NOT_LOADED".into(),
+    })?;
+
+    if headers {
+        eprintln!("HTTP {}", page.status());
+        eprintln!("Content-Type: {}", page.content_type());
+    }
+
+    // Summary — always JSON (structured metadata)
+    if summary {
+        let data = output::build_summary(page);
+        if json {
+            let resp = output::CliResponse::success_with_meta(data, None, start.elapsed().as_millis() as u64);
+            resp.print_json();
+        } else {
+            // Human: print summary as key-value
+            let obj = data.as_object().unwrap();
+            if let Some(v) = obj.get("url").and_then(|v| v.as_str()) {
+                eprintln!("URL: {v}");
+            }
+            if let Some(v) = obj.get("title").and_then(|v| v.as_str()) {
+                eprintln!("Title: {v}");
+            }
+            eprintln!("Status: {}", obj.get("status").unwrap());
+            if let Some(h) = obj.get("headings").and_then(|v| v.as_array()) {
+                eprintln!("Headings: {}", h.len());
+                for h in h {
+                    if let Some(s) = h.as_str() { eprintln!("  - {s}"); }
+                }
+            }
+            eprintln!("Links: {}", obj.get("links_count").unwrap());
+            eprintln!("Forms: {}", obj.get("forms_count").unwrap());
+            eprintln!("Images: {}", obj.get("images_count").unwrap());
+            eprintln!("Text length: {}", obj.get("text_length").unwrap());
+        }
+        return Ok(());
+    }
+
+    // Extract — human gets text, agent gets JSON
+    if let Some(sel) = extract_sel {
+        let doc = page.root_frame().document();
+        if all {
+            let texts: Vec<String> = doc
+                .query_selector_all(sel)
+                .iter()
+                .filter_map(|id| doc.text_content(*id))
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if json {
+                let resp = output::CliResponse::success(serde_json::json!({
+                    "selector": sel, "count": texts.len(), "items": texts
+                }));
+                resp.print_json();
+            } else {
+                for t in &texts { println!("{t}"); }
+            }
+        } else {
+            let text = doc.query_text(sel).map(|t| t.trim().to_string()).unwrap_or_default();
+            if json {
+                let resp = output::CliResponse::success(serde_json::json!({
+                    "selector": sel, "match": text
+                }));
+                resp.print_json();
+            } else {
+                println!("{text}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Full content
+    let body = match format {
+        "markdown" | "md" => page.to_markdown(),
+        "text" => {
+            // textContent has no line breaks (no CSS layout).
+            // Use markdown → strip formatting for readable plain text.
+            let md = page.to_markdown();
+            // Strip markdown syntax: # headings, **bold**, [links](url), etc.
+            let text = md
+                .lines()
+                .map(|line| {
+                    let l = line.trim();
+                    // Strip heading markers
+                    let l = l.strip_prefix('#').map(|s| s.trim()).unwrap_or(l);
+                    let l = l.strip_prefix('#').map(|s| s.trim()).unwrap_or(l);
+                    // Strip bold/italic markers
+                    let l = l.replace("**", "").replace("__", "");
+                    let l = l.replace("* ", "");
+                    // Convert [text](url) to just text
+                    let l = regex_strip_link(&l);
+                    l
+                })
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            text
+        }
+        _ => page.content().to_string(),
+    };
+
+    if json {
+        let mut data = serde_json::json!({
+            "url": page.url().to_string(),
+            "title": page.title().unwrap_or("").to_string(),
+            "status": page.status(),
+            "content_type": page.content_type().to_string(),
+        });
+        let key = match format {
+            "markdown" | "md" => "markdown",
+            "text" => "text",
+            _ => "html",
+        };
+        data.as_object_mut().unwrap().insert(key.into(), Value::String(body));
+        if let Some(mb) = max_bytes {
+            output::truncate_fields(&mut data, mb);
+        }
+        if let Some(f) = fields {
+            output::filter_fields(&mut data, &output::parse_fields(f));
+        }
+        output::CliResponse::success_with_meta(data, None, start.elapsed().as_millis() as u64).print_json();
+    } else {
+        print!("{body}");
+    }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// eval
-// ---------------------------------------------------------------------------
+/// Tab-based fetch: for interaction and JS eval.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_with_tab(start: Instant, 
+    browser: &oxibrowser_core::Browser,
+    url: &str,
+    format: &str,
+    json: bool,
+    max_bytes: Option<u64>,
+    fields: Option<&str>,
+    summary: bool,
+    eval: Option<&str>,
+    click: Option<&str>,
+    fill: Option<&str>,
+    press: Option<&str>,
+    wait: Option<&str>,
+    wait_timeout: u64,
+    extract_sel: Option<&str>,
+    all: bool,
+    headers: bool,
+    timeout: u64,
+) -> Result<(), FetchError> {
+    let tab = browser.new_tab().await.map_err(FetchError::from)?;
 
-/// Evaluate JavaScript on a page and print the result.
-async fn run_eval(url: &str, expression: &str, json_output: bool, timeout: u64) -> Result<()> {
-    info!(url = %url, expr = %expression, timeout, "evaluating JS");
-
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = oxibrowser_core::Browser::new(config).await?;
-
-    let session_result =
-        tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
-
-    let session = match session_result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+    let nav_result = tokio::time::timeout(Duration::from_secs(timeout), tab.goto(url)).await;
+    match nav_result {
+        Ok(Ok(nav)) => {
+            if headers {
+                eprintln!("HTTP {}", nav.status);
+                eprintln!("URL: {}", nav.url);
+                eprintln!("Title: {}", nav.title);
+            }
         }
-        Err(_) => {
-            eprintln!("error: timed out after {timeout}s");
-            std::process::exit(1);
-        }
-    };
+        Ok(Err(e)) => return Err(FetchError::from(e)),
+        Err(_) => return Err(FetchError {
+            msg: format!("timed out after {timeout}s"),
+            code: "TIMEOUT".into(),
+        }),
+    }
 
-    // Need write access for evaluate_js (it takes &mut Session).
-    let result = {
-        let mut guard = session.write().await;
-        guard.evaluate_js(expression).await?
-    };
+    // Interaction: wait → fill → click → press
+    if let Some(sel) = wait {
+        tab.wait_for(sel, wait_timeout).await.map_err(FetchError::from)?;
+    }
+    if let Some(spec) = fill {
+        let (sel, val) = spec.split_once(':').ok_or_else(|| FetchError {
+            msg: "--fill must be selector:value".into(),
+            code: "INPUT_VALIDATION".into(),
+        })?;
+        tab.fill(sel, val).await.map_err(FetchError::from)?;
+    }
+    if let Some(sel) = click {
+        tab.click(sel).await.map_err(FetchError::from)?;
+    }
+    if let Some(keys) = press {
+        tab.press(keys).await.map_err(FetchError::from)?;
+    }
 
-    if json_output {
-        // JSON output: always produce valid JSON.
-        if result.is_ok() {
-            let value = result.value.unwrap_or(serde_json::Value::Null);
-            println!("{value}");
+    // Eval
+    if let Some(expr) = eval {
+        let value = tab.evaluate(expr).await.map_err(FetchError::from)?;
+        if json {
+            output::CliResponse::success(serde_json::json!({"value": value})).print_json();
         } else {
-            let err = result.exception.as_deref().unwrap_or("unknown error");
-            eprintln!("error: {err}");
-            std::process::exit(1);
-        }
-    } else if result.is_ok() {
-        if let Some(v) = &result.value {
-            match v {
-                serde_json::Value::String(s) => println!("{s}"),
-                serde_json::Value::Null => {}
+            match value {
+                Value::String(s) => println!("{s}"),
+                Value::Null => {}
                 other => println!("{other}"),
             }
         }
-        // void/undefined: nothing to print
-        // Also print any captured console output.
-        for line in &result.console_output {
-            eprintln!("[console] {line}");
-        }
-    } else {
-        let err = result.exception.as_deref().unwrap_or("unknown error");
-        eprintln!("error: {err}");
-        std::process::exit(1);
+        return Ok(());
     }
 
-    browser.close().await?;
+    // Summary
+    if summary {
+        let content = tab.content().await.map_err(FetchError::from)?;
+        let data = serde_json::json!({
+            "url": content.url, "title": content.title,
+            "status": content.status, "text_length": content.markdown.len(),
+        });
+        if json {
+            output::CliResponse::success_with_meta(data, None, start.elapsed().as_millis() as u64).print_json();
+        } else {
+            eprintln!("URL: {}", content.url);
+            eprintln!("Title: {}", content.title);
+            eprintln!("Status: {}", content.status);
+            eprintln!("Text length: {}", content.markdown.len());
+        }
+        return Ok(());
+    }
+
+    // Extract
+    if let Some(sel) = extract_sel {
+        let matches = tab.query_all(sel).await.map_err(FetchError::from)?;
+        if all {
+            let items: Vec<String> = matches.into_iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if json {
+                output::CliResponse::success(serde_json::json!({
+                    "selector": sel, "count": items.len(), "items": items
+                })).print_json();
+            } else {
+                for t in &items { println!("{t}"); }
+            }
+        } else {
+            let text = matches.first().map(|t| t.trim().to_string()).unwrap_or_default();
+            if json {
+                output::CliResponse::success(serde_json::json!({
+                    "selector": sel, "match": text
+                })).print_json();
+            } else {
+                println!("{text}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Full content
+    let content = tab.content().await.map_err(FetchError::from)?;
+    if json {
+        let mut data = match format {
+            "markdown" | "md" => serde_json::json!({
+                "url": content.url, "title": content.title,
+                "status": content.status, "markdown": content.markdown,
+            }),
+            "text" => {
+                let body = content.markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+                serde_json::json!({
+                    "url": content.url, "title": content.title,
+                    "status": content.status, "text": body,
+                })
+            },
+            _ => serde_json::json!({
+                "url": content.url, "title": content.title,
+                "status": content.status, "html": content.html,
+            }),
+        };
+        if let Some(mb) = max_bytes {
+            output::truncate_fields(&mut data, mb);
+        }
+        if let Some(f) = fields {
+            output::filter_fields(&mut data, &output::parse_fields(f));
+        }
+        output::CliResponse::success_with_meta(data, None, start.elapsed().as_millis() as u64).print_json();
+    } else {
+        match format {
+            "html" => print!("{}", content.html),
+            "text" => {
+                let body = content.markdown.lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                println!("{body}");
+            }
+            _ => print!("{}", content.markdown),
+        }
+    }
     Ok(())
 }
 
@@ -488,23 +611,32 @@ async fn run_eval(url: &str, expression: &str, json_output: bool, timeout: u64) 
 // extract
 // ---------------------------------------------------------------------------
 
-/// Extract structured data from a page.
 #[allow(clippy::too_many_arguments)]
 async fn run_extract(
-    url: &str,
-    links: bool,
-    title: bool,
-    text: bool,
-    markdown: bool,
-    selector: Option<&str>,
-    all: bool,
-    json_output: bool,
-    timeout: u64,
-) -> Result<()> {
-    info!(url = %url, timeout, "extracting data");
+    url: &str, selector: Option<&str>, all: bool, attrs: &str,
+    links: bool, title: bool, text: bool, markdown: bool,
+    max_bytes: Option<u64>, json: bool, timeout: u64,
+) -> i32 {
+    let json = use_json(json);
+    let start = Instant::now();
+
+    // Validate
+    if let Err(e) = validate::validate_url(url) {
+        return print_error(&e.to_string(), e.error_code(), json);
+    }
+    if let Some(sel) = selector {
+        if let Err(e) = validate::validate_selector(sel) {
+            return print_error(&e.to_string(), e.error_code(), json);
+        }
+    }
+
+    let requested_attrs: Vec<&str> = output::parse_fields(attrs);
 
     let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = oxibrowser_core::Browser::new(config).await?;
+    let browser = match oxibrowser_core::Browser::new(config).await {
+        Ok(b) => b,
+        Err(e) => return print_error(&format!("browser init failed: {e}"), "RUNTIME_ERROR", json),
+    };
 
     let session_result =
         tokio::time::timeout(Duration::from_secs(timeout), browser.new_page(url)).await;
@@ -512,282 +644,225 @@ async fn run_extract(
     let session = match session_result {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+            browser.close().await.ok();
+            return print_error(&format!("{e}"), output::core_error_code(&e), json);
         }
         Err(_) => {
-            eprintln!("error: timed out after {timeout}s");
-            std::process::exit(1);
+            browser.close().await.ok();
+            return print_error(&format!("timed out after {timeout}s"), "TIMEOUT", json);
         }
     };
 
-    let session_guard = session.read().await;
-
-    let page = match session_guard.page() {
+    let guard = session.read().await;
+    let page = match guard.page() {
         Some(p) => p,
         None => {
-            eprintln!("error: no page loaded");
-            std::process::exit(1);
+            browser.close().await.ok();
+            return print_error("no page loaded", "PAGE_NOT_LOADED", json);
         }
     };
 
-    let frame = page.root_frame();
-    let doc = frame.document();
-
-    // Collect results into a JSON object for --json mode, otherwise print directly.
+    let doc = page.root_frame().document();
     let mut json_map = serde_json::Map::new();
 
     if title {
-        let title_text = page.title().unwrap_or("").to_string();
-        if json_output {
-            json_map.insert("title".into(), serde_json::Value::String(title_text));
-        } else {
-            println!("{title_text}");
-        }
+        json_map.insert("title".into(), Value::String(page.title().unwrap_or("").to_string()));
     }
-
     if links {
-        let link_nodes = doc.query_selector_all("a");
-        let hrefs: Vec<String> = link_nodes
+        let hrefs: Vec<Value> = doc.query_selector_all("a[href]")
             .iter()
-            .filter_map(|id| {
-                doc.get_node(*id)
-                    .and_then(|n| n.href().map(|h| h.to_string()))
-            })
+            .filter_map(|id| doc.get_node(*id).and_then(|n| n.href().map(|h| Value::String(h.to_string()))))
             .collect();
-        if json_output {
-            json_map.insert(
-                "links".into(),
-                serde_json::Value::Array(
-                    hrefs.into_iter().map(serde_json::Value::String).collect(),
-                ),
-            );
-        } else {
-            for href in &hrefs {
-                println!("{href}");
-            }
-        }
+        json_map.insert("links".into(), Value::Array(hrefs));
     }
-
     if text {
-        let body_text = doc.query_text("body").unwrap_or_default();
-        if json_output {
-            json_map.insert("text".into(), serde_json::Value::String(body_text));
-        } else {
-            print!("{body_text}");
-        }
+        json_map.insert("text".into(), Value::String(doc.query_text("body").unwrap_or_default()));
     }
-
     if markdown {
-        let md = page.to_markdown();
-        if json_output {
-            json_map.insert("markdown".into(), serde_json::Value::String(md));
-        } else {
-            print!("{md}");
-        }
+        json_map.insert("markdown".into(), Value::String(page.to_markdown()));
     }
 
     if let Some(sel) = selector {
+        let ids = doc.query_selector_all(sel);
         if all {
-            let node_ids = doc.query_selector_all(sel);
-            let texts: Vec<String> = node_ids
-                .iter()
-                .filter_map(|id| doc.text_content(*id))
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect();
-            if json_output {
-                json_map.insert(
-                    "selector".into(),
-                    serde_json::Value::String(sel.to_string()),
-                );
-                json_map.insert(
-                    "matches".into(),
-                    serde_json::Value::Array(
-                        texts.into_iter().map(serde_json::Value::String).collect(),
-                    ),
-                );
-            } else {
-                for t in &texts {
-                    println!("{t}");
+            let items: Vec<Value> = ids.iter().filter_map(|id| {
+                let mut item = serde_json::Map::new();
+                for &attr in &requested_attrs {
+                    let val = if attr == "text" {
+                        doc.text_content(*id).map(|t| t.trim().to_string()).unwrap_or_default()
+                    } else {
+                        doc.get_node(*id).and_then(|n| n.get_attribute(attr).map(|v| v.to_string())).unwrap_or_default()
+                    };
+                    item.insert(attr.into(), Value::String(val));
+                }
+                if !item.is_empty() { Some(Value::Object(item)) } else { None }
+            }).collect();
+            json_map.insert("selector".into(), Value::String(sel.into()));
+            json_map.insert("count".into(), Value::Number(serde_json::Number::from(items.len())));
+            json_map.insert("items".into(), Value::Array(items));
+        } else {
+            let mut item = serde_json::Map::new();
+            if let Some(id) = ids.first() {
+                for &attr in &requested_attrs {
+                    let val = if attr == "text" {
+                        doc.text_content(*id).map(|t| t.trim().to_string()).unwrap_or_default()
+                    } else {
+                        doc.get_node(*id).and_then(|n| n.get_attribute(attr).map(|v| v.to_string())).unwrap_or_default()
+                    };
+                    item.insert(attr.into(), Value::String(val));
                 }
             }
-        } else {
-            let text_val = doc
-                .query_text(sel)
-                .map(|t| t.trim().to_string())
-                .unwrap_or_default();
-            if json_output {
-                json_map.insert(
-                    "selector".into(),
-                    serde_json::Value::String(sel.to_string()),
-                );
-                json_map.insert("match".into(), serde_json::Value::String(text_val));
-            } else {
-                println!("{text_val}");
-            }
+            json_map.insert("selector".into(), Value::String(sel.into()));
+            json_map.insert("match".into(), Value::Object(item));
         }
     }
 
-    // If no extract flags were given, default to dumping the page title + text.
+    // Default: title + text
     if !title && !links && !text && !markdown && selector.is_none() {
-        let title_text = page.title().unwrap_or("").to_string();
-        let body_text = doc.query_text("body").unwrap_or_default();
-        if json_output {
-            json_map.insert("title".into(), serde_json::Value::String(title_text));
-            json_map.insert("text".into(), serde_json::Value::String(body_text));
-        } else {
-            if !title_text.is_empty() {
-                println!("Title: {title_text}");
-            }
-            println!("{body_text}");
+        json_map.insert("title".into(), Value::String(page.title().unwrap_or("").to_string()));
+        json_map.insert("text".into(), Value::String(doc.query_text("body").unwrap_or_default()));
+    }
+
+    drop(guard);
+    browser.close().await.ok();
+
+    let mut data = Value::Object(json_map);
+    if let Some(mb) = max_bytes {
+        output::truncate_fields(&mut data, mb);
+    }
+
+    if json {
+        output::CliResponse::success_with_meta(data, None, start.elapsed().as_millis() as u64).print_json();
+    } else {
+        print_extract_human(&data);
+    }
+    0
+}
+
+/// Print extract data in human-friendly format.
+fn print_extract_human(data: &Value) {
+    let obj = match data.as_object() {
+        Some(o) => o,
+        None => { println!("{data}"); return; }
+    };
+
+    // Title
+    if let Some(title) = obj.get("title").and_then(|v| v.as_str()) {
+        if !title.is_empty() { println!("Title: {title}"); }
+    }
+    // Blank line after title for visual separation
+    if obj.contains_key("title") && (obj.contains_key("text") || obj.contains_key("items") || obj.contains_key("links")) {
+        println!();
+    }
+    // Links: one per line
+    if let Some(links) = obj.get("links").and_then(|v| v.as_array()) {
+        for link in links {
+            if let Some(s) = link.as_str() { println!("{s}"); }
         }
     }
-
-    if json_output {
-        println!("{}", serde_json::Value::Object(json_map));
+    // Selector items
+    if let Some(items) = obj.get("items").and_then(|v| v.as_array()) {
+        for item in items {
+            if let Some(s) = item.as_str() {
+                println!("{s}");
+            } else {
+                let vals: Vec<&str> = item.as_object()
+                    .map(|o| o.values().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                println!("{}", vals.join("\t"));
+            }
+        }
     }
-
-    drop(session_guard);
-    browser.close().await?;
-    Ok(())
+    // Single match
+    if let Some(m) = obj.get("match") {
+        if let Some(s) = m.as_str() {
+            println!("{s}");
+        } else {
+            let vals: Vec<&str> = m.as_object()
+                .map(|o| o.values().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            println!("{}", vals.join("\t"));
+        }
+    }
+    // Body text
+    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+        if !text.is_empty() {
+            for line in text.lines() {
+                println!("{line}");
+            }
+        }
+    }
+    // Markdown
+    if let Some(md) = obj.get("markdown").and_then(|v| v.as_str()) {
+        if !md.is_empty() { print!("{md}"); }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// browse
+// run (YAML script)
 // ---------------------------------------------------------------------------
 
-/// Browse a page using the Tab API (CDP-free).
-#[allow(clippy::too_many_arguments)]
-async fn run_browse(
-    url: &str,
-    format: &str,
-    click: Option<&str>,
-    input: Option<&str>,
-    press: Option<&str>,
-    wait: Option<&str>,
-    wait_timeout: u64,
-    extract: Option<&str>,
-    all: bool,
-    screenshot: Option<&str>,
-    width: u32,
-    eval: Option<&str>,
-    headers: bool,
-    timeout: u64,
-) -> Result<()> {
-    info!(url = %url, timeout, "browsing URL");
-
-    let config = oxibrowser_core::BrowserConfig::headless();
-    let browser = oxibrowser_core::Browser::new(config).await?;
-    let tab = browser.new_tab().await?;
-
-    let nav_result = tokio::time::timeout(Duration::from_secs(timeout), tab.goto(url)).await;
-    let nav = match nav_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
+async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
+    let script_config = if std::path::Path::new(script_path_or_yaml).exists() {
+        match std::fs::read_to_string(script_path_or_yaml) {
+            Ok(content) => match oxibrowser_core::script::parse_script(&content) {
+                Ok(cfg) => cfg,
+                Err(e) => { eprintln!("Error: parse error: {e}"); return 1; }
+            },
+            Err(e) => { eprintln!("Error: cannot read script: {e}"); return 1; }
         }
-        Err(_) => {
-            eprintln!("error: timed out after {timeout}s");
-            std::process::exit(1);
+    } else {
+        match oxibrowser_core::script::parse_script(script_path_or_yaml) {
+            Ok(cfg) => cfg,
+            Err(e) => { eprintln!("Error: parse error: {e}"); return 1; }
         }
     };
 
-    if headers {
-        eprintln!("HTTP {}", nav.status);
-        eprintln!("URL: {}", nav.url);
-        eprintln!("Title: {}", nav.title);
-    }
+    let mut browser_config = oxibrowser_core::BrowserConfig::headless();
+    browser_config.enable_ssrf_filter = false;
+    let browser = match oxibrowser_core::Browser::new(browser_config).await {
+        Ok(b) => b,
+        Err(e) => { eprintln!("Error: browser init failed: {e}"); return 1; }
+    };
 
-    if let Some(selector) = wait {
-        tab.wait_for(selector, wait_timeout).await?;
-    }
-    if let Some(selector) = click {
-        tab.click(selector).await?;
-    }
-    if let Some(spec) = input {
-        let (selector, value) = spec
-            .split_once(':')
-            .ok_or_else(|| anyhow!("--input must be in the form selector:text"))?;
-        tab.fill(selector, value).await?;
-    }
-    if let Some(keys) = press {
-        tab.press(keys).await?;
-    }
+    let tab = match browser.new_tab().await {
+        Ok(t) => t,
+        Err(e) => { eprintln!("Error: tab creation failed: {e}"); return 1; }
+    };
 
-    if let Some(path) = screenshot {
-        let png = tab.screenshot(width).await?;
-        std::fs::write(path, &png)?;
-        eprintln!("Screenshot: {path} ({} bytes)", png.len());
-    }
+    let mut runner = oxibrowser_core::script::ScriptRunner::new(&tab);
+    let script_result = match tokio::time::timeout(
+        Duration::from_secs(timeout),
+        runner.run_config(&script_config),
+    ).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => { browser.close().await.ok(); eprintln!("Error: {e}"); return 1; }
+        Err(_) => { browser.close().await.ok(); eprintln!("Error: timed out after {timeout}s"); return 3; }
+    };
 
-    if let Some(js) = eval {
-        let value = tab.evaluate(js).await?;
-        match value {
-            serde_json::Value::String(s) => print!("{s}"),
-            serde_json::Value::Null => {}
-            other => print!("{other}"),
-        }
-    } else if let Some(selector) = extract {
-        let matches = tab.query_all(selector).await?;
-        if all {
-            for text in matches {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    println!("{trimmed}");
-                }
-            }
-        } else if let Some(first) = matches.iter().find(|t| !t.trim().is_empty()) {
-            println!("{}", first.trim());
-        }
-    } else {
-        let content = tab.content().await?;
-        match format {
-            "markdown" | "md" => print!("{}", content.markdown),
-            "html" => print!("{}", content.html),
-            "text" => {
-                if let serde_json::Value::String(body) = tab
-                    .evaluate("document.body ? document.body.textContent : ''")
-                    .await?
-                {
-                    print!("{body}");
-                }
-            }
-            "json" => println!(
-                "{}",
-                serde_json::to_string_pretty(&content).unwrap_or_default()
-            ),
-            "links" => {
-                let value = tab
-                    .evaluate("Array.from(document.querySelectorAll('a[href]')).map(a => a.href)")
-                    .await?;
-                if let serde_json::Value::Array(items) = value {
-                    for item in items {
-                        if let Some(link) = item.as_str() {
-                            println!("{link}");
-                        }
-                    }
-                }
-            }
-            _ => print!("{}", content.markdown),
-        }
-    }
-
-    tab.close().await?;
-    browser.close().await?;
-    Ok(())
+    browser.close().await.ok();
+    println!("{}", serde_json::to_string_pretty(&script_result).unwrap());
+    0
 }
 
 // ---------------------------------------------------------------------------
-// serve
+// session (Phase 2)
 // ---------------------------------------------------------------------------
 
-/// Start the CDP server with a real Browser instance.
-async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> Result<()> {
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|e: std::net::AddrParseError| anyhow::anyhow!("invalid address: {e}"))?;
+fn run_session() -> i32 {
+    eprintln!("Error: session mode is not yet implemented (Phase 2)");
+    1
+}
+
+// ---------------------------------------------------------------------------
+// serve (CDP server)
+// ---------------------------------------------------------------------------
+
+async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> i32 {
+    let addr: SocketAddr = match format!("{host}:{port}").parse() {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Error: invalid address: {e}"); return 2; }
+    };
 
     info!(addr = %addr, "starting CDP server");
 
@@ -795,72 +870,116 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> Result<(
     if let Some(path) = cookie_file {
         config.cookie_file = Some(std::path::PathBuf::from(path));
     }
-    // Disable SSRF filter for CDP server mode — clients navigate to arbitrary URLs
     config.enable_ssrf_filter = false;
-    let browser = Arc::new(oxibrowser_core::Browser::new(config).await?);
+
+    let browser = match oxibrowser_core::Browser::new(config).await {
+        Ok(b) => b,
+        Err(e) => { eprintln!("Error: browser init failed: {e}"); return 1; }
+    };
+    let browser = Arc::new(browser);
 
     let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr, browser.clone()));
-    let bound_addr = server.start().await?;
+    let bound_addr = match server.start().await {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Error: server bind failed: {e}"); return 4; }
+    };
 
     info!(addr = %bound_addr, "CDP server ready");
     println!("OxiBrowser CDP server listening on {bound_addr}");
     println!("  DevTools: http://{bound_addr}/json/version");
     println!("  WebSocket: ws://{bound_addr}/ws");
 
-    tokio::signal::ctrl_c().await?;
+    tokio::signal::ctrl_c().await.ok();
     info!("shutting down");
 
     server.shutdown();
-    browser.close().await?;
-
-    Ok(())
+    browser.close().await.ok();
+    0
 }
 
 // ---------------------------------------------------------------------------
-// run script
+// describe
 // ---------------------------------------------------------------------------
 
-use oxibrowser_core::script::{parse_script, ScriptRunner};
-
-/// Run a YAML script on a new Tab.
-async fn run_script(script_path_or_yaml: &str, timeout: u64) -> Result<()> {
-    info!(script = %script_path_or_yaml, timeout, "running script");
-
-    let script_config = if std::path::Path::new(script_path_or_yaml).exists() {
-        parse_script(&std::fs::read_to_string(script_path_or_yaml)?)
-            .map_err(|e| anyhow::anyhow!("failed to parse script: {e}"))?
-    } else {
-        parse_script(script_path_or_yaml)
-            .map_err(|e| anyhow::anyhow!("failed to parse script: {e}"))?
+fn run_describe(command: Option<&str>, compact: bool) -> i32 {
+    // describe is agent-only — always JSON
+    let response = match command {
+        Some(cmd) => describe::describe_command(cmd),
+        None => describe::describe_all(compact),
     };
+    response.print_json()
+}
 
-    // Create a browser and a tab for the script
-    let mut browser_config = oxibrowser_core::BrowserConfig::headless();
-    browser_config.enable_ssrf_filter = false; // Allow script to navigate anywhere
-    let browser = oxibrowser_core::Browser::new(browser_config).await?;
+// ---------------------------------------------------------------------------
+// Text formatting helpers
+// ---------------------------------------------------------------------------
 
-    // Create a tab for the script
-    let tab = browser
-        .new_tab()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to create tab: {e}"))?;
-
-    // Run the script
-    let mut runner = ScriptRunner::new(&tab);
-    let result = runner
-        .run_config(&script_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Print the result
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
-
-    if result.success {
-        info!("script completed successfully");
-    } else {
-        eprintln!("script completed with errors");
+/// Strip markdown link syntax: [text](url) → text
+fn regex_strip_link(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            // Find matching ](
+            if let Some(close) = bytes[i..].iter().position(|&b| b == b']') {
+                let close_idx = i + close;
+                if close_idx + 1 < bytes.len() && bytes[close_idx + 1] == b'(' {
+                    // Find closing )
+                    if let Some(paren) = bytes[close_idx + 2..].iter().position(|&b| b == b')') {
+                        // Extract text between [ and ]
+                        let text = &s[i + 1..close_idx];
+                        result.push_str(text);
+                        i = close_idx + 2 + paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
     }
+    result
+}
 
-    browser.close().await?;
-    Ok(())
+// ---------------------------------------------------------------------------
+// Validation helper
+// ---------------------------------------------------------------------------
+
+fn validate_fetch_inputs(
+    url: &str, click: Option<&str>, fill: Option<&str>,
+    wait: Option<&str>, extract: Option<&str>, eval: Option<&str>,
+) -> Option<output::CliResponse> {
+    if let Err(e) = validate::validate_url(url) {
+        return Some(output::CliResponse::from_validation(e));
+    }
+    if let Some(sel) = click {
+        if let Err(e) = validate::validate_selector(sel) {
+            return Some(output::CliResponse::from_validation(e));
+        }
+    }
+    if let Some(spec) = fill {
+        if !spec.contains(':') {
+            return Some(output::CliResponse::error(
+                "--fill must be in the format selector:value",
+                "INPUT_VALIDATION",
+            ));
+        }
+    }
+    if let Some(sel) = wait {
+        if let Err(e) = validate::validate_selector(sel) {
+            return Some(output::CliResponse::from_validation(e));
+        }
+    }
+    if let Some(sel) = extract {
+        if let Err(e) = validate::validate_selector(sel) {
+            return Some(output::CliResponse::from_validation(e));
+        }
+    }
+    if let Some(expr) = eval {
+        if let Err(e) = validate::validate_expression(expr) {
+            return Some(output::CliResponse::from_validation(e));
+        }
+    }
+    None
 }
