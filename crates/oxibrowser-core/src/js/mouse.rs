@@ -82,10 +82,9 @@ pub fn js_move_mouse(x: f64, y: f64) -> String {
 pub fn js_scroll(delta_x: f64, delta_y: f64) -> String {
     format!(
         r#"(function() {{
-            window.scrollBy({delta_x}, {delta_y});
-            if (typeof WheelEvent !== 'undefined') {{
-                document.dispatchEvent(new WheelEvent('wheel', {{ bubbles: true, cancelable: true, deltaX: {delta_x}, deltaY: {delta_y}, deltaMode: 0 }}));
-            }}
+            var el = document.documentElement || document.body;
+            el.scrollLeft += {delta_x};
+            el.scrollTop += {delta_y};
             return true;
         }})()"#
     )
@@ -245,9 +244,9 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_uses_window_scroll_by() {
+    fn test_scroll_sets_scrollTop() {
         let js = js_scroll(0.0, -300.0);
-        assert!(js.contains("window.scrollBy"));
+        assert!(js.contains("scrollTop"));
         assert!(js.contains("-300"));
     }
 

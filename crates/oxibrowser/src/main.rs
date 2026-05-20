@@ -122,6 +122,9 @@ enum Commands {
         /// Timeout in seconds.
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        /// No-op (run always outputs JSON).
+        #[arg(long, hide = true)]
+        json: bool,
     },
 
     /// Start interactive session (stdin/stdout JSON REPL).
@@ -147,13 +150,24 @@ enum Commands {
         /// Minimal output (~200 tokens).
         #[arg(long)]
         compact: bool,
+        /// No-op (describe always outputs JSON).
+        #[arg(long, hide = true)]
+        json: bool,
     },
 
     /// Print agent skill guide.
-    Skill,
+    Skill {
+        /// Output as JSON.
+        #[arg(long, hide = true)]
+        json: bool,
+    },
 
     /// Print version information.
-    Version,
+    Version {
+        /// Output as JSON.
+        #[arg(long, hide = true)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -201,14 +215,32 @@ async fn main() {
                 links, title, text, markdown, max_bytes, json, timeout,
             ).await
         }
-        Commands::Run { script, timeout } => run_script(&script, timeout).await,
+        Commands::Run { script, timeout, .. } => run_script(&script, timeout).await,
         Commands::Session => session::run_session().await,
         Commands::Serve { host, port, cookie_file } => {
             run_serve(&host, port, cookie_file.as_deref()).await
         }
-        Commands::Describe { command, compact } => run_describe(command.as_deref(), compact),
-        Commands::Skill => { print!("{}", skill::skill_text()); 0 }
-        Commands::Version => { println!("oxibrowser {}", env!("CARGO_PKG_VERSION")); 0 }
+        Commands::Describe { command, compact, .. } => run_describe(command.as_deref(), compact),
+        Commands::Skill { json } => {
+            if json {
+                let resp = output::CliResponse::success(serde_json::json!({"skill": skill::skill_text()}));
+                resp.print_json();
+                0
+            } else {
+                print!("{}", skill::skill_text());
+                0
+            }
+        }
+        Commands::Version { json } => {
+            if json {
+                let resp = output::CliResponse::success(serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "name": "oxibrowser"}));
+                resp.print_json();
+                0
+            } else {
+                println!("oxibrowser {}", env!("CARGO_PKG_VERSION"));
+                0
+            }
+        }
     };
 
     if exit_code != 0 {

@@ -3,6 +3,19 @@
 //! Parses a line of text into a `SessionCommand`. Uses a simple
 //! whitespace-split approach with positional args and `--flag value` flags.
 
+/// Strip leading/trailing matching quotes (single or double) from a string.
+fn strip_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 {
+        if (s.starts_with('"') && s.ends_with('"')) ||
+           (s.starts_with('\'') && s.ends_with('\''))
+        {
+            return &s[1..s.len()-1];
+        }
+    }
+    s
+}
+
 /// Parsed session command.
 #[derive(Debug, Clone)]
 pub enum SessionCommand {
@@ -266,7 +279,7 @@ fn parse_eval(args: &[&str]) -> Result<SessionCommand, String> {
     let expression = if expr_parts.is_empty() {
         return Err(usage.into());
     } else {
-        expr_parts.join(" ")
+        strip_quotes(&expr_parts.join(" ")).to_string()
     };
 
     Ok(SessionCommand::Eval { tab_id, expression, await_promise })
@@ -669,5 +682,13 @@ mod tests {
     fn test_parse_close_all() {
         let cmd = parse_session_command("close --all").unwrap();
         assert!(matches!(cmd, SessionCommand::CloseAll));
+    }
+
+    #[test]
+    fn test_strip_quotes() {
+        assert_eq!(strip_quotes("\"hello\""), "hello");
+        assert_eq!(strip_quotes("'world'"), "world");
+        assert_eq!(strip_quotes("no quotes"), "no quotes");
+        assert_eq!(strip_quotes("\"unclosed, 'unclosed2'"), "\"unclosed, 'unclosed2'");
     }
 }
