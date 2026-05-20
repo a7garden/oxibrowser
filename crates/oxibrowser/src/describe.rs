@@ -46,7 +46,7 @@ pub fn describe_all(compact: bool) -> CliResponse {
                         {"name": "url", "type": "string", "format": "uri", "required": true}
                     ],
                     "flags": {
-                        "format": {"type": "enum", "values": ["html", "markdown", "text"], "default": "html", "description": "Output format"},
+                        "format": {"type": "enum", "values": ["html", "markdown", "text"], "default": "markdown", "description": "Output format (markdown by default)"},
                         "json": {"type": "bool", "default": false, "description": "Output as JSON (automatic when piped)"},
                         "max-bytes": {"type": "int", "description": "Truncate output at N bytes"},
                         "fields": {"type": "string", "description": "Comma-separated fields: url,title,status,markdown,html,text,content_type"},
