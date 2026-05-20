@@ -840,9 +840,10 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
         Ok(Err(e)) => { browser.close().await.ok(); eprintln!("Error: {e}"); return 1; }
         Err(_) => { browser.close().await.ok(); eprintln!("Error: timed out after {timeout}s"); return 3; }
     };
-
     browser.close().await.ok();
-    println!("{}", serde_json::to_string_pretty(&script_result).unwrap());
+    let elapsed = script_result.duration_ms;
+    let data = serde_json::to_value(&script_result).unwrap_or_default();
+    output::CliResponse::success_with_meta(data, None, elapsed).print_json();
     0
 }
 
