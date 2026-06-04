@@ -18,6 +18,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+use uuid::Uuid;
 
 /// Clone-able, `&self`-only interactive tab for agent use.
 ///
@@ -34,6 +35,12 @@ pub struct Tab {
     /// tests or in `Session`-only construction paths — events are silently
     /// dropped.
     event_tx: Option<broadcast::Sender<BrowserEvent>>,
+    /// Unique ID of this tab, propagated to every `BrowserEvent` it emits.
+    ///
+    /// Stable for the lifetime of the tab and shared across `Tab::clone`
+    /// (it's `Copy` + `Clone`). `Uuid::nil()` for tabs built via `Tab::new`
+    /// (tests) so that any misrouted event is obvious in logs.
+    tab_id: Uuid,
 }
 
 impl Clone for Tab {
@@ -42,6 +49,7 @@ impl Clone for Tab {
             inner: Arc::clone(&self.inner),
             tab_count: self.tab_count.clone(),
             event_tx: self.event_tx.clone(),
+            tab_id: self.tab_id,
         }
     }
 }
@@ -55,6 +63,7 @@ impl Tab {
             inner: Arc::new(Mutex::new(session)),
             tab_count: None,
             event_tx: None,
+            tab_id: Uuid::nil(),
         }
     }
 
@@ -63,12 +72,19 @@ impl Tab {
         session: Session,
         tab_count: Arc<AtomicUsize>,
         event_tx: broadcast::Sender<BrowserEvent>,
+        tab_id: Uuid,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(session)),
             tab_count: Some(tab_count),
             event_tx: Some(event_tx),
+            tab_id,
         }
+    }
+
+    /// Return this tab's unique ID.
+    pub fn tab_id(&self) -> Uuid {
+        self.tab_id
     }
 
     /// Emit a `BrowserEvent` if the parent `Browser` wired us up.
@@ -111,6 +127,7 @@ impl Tab {
     pub async fn goto(&self, url: &str) -> Result<BrowseResult> {
         let started = std::time::Instant::now();
         self.emit(BrowserEvent::NavigationStarted {
+            tab_id: self.tab_id,
             url: url.to_string(),
         });
 
@@ -119,6 +136,7 @@ impl Tab {
         let result = Self::extract_result(&session);
 
         self.emit(BrowserEvent::DocumentReady {
+            tab_id: self.tab_id,
             final_url: result.url.clone(),
             title: result.title.clone(),
             status: result.status,
@@ -511,6 +529,7 @@ impl Tab {
     /// Polls every 50ms. Returns error on timeout.
     pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<()> {
         self.emit(BrowserEvent::WaitingForSelector {
+            tab_id: self.tab_id,
             selector: selector.to_string(),
             timeout_ms,
         });
@@ -564,6 +583,7 @@ impl Tab {
         };
 
         self.emit(BrowserEvent::ScreenshotCaptured {
+            tab_id: self.tab_id,
             bytes: png.len(),
             viewport_width: width,
             duration: started.elapsed(),
@@ -881,6 +901,7 @@ mod tests {
         let tab = tab_with_html(html).await;
         // Should not panic.
         tab.emit(BrowserEvent::NavigationStarted {
+            tab_id: Uuid::nil(),
             url: "https://test".into(),
         });
     }
@@ -898,6 +919,7 @@ mod tests {
         // The Tab holds a clone of browser's event_tx. Emit through the Tab
         // should reach this subscriber.
         tab.emit(BrowserEvent::ScreenshotCaptured {
+            tab_id: Uuid::nil(),
             bytes: 1024,
             viewport_width: 800,
             duration: std::time::Duration::from_millis(10),
@@ -915,6 +937,27 @@ mod tests {
             }
             other => panic!("expected ScreenshotCaptured, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_tab_id_is_stable_across_clones() {
+        use crate::browser::Browser;
+        use crate::config::BrowserConfig;
+
+        let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+        let tab = browser.new_tab().await.unwrap();
+        let original_id = tab.tab_id();
+        assert_ne!(
+            original_id,
+            Uuid::nil(),
+            "tabs created via Browser::new_tab should have a real Uuid"
+        );
+
+        let clone_a = tab.clone();
+        let clone_b = tab.clone();
+        assert_eq!(clone_a.tab_id(), original_id, "clone a should share tab_id");
+        assert_eq!(clone_b.tab_id(), original_id, "clone b should share tab_id");
+        assert_eq!(clone_a.tab_id(), clone_b.tab_id());
     }
 
     #[test]

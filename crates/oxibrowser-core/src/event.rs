@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Lifecycle events emitted by the browser.
 ///
@@ -25,12 +26,22 @@ use std::time::Duration;
 pub enum BrowserEvent {
     /// `Tab::goto` has begun. Emitted before any network I/O.
     NavigationStarted {
+        /// ID of the tab that emitted this event.
+        ///
+        /// Every event is from a tab; required at the Rust level (no `Option`).
+        /// Serde defaults to `Uuid::nil()` so JSON consumers that don't yet
+        /// know about this field can still parse older payloads.
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
         /// The URL the caller asked for (pre-redirect).
         url: String,
     },
 
     /// `Tab::wait_for` is polling for a CSS selector.
     WaitingForSelector {
+        /// ID of the tab that emitted this event.
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
         /// The CSS selector being awaited.
         selector: String,
         /// Maximum time we'll wait before giving up.
@@ -42,6 +53,9 @@ pub enum BrowserEvent {
     /// This is the single "page is done" signal. It includes
     /// enough information to render a meaningful one-line summary.
     DocumentReady {
+        /// ID of the tab that emitted this event.
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
         /// Final URL after any redirects.
         final_url: String,
         /// Page `<title>`.
@@ -58,6 +72,9 @@ pub enum BrowserEvent {
 
     /// A screenshot has been rendered and captured.
     ScreenshotCaptured {
+        /// ID of the tab that emitted this event.
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
         /// Size of the PNG payload, in bytes.
         bytes: usize,
         /// Viewport width the screenshot was rendered at.
@@ -75,11 +92,12 @@ impl BrowserEvent {
     /// returned string as the `progress` line of the tool card.
     pub fn short_label(&self) -> String {
         match self {
-            Self::NavigationStarted { url } => format!("Opening {url}…"),
+            Self::NavigationStarted { url, .. } => format!("Opening {url}…"),
 
             Self::WaitingForSelector {
                 selector,
                 timeout_ms,
+                ..
             } => {
                 let secs = timeout_ms / 1000;
                 format!("Waiting for `{selector}` (up to {secs}s)…")
@@ -104,6 +122,7 @@ impl BrowserEvent {
                 bytes,
                 viewport_width,
                 duration,
+                ..
             } => {
                 let ms = duration.as_millis();
                 format!(
@@ -132,6 +151,7 @@ mod tests {
     #[test]
     fn navigation_started_label() {
         let e = BrowserEvent::NavigationStarted {
+            tab_id: Uuid::nil(),
             url: "https://example.com".into(),
         };
         assert_eq!(e.short_label(), "Opening https://example.com…");
@@ -140,6 +160,7 @@ mod tests {
     #[test]
     fn waiting_for_selector_label() {
         let e = BrowserEvent::WaitingForSelector {
+            tab_id: Uuid::nil(),
             selector: ".content".into(),
             timeout_ms: 30_000,
         };
@@ -149,6 +170,7 @@ mod tests {
     #[test]
     fn document_ready_label() {
         let e = BrowserEvent::DocumentReady {
+            tab_id: Uuid::nil(),
             final_url: "https://example.com".into(),
             title: "Example".into(),
             status: 200,
@@ -167,6 +189,7 @@ mod tests {
     #[test]
     fn screenshot_captured_label() {
         let e = BrowserEvent::ScreenshotCaptured {
+            tab_id: Uuid::nil(),
             bytes: 8192,
             viewport_width: 800,
             duration: Duration::from_millis(50),
@@ -180,6 +203,7 @@ mod tests {
     #[test]
     fn event_serializes_with_kind_tag() {
         let e = BrowserEvent::NavigationStarted {
+            tab_id: Uuid::nil(),
             url: "https://x".into(),
         };
         let json = serde_json::to_string(&e).unwrap();
@@ -194,13 +218,16 @@ mod tests {
         // Sanity: every variant has a label match arm.
         let events = vec![
             BrowserEvent::NavigationStarted {
+                tab_id: Uuid::nil(),
                 url: "https://x".into(),
             },
             BrowserEvent::WaitingForSelector {
+                tab_id: Uuid::nil(),
                 selector: ".a".into(),
                 timeout_ms: 1000,
             },
             BrowserEvent::DocumentReady {
+                tab_id: Uuid::nil(),
                 final_url: "https://x".into(),
                 title: "t".into(),
                 status: 200,
@@ -209,6 +236,7 @@ mod tests {
                 total_duration: Duration::from_millis(0),
             },
             BrowserEvent::ScreenshotCaptured {
+                tab_id: Uuid::nil(),
                 bytes: 0,
                 viewport_width: 0,
                 duration: Duration::from_millis(0),
@@ -217,6 +245,79 @@ mod tests {
         for e in events {
             let s = e.short_label();
             assert!(!s.is_empty(), "label should not be empty for {e:?}");
+        }
+    }
+
+    #[test]
+    fn event_tab_id_preserved_in_serde() {
+        // tab_id must round-trip through serde_json on every variant.
+        let id = Uuid::new_v4();
+        let events = vec![
+            BrowserEvent::NavigationStarted {
+                tab_id: id,
+                url: "https://x".into(),
+            },
+            BrowserEvent::WaitingForSelector {
+                tab_id: id,
+                selector: ".a".into(),
+                timeout_ms: 1000,
+            },
+            BrowserEvent::DocumentReady {
+                tab_id: id,
+                final_url: "https://x".into(),
+                title: "t".into(),
+                status: 200,
+                total_bytes: 0,
+                js_script_count: 0,
+                total_duration: Duration::from_millis(0),
+            },
+            BrowserEvent::ScreenshotCaptured {
+                tab_id: id,
+                bytes: 0,
+                viewport_width: 0,
+                duration: Duration::from_millis(0),
+            },
+        ];
+
+        for original in &events {
+            // Wire format must include the tab_id field.
+            let json = serde_json::to_string(original).unwrap();
+            assert!(
+                json.contains("\"tab_id\""),
+                "wire format should include tab_id, got: {json}"
+            );
+
+            // Round-trip: deserialize and confirm tab_id is preserved.
+            let round_tripped: BrowserEvent = serde_json::from_str(&json).unwrap();
+            match (&original, &round_tripped) {
+                (
+                    BrowserEvent::NavigationStarted { tab_id: a, .. },
+                    BrowserEvent::NavigationStarted { tab_id: b, .. },
+                )
+                | (
+                    BrowserEvent::WaitingForSelector { tab_id: a, .. },
+                    BrowserEvent::WaitingForSelector { tab_id: b, .. },
+                )
+                | (
+                    BrowserEvent::DocumentReady { tab_id: a, .. },
+                    BrowserEvent::DocumentReady { tab_id: b, .. },
+                )
+                | (
+                    BrowserEvent::ScreenshotCaptured { tab_id: a, .. },
+                    BrowserEvent::ScreenshotCaptured { tab_id: b, .. },
+                ) => assert_eq!(a, b, "tab_id should round-trip through serde"),
+                _ => panic!("variant changed across serde round-trip"),
+            }
+        }
+
+        // serde default: a payload missing tab_id should deserialize as Uuid::nil().
+        let no_tab_id = r#"{"kind":"navigation_started","url":"https://x"}"#;
+        let parsed: BrowserEvent = serde_json::from_str(no_tab_id).unwrap();
+        match parsed {
+            BrowserEvent::NavigationStarted { tab_id, .. } => {
+                assert_eq!(tab_id, Uuid::nil());
+            }
+            other => panic!("expected NavigationStarted, got {other:?}"),
         }
     }
 }

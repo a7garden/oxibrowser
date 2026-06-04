@@ -195,14 +195,17 @@ impl Browser {
         )
         .await?;
 
+        let tab_id = uuid::Uuid::new_v4();
         tracing::info!(
             session_count = self.sessions.read().len(),
+            tab_id = %tab_id,
             "new tab created"
         );
         Ok(Tab::new_with_cleanup_and_events(
             session,
             self.tab_count.clone(),
             self.event_tx.clone(),
+            tab_id,
         ))
     }
 
@@ -502,6 +505,7 @@ mod tests {
         // (Direct channel access; subscribers only added by tests below.)
         for i in 0..100 {
             let _ = browser.event_tx.send(BrowserEvent::NavigationStarted {
+                tab_id: uuid::Uuid::nil(),
                 url: format!("https://example.com/{i}").into(),
             });
         }
@@ -516,12 +520,13 @@ mod tests {
 
         // The Tab is what emits events; simulate that path here.
         let _ = browser.event_tx.send(BrowserEvent::NavigationStarted {
+            tab_id: uuid::Uuid::nil(),
             url: "https://example.com".into(),
         });
 
         let event = rx.try_recv().expect("subscriber should receive event");
         match event {
-            BrowserEvent::NavigationStarted { url } => {
+            BrowserEvent::NavigationStarted { url, .. } => {
                 assert_eq!(url, "https://example.com");
             }
             other => panic!("expected NavigationStarted, got {other:?}"),

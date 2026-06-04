@@ -42,7 +42,7 @@ string_cache = "0.8"
 log = "0.4"
 encoding_rs = "0.8"
 bytes = "1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
