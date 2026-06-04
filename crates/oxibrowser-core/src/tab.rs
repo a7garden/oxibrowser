@@ -11,12 +11,13 @@
 
 use crate::browse_result::BrowseResult;
 use crate::error::{CoreError, Result};
+use crate::event::BrowserEvent;
 use crate::js;
 use crate::session::Session;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 /// Clone-able, `&self`-only interactive tab for agent use.
 ///
@@ -26,6 +27,13 @@ pub struct Tab {
     inner: Arc<Mutex<Session>>,
     /// Optional browser tab counter to decrement on close.
     tab_count: Option<Arc<AtomicUsize>>,
+    /// Optional event sink to the parent `Browser`'s observer stream.
+    ///
+    /// When `Some`, navigation/wait/screenshot methods emit `BrowserEvent`s
+    /// that observers (e.g. oxi-agent) can subscribe to. When `None` — in
+    /// tests or in `Session`-only construction paths — events are silently
+    /// dropped.
+    event_tx: Option<broadcast::Sender<BrowserEvent>>,
 }
 
 impl Clone for Tab {
@@ -33,26 +41,65 @@ impl Clone for Tab {
         Self {
             inner: Arc::clone(&self.inner),
             tab_count: self.tab_count.clone(),
+            event_tx: self.event_tx.clone(),
         }
     }
 }
 
 impl Tab {
     /// Create a new Tab wrapping an existing Session.
-    /// Used in tests where no browser tab_count tracking is needed.
+    /// Used in tests where no browser tab_count tracking or event streaming is needed.
     #[allow(dead_code)]
     pub(crate) fn new(session: Session) -> Self {
         Self {
             inner: Arc::new(Mutex::new(session)),
             tab_count: None,
+            event_tx: None,
         }
     }
 
-    /// Create a Tab with a browser tab counter to decrement on close.
-    pub(crate) fn new_with_cleanup(session: Session, tab_count: Arc<AtomicUsize>) -> Self {
+    /// Create a Tab wired to a parent `Browser`'s tab counter and event stream.
+    pub(crate) fn new_with_cleanup_and_events(
+        session: Session,
+        tab_count: Arc<AtomicUsize>,
+        event_tx: broadcast::Sender<BrowserEvent>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(session)),
             tab_count: Some(tab_count),
+            event_tx: Some(event_tx),
+        }
+    }
+
+    /// Emit a `BrowserEvent` if the parent `Browser` wired us up.
+    ///
+    /// Silently does nothing when the event sink is `None` (e.g. in tests
+    /// that build a Tab directly from a Session). On a full observer queue
+    /// the event is dropped — observability must never block the hot path.
+    fn emit(&self, event: BrowserEvent) {
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Count `<script>` blocks referenced by the current page, if loaded.
+    ///
+    /// Returns 0 when no page is loaded or the DOM has no script resources.
+    /// Used for the `js_script_count` field of `BrowserEvent::DocumentReady`.
+    fn count_scripts(session: &Session) -> usize {
+        match session.page() {
+            Some(page) => page
+                .root_frame()
+                .extract_resource_urls()
+                .into_iter()
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        oxibrowser_webapi::dom::ResourceKind::Script
+                    )
+                })
+                .count(),
+            None => 0,
         }
     }
 
@@ -62,9 +109,25 @@ impl Tab {
 
     /// Navigate to a URL.
     pub async fn goto(&self, url: &str) -> Result<BrowseResult> {
+        let started = std::time::Instant::now();
+        self.emit(BrowserEvent::NavigationStarted {
+            url: url.to_string(),
+        });
+
         let mut session = self.inner.lock().await;
         session.navigate(url).await?;
-        Ok(Self::extract_result(&session))
+        let result = Self::extract_result(&session);
+
+        self.emit(BrowserEvent::DocumentReady {
+            final_url: result.url.clone(),
+            title: result.title.clone(),
+            status: result.status,
+            total_bytes: result.html.len() as u64,
+            js_script_count: Self::count_scripts(&session),
+            total_duration: started.elapsed(),
+        });
+
+        Ok(result)
     }
 
     /// Go back in history.
@@ -447,6 +510,11 @@ impl Tab {
     ///
     /// Polls every 50ms. Returns error on timeout.
     pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<()> {
+        self.emit(BrowserEvent::WaitingForSelector {
+            selector: selector.to_string(),
+            timeout_ms,
+        });
+
         let start = std::time::Instant::now();
         let deadline = start + std::time::Duration::from_millis(timeout_ms);
 
@@ -488,11 +556,19 @@ impl Tab {
 
     /// Render the current page as a PNG screenshot (text-based bitmap font).
     pub async fn screenshot(&self, width: u32) -> Result<Vec<u8>> {
+        let started = std::time::Instant::now();
         let session = self.inner.lock().await;
-        match session.page() {
-            Some(page) => page.to_screenshot_png(width),
-            None => Err(CoreError::PageNotLoaded),
-        }
+        let png = match session.page() {
+            Some(page) => page.to_screenshot_png(width)?,
+            None => return Err(CoreError::PageNotLoaded),
+        };
+
+        self.emit(BrowserEvent::ScreenshotCaptured {
+            bytes: png.len(),
+            viewport_width: width,
+            duration: started.elapsed(),
+        });
+        Ok(png)
     }
 
     // -----------------------------------------------------------------------
@@ -794,6 +870,51 @@ mod tests {
         tab.close().await.unwrap();
         tab.close().await.unwrap(); // Should not panic
         assert!(tab.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_tab_without_event_sink_silently_drops() {
+        // Tabs built via Tab::new() (test path) have no event_tx;
+        // emit() should silently no-op.
+        use crate::event::BrowserEvent;
+        let html = "<!DOCTYPE html><html><body><p>Hi</p></body></html>";
+        let tab = tab_with_html(html).await;
+        // Should not panic.
+        tab.emit(BrowserEvent::NavigationStarted {
+            url: "https://test".into(),
+        });
+    }
+
+    #[tokio::test]
+    async fn test_tab_with_event_sink_emits_on_screenshot() {
+        use crate::browser::Browser;
+        use crate::config::BrowserConfig;
+        use crate::event::BrowserEvent;
+
+        let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
+        let mut rx = browser.subscribe_events();
+        let tab = browser.new_tab().await.unwrap();
+
+        // The Tab holds a clone of browser's event_tx. Emit through the Tab
+        // should reach this subscriber.
+        tab.emit(BrowserEvent::ScreenshotCaptured {
+            bytes: 1024,
+            viewport_width: 800,
+            duration: std::time::Duration::from_millis(10),
+        });
+
+        let event = rx.try_recv().expect("subscriber should receive event");
+        match event {
+            BrowserEvent::ScreenshotCaptured {
+                bytes,
+                viewport_width,
+                ..
+            } => {
+                assert_eq!(bytes, 1024);
+                assert_eq!(viewport_width, 800);
+            }
+            other => panic!("expected ScreenshotCaptured, got {other:?}"),
+        }
     }
 
     #[test]

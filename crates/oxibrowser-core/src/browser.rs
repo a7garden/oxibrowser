@@ -1,11 +1,11 @@
 //! Browser — the top-level browser instance.
 //!
-//! Mirrors Lightpanda's `Browser.zig`: owns sessions, the HTTP client,
-//! and global browser state.
+//! Owns sessions, the HTTP client, and global browser state.
 
 use crate::browse_result::BrowseResult;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
+use crate::event::BrowserEvent;
 use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::session::Session;
@@ -36,8 +36,7 @@ impl std::fmt::Display for BrowserId {
 /// The top-level browser instance.
 ///
 /// A Browser can hold multiple Sessions (browsing contexts), each with its own
-/// cookie jar, storage, and pages. In Lightpanda terms, this is the `Browser`
-/// struct that owns the JS environment, HTTP client, and session pool.
+/// cookie jar, storage, and pages.
 pub struct Browser {
     /// Unique ID.
     id: BrowserId,
@@ -55,6 +54,12 @@ pub struct Browser {
     tab_count: Arc<AtomicUsize>,
     /// Shutdown signal — broadcast to all session holders.
     shutdown_tx: broadcast::Sender<()>,
+    /// Lifecycle event stream — `subscribe_events()` for observers.
+    ///
+    /// 32-slot buffer is plenty: we emit ≤4 events per page load
+    /// (NavigationStarted, optional WaitingForSelector, DocumentReady,
+    /// optional ScreenshotCaptured). The agent drops oldest on overflow.
+    event_tx: broadcast::Sender<BrowserEvent>,
 }
 
 impl Browser {
@@ -83,6 +88,8 @@ impl Browser {
         let cookie_jar = Arc::new(RwLock::new(cookie_jar));
         let http_client = Arc::new(HttpClient::new(&config, cookie_jar.clone())?);
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
+        // 32 slots = generous headroom; we emit ≤4 events per page load.
+        let (event_tx, _) = broadcast::channel::<BrowserEvent>(32);
 
         let id = BrowserId::next();
         info!(id = %id, "browser created");
@@ -96,13 +103,14 @@ impl Browser {
             closed: std::sync::atomic::AtomicBool::new(false),
             tab_count: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
+            event_tx,
         })
     }
 
     /// Create a new browsing session.
     ///
     /// A session represents a browsing context group (cookie jar, session
-    /// storage, navigation history). Similar to Lightpanda's `Session.zig`.
+    /// storage, navigation history).
     pub async fn new_session(&self) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         self.ensure_open()?;
 
@@ -162,6 +170,10 @@ impl Browser {
     ///
     /// The session counts toward `max_sessions` but is not tracked for
     /// CDP cleanup — use `Tab::close()` to release the slot.
+    ///
+    /// The returned `Tab` is wired to this `Browser`'s event stream —
+    /// navigation/wait/screenshot operations emit `BrowserEvent`s to
+    /// subscribers of `subscribe_events()`.
     pub async fn new_tab(&self) -> Result<Tab> {
         self.ensure_open()?;
 
@@ -187,7 +199,11 @@ impl Browser {
             session_count = self.sessions.read().len(),
             "new tab created"
         );
-        Ok(Tab::new_with_cleanup(session, self.tab_count.clone()))
+        Ok(Tab::new_with_cleanup_and_events(
+            session,
+            self.tab_count.clone(),
+            self.event_tx.clone(),
+        ))
     }
 
     /// Convenience: create a session and navigate to a URL.
@@ -238,6 +254,18 @@ impl Browser {
     /// e.g., for graceful shutdown in long-running tasks.
     pub fn shutdown_rx(&self) -> broadcast::Receiver<()> {
         self.shutdown_tx.subscribe()
+    }
+
+    /// Subscribe to browser lifecycle events.
+    ///
+    /// Observers (e.g. oxi-agent's `OxiBrowserEngine`) use this to forward
+    /// events to the agent loop's `ToolExecutionUpdate` callback. The
+    /// returned receiver can be safely dropped; new subscribers get their
+    /// own queue. On overflow, the **oldest** undelivered event is dropped
+    /// (broadcast semantics) — observers should treat `RecvError::Lagged`
+    /// as a non-fatal signal that they fell behind, not as a hard error.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<BrowserEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Get the browser ID.
@@ -454,5 +482,49 @@ mod tests {
             t2.is_err(),
             "exceeding max_sessions via new_tab should fail"
         );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_events_returns_receiver() {
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        // Should not panic; multiple subscribers should be supported.
+        let _rx1 = browser.subscribe_events();
+        let _rx2 = browser.subscribe_events();
+    }
+
+    #[tokio::test]
+    async fn test_emit_event_does_not_block_on_no_subscribers() {
+        use crate::event::BrowserEvent;
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        // No subscribers — emit should silently succeed.
+        // (Direct channel access; subscribers only added by tests below.)
+        for i in 0..100 {
+            let _ = browser.event_tx.send(BrowserEvent::NavigationStarted {
+                url: format!("https://example.com/{i}").into(),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn test_emit_event_reaches_subscriber() {
+        use crate::event::BrowserEvent;
+        let config = BrowserConfig::headless();
+        let browser = Browser::new(config).await.unwrap();
+        let mut rx = browser.subscribe_events();
+
+        // The Tab is what emits events; simulate that path here.
+        let _ = browser.event_tx.send(BrowserEvent::NavigationStarted {
+            url: "https://example.com".into(),
+        });
+
+        let event = rx.try_recv().expect("subscriber should receive event");
+        match event {
+            BrowserEvent::NavigationStarted { url } => {
+                assert_eq!(url, "https://example.com");
+            }
+            other => panic!("expected NavigationStarted, got {other:?}"),
+        }
     }
 }

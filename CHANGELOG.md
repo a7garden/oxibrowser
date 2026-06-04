@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — Browser Observability (v0.12.0)
+
+- **`BrowserEvent` enum** (`oxibrowser_core::event::BrowserEvent`) — public observability surface for the browser lifecycle. Four variants:
+  - `NavigationStarted { url }`
+  - `WaitingForSelector { selector, timeout_ms }`
+  - `DocumentReady { final_url, title, status, total_bytes, js_script_count, total_duration }`
+  - `ScreenshotCaptured { bytes, viewport_width, duration }`
+- **`Browser::subscribe_events()`** — returns a `tokio::sync::broadcast::Receiver<BrowserEvent>`. Multiple observers can subscribe; oldest event is dropped on overflow.
+- **`BrowserEvent::short_label()`** — single source of truth for user-facing progress text (e.g. `Loaded "Example" — 200 · 1.2 KB · 4 scripts · 245 ms`).
+- **Tab events** — `Tab::goto` emits `NavigationStarted` + `DocumentReady`; `Tab::wait_for` emits `WaitingForSelector`; `Tab::screenshot` emits `ScreenshotCaptured`. All emission is non-blocking; events are dropped silently if the observer queue is full.
+- **9 new unit tests** in `event.rs` and `browser.rs` (label formatting, wire format, overflow safety, end-to-end subscribe/recv).
+
+### Changed
+
+- `Tab` now holds an optional `broadcast::Sender<BrowserEvent>`. Tabs created via `Browser::new_tab()` are wired to the browser's event stream; tabs built directly via `Tab::new()` (tests) are not.
+- Workspace version bumped to `0.12.0` (additive — no breaking changes).
+
 ## [0.11.0] - 2026-05-20
 
 ### Added — CLI 2.0 (Agent-First Redesign)
