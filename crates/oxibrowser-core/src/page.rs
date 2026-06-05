@@ -1,7 +1,7 @@
 //! Page — container for a document and its frames.
 //!
-//! Mirrors Lightpanda's `Page.zig`: owns the DOM factory, JS identity map,
-//! and frame tree. A Page is created on navigation and holds the root Frame.
+
+//! Page — container for a document and its frames.
 
 use crate::error::{CoreError, Result};
 use crate::frame::Frame;

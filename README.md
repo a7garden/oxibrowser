@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="logo-readme.png" alt="OxiBrowser logo" width="120">
+
 # 🌐 OxiBrowser
 
 **The headless browser built in pure Rust for AI agents.**
@@ -7,11 +9,12 @@
 Not a Chromium fork. Not a C++ wrapper. A browser engine written from scratch in Rust,
 designed from day one for automation, web scraping, and AI-driven workflows.
 
-[![crates.io](https://img.shields.io/crates/v/oxibrowser?style=flat-square&logo=rust&color=orange)](https://crates.io/crates/oxibrowser)
-[![docs.rs](https://img.shields.io/docsrs/oxibrowser?style=flat-square&color=blue)](https://docs.rs/oxibrowser)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/a7garden/oxibrowser?style=flat-square&logo=github&color=yellow)](https://github.com/a7garden/oxibrowser/stargazers)
-[![CI](https://img.shields.io/github/actions/workflow/status/a7garden/oxibrowser/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/a7garden/oxibrowser/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/a7garden/oxibrowser/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/a7garden/oxibrowser/actions)
+[![Crates.io](https://img.shields.io/crates/v/oxibrowser?style=flat-square&logo=rust&label=crates.io)](https://crates.io/crates/oxibrowser)
+[![docs.rs](https://img.shields.io/docsrs/oxibrowser?style=flat-square&label=docs.rs)](https://docs.rs/oxibrowser)
+[![GitHub release](https://img.shields.io/github/v/release/a7garden/oxibrowser?style=flat-square&include_prereleases&label=release)](https://github.com/a7garden/oxibrowser/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/a7garden/oxibrowser?style=flat-square&logo=github)](https://github.com/a7garden/oxibrowser/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
 [Report Bug](https://github.com/a7garden/oxibrowser/issues) · [Request Feature](https://github.com/a7garden/oxibrowser/issues) · [Read the Docs](https://github.com/a7garden/oxibrowser/blob/main/docs/ARCHITECTURE.md) · [Discord](https://discord.gg/oxibrowser)
@@ -36,32 +39,31 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <tr>
 <th>OxiBrowser</th>
 <th>Headless Chrome</th>
-<th>Lightpanda</th>
 </tr>
 <tr>
 <td align="center">24 MB binary</td>
 <td align="center">~400 MB install</td>
-<td align="center">~80 MB binary</td>
+
 </tr>
 <tr>
 <td align="center">~8 MB RAM base</td>
 <td align="center">~200 MB RAM base</td>
-<td align="center">~30 MB RAM base</td>
+
 </tr>
 <tr>
 <td align="center">~50 ms startup</td>
 <td align="center">~800 ms startup</td>
-<td align="center">~10 ms startup</td>
+
 </tr>
 <tr>
 <td align="center">Pure Rust (boa)</td>
 <td align="center">C++ (V8)</td>
-<td align="center">Zig (V8)</td>
+
 </tr>
 <tr>
-<td align="center">AGPL-3.0-only</td>
+<td align="center">MIT</td>
 <td align="center">BSD / ToS</td>
-<td align="center">AGPL-3.0</td>
+
 </tr>
 </table>
 
@@ -498,16 +500,10 @@ cargo clippy --workspace -- -D warnings
 
 ## 📄 License
 
-OxiBrowser is a derivative work of [Lightpanda](https://github.com/lightpanda-io/browser) (AGPL-3.0).
-Licensed under the [GNU Affero General Public License v3](LICENSE).
-
-See [NOTICE.md](NOTICE.md) for detailed attribution.
-
----
+OxiBrowser is licensed under the [MIT License](LICENSE).
 
 ## 🙏 Acknowledgments
 
-- [Lightpanda](https://github.com/lightpanda-io/browser) — Architecture inspiration (Browser → Session → Page → Frame hierarchy)
 - [boa_engine](https://boajs.dev/) — Pure Rust JavaScript engine (ES2024+)
 - [html5ever](https://github.com/servo/html5ever) — HTML parser from the Servo project
 - [reqwest](https://github.com/seanmonstar/reqwest) — Ergonomic HTTP client for Rust

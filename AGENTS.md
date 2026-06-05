@@ -29,7 +29,8 @@ Existing headless browsers require Chromium — hundreds of MB, slow startup, ma
 OxiBrowser provides the same CDP interface at a fraction of the cost, purpose-built for AI agent
 workflows: scraping, automation, screenshot capture, Markdown extraction.
 
-Inspired by [Lightpanda](https://github.com/lightpanda-io/browser) (Zig), but fully Rust-native.
+OxiBrowser is a **headless browser built in pure Rust**, designed for AI agents and automation.
+No Chromium, no V8, no C dependencies — single static binary.
 
 ## HOW
 
@@ -70,10 +71,4 @@ All shared state uses `Arc<RwLock>` and `AtomicU64`. No exceptions.
 
 ## Detailed Docs (read when the task needs them)
 
-| When working on... | Read this |
-|---------------------|-----------|
-| Core hierarchy, thread model, JS↔Rust bridges | `docs/ARCHITECTURE.md` |
-| CDP protocol, domain handlers, event system | `docs/CDP.md` |
-| Feature history, what changed in each version | `CHANGELOG.md` |
-| Getting started, CLI usage | `docs/QUICKSTART.md` |
-| CLI 2.0 design rationale | `docs/CLI-V2-DESIGN.md` |
+

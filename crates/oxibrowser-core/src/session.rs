@@ -1,7 +1,7 @@
 //! Session — browsing context group with cookie jar, storage, and history.
 //!
-//! Mirrors Lightpanda's `Session.zig`: owns Pages, navigation history,
-//! session storage, and the cookie jar.
+
+//! Session — browsing context group with cookie jar, storage, and history.
 
 use crate::browser::BrowserId;
 use crate::config::BrowserConfig;

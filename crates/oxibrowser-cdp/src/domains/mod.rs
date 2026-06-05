@@ -1,6 +1,6 @@
 //! CDP domains — implementations of CDP domain methods.
 //!
-//! Mirrors Lightpanda's `src/cdp/domains/` structure.
+
 //!
 //! The `dispatch` function is async and receives a `DispatchContext` that
 //! includes the browser `Session` for page interaction AND the `EventSender`

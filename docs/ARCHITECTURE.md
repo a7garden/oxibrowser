@@ -2,9 +2,8 @@
 
 ## Overview
 
-OxiBrowser is a headless browser engine built in pure Rust. It follows the
-[Lightpanda](https://github.com/lightpanda-io/browser) architecture pattern
-(Browser → Session → Page → Frame) but is fully Rust-native with no C/C++
+OxiBrowser is a headless browser engine built in pure Rust. It follows a
+Browser → Session → Page → Frame hierarchy but is fully Rust-native with no C/C++
 dependencies.
 
 ## Core Hierarchy

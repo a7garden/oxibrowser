@@ -8,7 +8,7 @@ AI agents need a fast, lightweight, embeddable headless browser for web automati
 |----------|---------|
 | **Chromium (Puppeteer)** | Heavy: ~200MB binary, 100MB+ RAM per instance, slow startup |
 | **Firefox (Playwright)** | Similar resource footprint |
-| **Lightpanda (Zig)** | Promising but Zig ecosystem is young; no Rust integration |
+| **Other Rust browsers** | Wraps Chromium; same overhead |
 | **headless-chrome (Rust)** | Just wraps Chromium; same overhead |
 | **fantoccini (Rust)** | WebDriver client; needs a browser binary |
 
@@ -113,48 +113,9 @@ This lets html5ever parse any HTML and build our `Document` type directly, with 
 
 ---
 
-## Comparison with Lightpanda
+## Related Projects
 
-OxiBrowser's architecture is directly inspired by [Lightpanda](https://github.com/lightpanda-io/browser), a headless browser built in Zig. Here's what we ported, what we changed, and why.
-
-### What We Ported (Architecture)
-
-| Lightpanda Concept | OxiBrowser Equivalent | Notes |
-|-------------------|----------------------|-------|
-| `Browser.zig` | `browser.rs` | Owns sessions, HTTP client, cookie jar |
-| `Session.zig` | `session.rs` | Browsing context with history, storage |
-| `Page.zig` | `page.rs` | Loaded document with resources |
-| `Frame.zig` | `frame.rs` | Parsed DOM with child frames |
-| `src/cdp/` | `oxibrowser-cdp` | CDP protocol, domain dispatch |
-| `src/cdp/domains/` | `domains/` | Per-domain handler modules |
-| `src/dom/` | `oxibrowser-webapi` | DOM types and parsing |
-
-### What We Changed
-
-| Aspect | Lightpanda | OxiBrowser | Why |
-|--------|-----------|------------|-----|
-| Language | Zig | Rust | Rust ecosystem for web (Servo, reqwest, tokio), memory safety guarantees, better async |
-| JS Engine | V8 (libv8 C bindings) | Stub → Servo (SpiderMonkey) | Avoids C FFI complexity; Servo's JS is Rust-accessible |
-| HTML Parser | Custom + html5ever C bindings | html5ever (pure Rust) | Native Rust, no FFI, Servo ecosystem |
-| HTTP Client | Custom | reqwest | Mature, well-tested, connection pooling, TLS |
-| WebSocket | Custom | tokio-tungstenite | tokio integration, well-maintained |
-| ID Generation | Sequential | AtomicU64/AtomicU32 | Thread-safe without locks |
-| Cookie Jar | Per-session | Shared by default, Arc<RwLock<CookieJar>> | Cross-session cookie sharing for automation |
-| Error Handling | Error unions | thiserror enum | Ergonomic, typed, convertible |
-| Serialization | Custom JSON | serde_json | Standard, derive macros, zero-cost |
-| Locking | Various | parking_lot + tokio::sync | parking_lot for sync, tokio for async |
-| Rendering | No visual render | Servo offscreen (planned) | Future screenshot/PDF support |
-| License | AGPL-3.0 | MIT | Permissive, broader adoption |
-
-### What We Kept The Same
-
-1. **CDP compatibility** — same protocol, same domains, same wire format
-2. **Browser → Session → Page → Frame hierarchy** — proven, clean separation of concerns
-3. **Domain dispatch pattern** — `Domain.method` routing to handler functions
-4. **Stub-first approach** — get the architecture right, fill in implementations later
-5. **Headless-first design** — no GUI, no display server dependency
-
----
+For a detailed architecture comparison with other headless browsers, see [docs/COMPARISON_REPORT.md](docs/COMPARISON_REPORT.md).
 
 ## JS Runtime Abstraction Strategy
 

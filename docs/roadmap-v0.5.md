@@ -329,9 +329,7 @@ OxiBrowser aims to be the **smallest, fastest, embeddable headless browser** for
 ## Open Questions
 
 ### Q1: Multi-process or single-process?
-Current design is single-process with async sessions. Lightpanda uses a separate render process. Do we need multi-process for isolation, or is single-process sufficient for AI agent use cases?
-
-**Decision**: Single-process for v0.5. Multi-process adds complexity (IPC, crash isolation). AI agents typically run one browser per task anyway.
+Current design is single-process with async sessions. Multi-process adds complexity (IPC, crash isolation). AI agents typically run one browser per task anyway.
 
 ### Q2: Rendering — do we need it?
 For AI agent use cases, rendering (visual layout) is rarely needed. What matters is DOM access, JS execution, and network interception. Should we invest in Servo rendering at all?
@@ -405,4 +403,4 @@ Month 3 (P2 + P3):
 - Puppeteer API: https://pptr.dev/api/puppeteer
 - Playwright API: https://playwright.dev/docs/api/class-page
 - boa_engine docs: https://docs.rs/boa_engine/latest/boa_engine/
-- Lightpanda (reference): https://github.com/lightpanda-io/browser
+- boa_engine docs: https://docs.rs/boa_engine/latest/boa_engine/

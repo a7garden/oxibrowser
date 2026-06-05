@@ -1,6 +1,6 @@
 //! Puppeteer/Playwright smoke test — verifies CDP compatibility with external clients.
 //!
-//! This test mirrors what a Puppeteer (or Playwright) script would do:
+
 //! 1. Launch the CDP server (spawn OxiBrowser binary as child process)
 //! 2. Connect via WebSocket
 //! 3. Enable Page + Runtime domains

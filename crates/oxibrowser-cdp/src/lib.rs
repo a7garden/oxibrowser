@@ -3,7 +3,7 @@
 //! Implements the CDP WebSocket protocol so that tools like Puppeteer and
 //! Playwright can connect to OxiBrowser, just like they connect to Chrome.
 //!
-//! Mirrors Lightpanda's `src/cdp/` module structure.
+
 
 pub mod event;
 pub mod protocol;
