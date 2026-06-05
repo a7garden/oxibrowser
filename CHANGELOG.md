@@ -5,18 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.1] - 2026-06-04
+## [0.13.0] - 2026-06-04
+
+### ⚠️ BREAKING CHANGES
+
+- **`BrowserEvent` variants now require a `tab_id: Uuid` field.** Every event is from a tab; the field is required at the Rust level. External `match` arms on the variants need to add a binding for `tab_id` (use `tab_id, ..` if you don't care about the value). The wire format is a non-breaking addition — `#[serde(default = "Uuid::nil")]` makes the field optional on deserialize, so older JSON payloads still parse.
 
 ### Added
 
-- **`tab_id: Uuid` on every `BrowserEvent` variant** — `NavigationStarted`, `WaitingForSelector`, `DocumentReady`, and `ScreenshotCaptured` now carry the id of the `Tab` that emitted them. Required at the Rust level (no `Option`); serde defaults to `Uuid::nil()` so JSON consumers that don't yet know about it can still parse older payloads.
-- **`tab_id: Uuid` on `Tab`** — stable for the lifetime of the tab and shared across `Tab::clone`. Exposed via `Tab::tab_id()`. `Browser::new_tab()` generates a fresh `Uuid::new_v4()` per tab and wires it into the `Tab` it returns.
-- **Per-tab event routing** — this is the foundation for `oxi-agent`'s `OxiBrowserEngine` to route events to the right callback when multiple tabs are open in a single browser. The oxi-agent update follows in a coordinated PR.
-- **2 new unit tests**: `event_tab_id_preserved_in_serde` (event.rs) and `test_tab_id_is_stable_across_clones` (tab.rs).
+- **`tab_id: Uuid` on every `BrowserEvent` variant** — `NavigationStarted`, `WaitingForSelector`, `DocumentReady`, and `ScreenshotCaptured` now carry the id of the `Tab` that emitted them. Stable for the lifetime of the tab and shared across `Tab::clone`. Exposed via `Tab::tab_id()`. `Browser::new_tab()` generates a fresh `Uuid::new_v4()` per tab.
+- **Per-tab event routing** — the foundation for `oxi-agent`'s `OxiBrowserEngine` to route events to the right callback when multiple tabs are open in a single browser. The oxi-agent update follows in a coordinated PR (see `docs/designs/2026-06-04-oxibrowser-observability-followup.md`).
+- **2 new unit tests**: `event_tab_id_preserved_in_serde` and `test_tab_id_is_stable_across_clones`.
 
 ### Changed
 
-- `oxibrowser-core` bumped to `0.12.1`. Construction of `BrowserEvent` variants now requires a `tab_id`; the wire format is a non-breaking addition (serde default makes the field optional on deserialize).
+- **Workspace version bumped to `0.13.0`** (all four crates: `oxibrowser`, `oxibrowser-core`, `oxibrowser-cdp`, `oxibrowser-webapi`). The major bump signals the breaking `tab_id` requirement for downstream consumers.
+- **Doc comment corrections on `DocumentReady`**:
+  - `total_bytes` is the size of the **post-parse, re-serialized HTML body** (`result.html.len() as u64`), **not** the wire-level `Content-Length`. The doc comment previously claimed the latter.
+  - `js_script_count` is the count of `<script>` **references** in the DOM's resource list, **not** the count of scripts the JS runtime actually executed. The doc comment now spells out the caveat.
 - Workspace `uuid` dependency now enables the `serde` feature so `Uuid` can be a field on `Serialize`/`Deserialize` types.
 
 ## [0.12.0] - 2026-06-04

@@ -62,9 +62,19 @@ pub enum BrowserEvent {
         title: String,
         /// HTTP status code of the main response.
         status: u16,
-        /// Total bytes received for the main document.
+        /// Size of the post-parse, re-serialized HTML body in bytes
+        /// (`result.html.len() as u64`). **This is NOT the wire-level
+        /// `Content-Length`** — the browser parses the body, walks the DOM,
+        /// then re-serializes, and the resulting string can differ from the
+        /// raw bytes received (whitespace normalization, attribute reordering,
+        /// omitted closing tags, etc.).
         total_bytes: u64,
-        /// Number of `<script>` blocks the page references.
+        /// Number of `<script>` blocks the page **references** in its DOM
+        /// resource list. **This is NOT the count of scripts the JS runtime
+        /// actually executed** — it includes `<script>` elements whose `src`
+        /// 404'd, deferred modules that haven't fired yet, and so on. Use
+        /// it for "how script-heavy is this page" hints, not for execution
+        /// accounting.
         js_script_count: usize,
         /// Wall-clock duration of the whole `goto` call.
         total_duration: Duration,
