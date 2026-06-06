@@ -56,13 +56,7 @@ async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> Dom
         .and_then(|v| v.as_f64())
         .unwrap_or_else(current_timestamp_ms);
 
-    tracing::debug!(
-        event_type,
-        key,
-        code,
-        modifiers,
-        "Input.dispatchKeyEvent"
-    );
+    tracing::debug!(event_type, key, code, modifiers, "Input.dispatchKeyEvent");
 
     // Generate JS to dispatch the keyboard event
     let js = js_dispatch_key_event(key, code, event_type, modifiers, timestamp);
@@ -195,12 +189,7 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
     let x = p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    tracing::debug!(
-        event_type,
-        x,
-        y,
-        "Input.dispatchDragEvent"
-    );
+    tracing::debug!(event_type, x, y, "Input.dispatchDragEvent");
 
     Ok(Some(json!({})))
 }

@@ -207,13 +207,12 @@ impl LayoutEngine {
         let t = tag.to_uppercase();
         match t.as_str() {
             // Hidden elements
-            "HEAD" | "STYLE" | "SCRIPT" | "META" | "LINK" | "NOSCRIPT" | "BASE"
-            | "TITLE" => {
+            "HEAD" | "STYLE" | "SCRIPT" | "META" | "LINK" | "NOSCRIPT" | "BASE" | "TITLE" => {
                 s.display = "none".into();
             }
             // Block elements
-            "DIV" | "SECTION" | "ARTICLE" | "MAIN" | "HEADER" | "FOOTER" | "NAV"
-            | "ASIDE" | "ADDRESS" | "FIGURE" | "FIGCAPTION" | "FIELDSET" => {
+            "DIV" | "SECTION" | "ARTICLE" | "MAIN" | "HEADER" | "FOOTER" | "NAV" | "ASIDE"
+            | "ADDRESS" | "FIGURE" | "FIGCAPTION" | "FIELDSET" => {
                 s.display = "block".into();
             }
             "P" => {
@@ -289,8 +288,8 @@ impl LayoutEngine {
                 s.display = "list-item".into();
             }
             // Inline elements
-            "SPAN" | "A" | "STRONG" | "B" | "EM" | "I" | "U" | "SMALL" | "CODE"
-            | "ABBR" | "CITE" | "MARK" | "SUB" | "SUP" | "TIME" => {
+            "SPAN" | "A" | "STRONG" | "B" | "EM" | "I" | "U" | "SMALL" | "CODE" | "ABBR"
+            | "CITE" | "MARK" | "SUB" | "SUP" | "TIME" => {
                 s.display = "inline".into();
             }
             "BR" => {
@@ -477,8 +476,7 @@ impl LayoutEngine {
             None => return 0.0,
         };
 
-        Self::estimate_y_recursive(snapshot, body_id, target_id, 0.0)
-            .unwrap_or(0.0)
+        Self::estimate_y_recursive(snapshot, body_id, target_id, 0.0).unwrap_or(0.0)
     }
 
     /// Recursively search for `target_id` under `parent_id`, accumulating Y
@@ -499,9 +497,7 @@ impl LayoutEngine {
             }
 
             // Check if target is a descendant of this child
-            if let Some(found_y) =
-                Self::estimate_y_recursive(snapshot, child_id, target_id, y)
-            {
+            if let Some(found_y) = Self::estimate_y_recursive(snapshot, child_id, target_id, y) {
                 return Some(found_y);
             }
 
@@ -530,11 +526,19 @@ impl LayoutEngine {
         let text_h = node
             .map(|n| {
                 let len = n.text_content.trim().len() as f64;
-                if len == 0.0 { 0.0 } else { ((len / 80.0).ceil().max(1.0)) * style.font_size * 1.2 }
+                if len == 0.0 {
+                    0.0
+                } else {
+                    ((len / 80.0).ceil().max(1.0)) * style.font_size * 1.2
+                }
             })
             .unwrap_or(0.0);
         let child_count = node.map(|n| n.children.len()).unwrap_or(0) as f64;
-        let default_h = if child_count > 0.0 { child_count * 20.0 } else { style.font_size * 1.2 };
+        let default_h = if child_count > 0.0 {
+            child_count * 20.0
+        } else {
+            style.font_size * 1.2
+        };
         text_h.max(default_h) + style.padding_top + style.padding_bottom
     }
 
@@ -590,10 +594,7 @@ fn collect_ancestors(snapshot: &DomSnapshot, node_id: u32) -> Vec<u32> {
     let mut ancestors = Vec::new();
     let mut current = node_id;
     loop {
-        let parent_id = snapshot
-            .nodes
-            .get(&current)
-            .and_then(|n| n.parent);
+        let parent_id = snapshot.nodes.get(&current).and_then(|n| n.parent);
         match parent_id {
             Some(pid) => {
                 ancestors.push(pid);
@@ -777,10 +778,7 @@ fn normalize_font_weight(val: &str) -> String {
 
 /// Parse CSS box shorthand: `"10px"` → [10, 10, 10, 10], `"10px 20px"` → [10, 20, 10, 20], etc.
 fn parse_box_shorthand(val: &str) -> [f64; 4] {
-    let parts: Vec<f64> = val
-        .split_whitespace()
-        .filter_map(parse_length)
-        .collect();
+    let parts: Vec<f64> = val.split_whitespace().filter_map(parse_length).collect();
 
     match parts.len() {
         1 => [parts[0]; 4],
@@ -843,19 +841,34 @@ mod tests {
         let mut pos = 0;
         let b = html_body.as_bytes();
         while pos < b.len() {
-            if b[pos] != b'<' { pos += 1; continue; }
-            if pos + 1 < b.len() && b[pos + 1] == b'/' { pos += 1; continue; }
+            if b[pos] != b'<' {
+                pos += 1;
+                continue;
+            }
+            if pos + 1 < b.len() && b[pos + 1] == b'/' {
+                pos += 1;
+                continue;
+            }
             let tag_start = pos + 1;
-            let Some(rel_gt) = b[pos..].iter().position(|&c| c == b'>') else { break; };
+            let Some(rel_gt) = b[pos..].iter().position(|&c| c == b'>') else {
+                break;
+            };
             let gt_pos = pos + rel_gt;
             let tag_inner = &html_body[tag_start..gt_pos];
             pos = gt_pos + 1;
             let (tag, attr_str) = tag_inner
                 .find(|c: char| c.is_whitespace())
-                .map_or((tag_inner, ""), |i| (&tag_inner[..i], tag_inner[i..].trim()));
-            if tag.is_empty() { continue; }
+                .map_or((tag_inner, ""), |i| {
+                    (&tag_inner[..i], tag_inner[i..].trim())
+                });
+            if tag.is_empty() {
+                continue;
+            }
             let close = format!("</{}>", tag);
-            let text_end = html_body[pos..].find(&close).map(|i| pos + i).unwrap_or(html_body.len());
+            let text_end = html_body[pos..]
+                .find(&close)
+                .map(|i| pos + i)
+                .unwrap_or(html_body.len());
             let text = html_body[pos..text_end].trim().to_string();
             pos = std::cmp::min(text_end + close.len(), html_body.len());
             let nid = id_counter;
@@ -863,22 +876,35 @@ mod tests {
             let mut attrs = std::collections::HashMap::new();
             let mut ac = attr_str.chars().peekable();
             while let Some(&ch) = ac.peek() {
-                if ch.is_whitespace() { ac.next(); continue; }
+                if ch.is_whitespace() {
+                    ac.next();
+                    continue;
+                }
                 // Read key manually (don't consume delimiter)
                 let mut key = String::new();
                 while let Some(&c) = ac.peek() {
-                    if c == '=' || c.is_whitespace() { break; }
+                    if c == '=' || c.is_whitespace() {
+                        break;
+                    }
                     key.push(c);
                     ac.next();
                 }
-                if key.is_empty() { ac.next(); continue; }
+                if key.is_empty() {
+                    ac.next();
+                    continue;
+                }
                 // Check for =
                 if ac.peek() == Some(&'=') {
                     ac.next(); // consume =
-                    if ac.peek() == Some(&'"') { ac.next(); } // consume opening "
+                    if ac.peek() == Some(&'"') {
+                        ac.next();
+                    } // consume opening "
                     let mut val = String::new();
                     while let Some(&c) = ac.peek() {
-                        if c == '"' { ac.next(); break; } // consume closing "
+                        if c == '"' {
+                            ac.next();
+                            break;
+                        } // consume closing "
                         val.push(c);
                         ac.next();
                     }
@@ -1002,7 +1028,8 @@ mod tests {
 
     #[test]
     fn test_explicit_width_and_height() {
-        let (snap, tags) = make_simple_snapshot(r#"<div style="width:200px;height:100px">Box</div>"#);
+        let (snap, tags) =
+            make_simple_snapshot(r#"<div style="width:200px;height:100px">Box</div>"#);
         let (_, id) = &tags[0];
         let style = LayoutEngine::compute_style(&snap, *id).unwrap();
         assert_eq!(style.width, Some(200.0));
@@ -1011,7 +1038,8 @@ mod tests {
 
     #[test]
     fn test_position_absolute() {
-        let (snap, tags) = make_simple_snapshot(r#"<div style="position:absolute;top:50px;left:100px">Abs</div>"#);
+        let (snap, tags) =
+            make_simple_snapshot(r#"<div style="position:absolute;top:50px;left:100px">Abs</div>"#);
         let (_, id) = &tags[0];
         let style = LayoutEngine::compute_style(&snap, *id).unwrap();
         assert_eq!(style.position, "absolute");
@@ -1039,7 +1067,8 @@ mod tests {
 
     #[test]
     fn test_explicit_size_rect() {
-        let (snap, tags) = make_simple_snapshot(r#"<div style="width:200px;height:100px">Box</div>"#);
+        let (snap, tags) =
+            make_simple_snapshot(r#"<div style="width:200px;height:100px">Box</div>"#);
         let (_, id) = &tags[0];
         let rect = LayoutEngine::compute_rect(&snap, *id);
         assert_eq!(rect.width, 200.0);
@@ -1055,7 +1084,12 @@ mod tests {
         let (_, id_b) = &tags[1];
         let rect_a = LayoutEngine::compute_rect(&snap, *id_a);
         let rect_b = LayoutEngine::compute_rect(&snap, *id_b);
-        assert!(rect_b.top >= rect_a.top, "B ({}) should be below A ({})", rect_b.top, rect_a.top);
+        assert!(
+            rect_b.top >= rect_a.top,
+            "B ({}) should be below A ({})",
+            rect_b.top,
+            rect_a.top
+        );
         assert!(rect_b.top > 0.0);
     }
 

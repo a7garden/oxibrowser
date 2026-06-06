@@ -19,11 +19,16 @@ impl DuckDuckGoEngine {
     }
 
     /// Search via the lite HTML endpoint.
-    async fn search_lite(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_lite(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let url = format!("https://lite.duckduckgo.com/lite/?q={encoded}&kl=us-en");
 
-        let body = self.client
+        let body = self
+            .client
             .get(&url)
             .send()
             .await
@@ -31,7 +36,9 @@ impl DuckDuckGoEngine {
 
         let status = body.status();
         if !status.is_success() {
-            return Err(SearchError::Network(format!("DDG lite returned HTTP {status}")));
+            return Err(SearchError::Network(format!(
+                "DDG lite returned HTTP {status}"
+            )));
         }
 
         let html = body
@@ -52,11 +59,16 @@ impl DuckDuckGoEngine {
     }
 
     /// Fallback: Instant Answer JSON API.
-    async fn search_instant_answer(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_instant_answer(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let url = format!("https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1");
 
-        let body = self.client
+        let body = self
+            .client
             .get(&url)
             .send()
             .await
@@ -64,7 +76,9 @@ impl DuckDuckGoEngine {
 
         let status = body.status();
         if !status.is_success() {
-            return Err(SearchError::Network(format!("DDG API returned HTTP {status}")));
+            return Err(SearchError::Network(format!(
+                "DDG API returned HTTP {status}"
+            )));
         }
 
         let bytes = body
@@ -82,7 +96,11 @@ impl SearchEngine for DuckDuckGoEngine {
         "DuckDuckGo"
     }
 
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         // Try lite HTML first
         let results = self.search_lite(query, max_results).await?;
         if !results.is_empty() {
@@ -122,7 +140,7 @@ fn parse_ddg_lite_html(html: &str, max_results: usize) -> Vec<SearchResult> {
 
         // Extract snippet: find <td class="result-snippet"> ... </td>
         let snippet = extract_between(block, r#"<td class="result-snippet">"#, "</td>")
-            .map(|s| strip_html_tags(&s))
+            .map(strip_html_tags)
             .map(|s| decode_html_entities(&s))
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
@@ -181,11 +199,7 @@ fn extract_link_info(block: &str) -> (String, String) {
 /// Returns index of the start of the value (after the opening quote) if found.
 fn find_attr_start(s: &str, attr: &str) -> Option<usize> {
     let pattern = format!(r#"{attr}="#);
-    if let Some(pos) = s.find(&pattern) {
-        Some(pos + pattern.len())
-    } else {
-        None
-    }
+    s.find(&pattern).map(|pos| pos + pattern.len())
 }
 
 /// Extract text between two markers in a string.
@@ -229,11 +243,16 @@ fn strip_html_tags(s: &str) -> String {
 ///   ]
 /// }
 /// ```
-fn parse_ddg_instant_answer(data: &[u8], max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+fn parse_ddg_instant_answer(
+    data: &[u8],
+    max_results: usize,
+) -> Result<Vec<SearchResult>, SearchError> {
     let parsed: serde_json::Value = serde_json::from_slice(data)
         .map_err(|e| SearchError::Parse(format!("DDG instant answer: {e}")))?;
 
-    let obj = parsed.as_object().ok_or_else(|| SearchError::Parse("expected object".into()))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| SearchError::Parse("expected object".into()))?;
     let mut results = Vec::new();
 
     // Abstract result (if present)
@@ -242,7 +261,8 @@ fn parse_ddg_instant_answer(data: &[u8], max_results: usize) -> Result<Vec<Searc
             if let Some(abstract_url) = obj.get("AbstractURL").and_then(|v| v.as_str()) {
                 if !abstract_url.is_empty() {
                     results.push(SearchResult {
-                        title: obj.get("Heading")
+                        title: obj
+                            .get("Heading")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
@@ -268,7 +288,8 @@ fn parse_ddg_instant_answer(data: &[u8], max_results: usize) -> Result<Vec<Searc
             }
             if let Some(text) = topic.get("Text").and_then(|v| v.as_str()) {
                 // Text format: "Title - snippet" or just "Title"
-                let url = topic.get("FirstURL")
+                let url = topic
+                    .get("FirstURL")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -296,7 +317,8 @@ fn parse_ddg_instant_answer(data: &[u8], max_results: usize) -> Result<Vec<Searc
                         break;
                     }
                     if let Some(text) = sub.get("Text").and_then(|v| v.as_str()) {
-                        let url = sub.get("FirstURL")
+                        let url = sub
+                            .get("FirstURL")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
@@ -337,7 +359,10 @@ mod tests {
 
     #[test]
     fn test_strip_html_tags_mixed() {
-        assert_eq!(strip_html_tags("hello <a href='x'>world</a>!"), "hello world!");
+        assert_eq!(
+            strip_html_tags("hello <a href='x'>world</a>!"),
+            "hello world!"
+        );
     }
 
     #[test]

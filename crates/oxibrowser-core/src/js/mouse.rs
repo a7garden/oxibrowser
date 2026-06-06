@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_sets_scrollTop() {
+    fn test_scroll_sets_scroll_top() {
         let js = js_scroll(0.0, -300.0);
         assert!(js.contains("scrollTop"));
         assert!(js.contains("-300"));

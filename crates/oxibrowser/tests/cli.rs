@@ -27,7 +27,10 @@ fn test_fetch_markdown() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let resp: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(resp["ok"], true);
-    assert!(resp["data"]["markdown"].as_str().unwrap().contains("Example Domain"));
+    assert!(resp["data"]["markdown"]
+        .as_str()
+        .unwrap()
+        .contains("Example Domain"));
     assert_eq!(resp["data"]["status"], 200);
     assert!(resp["meta"]["elapsed_ms"].as_u64().unwrap() > 0);
 }
@@ -49,7 +52,13 @@ fn test_fetch_text() {
 #[ignore]
 fn test_fetch_fields() {
     let output = Command::new(oxibrowser())
-        .args(["fetch", "https://example.com", "--fields", "url,title,status", "--json"])
+        .args([
+            "fetch",
+            "https://example.com",
+            "--fields",
+            "url,title,status",
+            "--json",
+        ])
         .output()
         .expect("failed to run oxibrowser");
 
@@ -67,7 +76,13 @@ fn test_fetch_fields() {
 #[ignore]
 fn test_fetch_max_bytes() {
     let output = Command::new(oxibrowser())
-        .args(["fetch", "https://example.com", "--max-bytes", "50", "--json"])
+        .args([
+            "fetch",
+            "https://example.com",
+            "--max-bytes",
+            "50",
+            "--json",
+        ])
         .output()
         .expect("failed to run oxibrowser");
 
@@ -98,7 +113,13 @@ fn test_fetch_summary() {
 #[ignore]
 fn test_fetch_eval() {
     let output = Command::new(oxibrowser())
-        .args(["fetch", "https://example.com", "--eval", "document.title", "--json"])
+        .args([
+            "fetch",
+            "https://example.com",
+            "--eval",
+            "document.title",
+            "--json",
+        ])
         .output()
         .expect("failed to run oxibrowser");
 
@@ -131,7 +152,15 @@ fn test_extract_links() {
 #[ignore]
 fn test_extract_selector() {
     let output = Command::new(oxibrowser())
-        .args(["extract", "https://example.com", "--selector", "a", "--attrs", "text,href", "--json"])
+        .args([
+            "extract",
+            "https://example.com",
+            "--selector",
+            "a",
+            "--attrs",
+            "text,href",
+            "--json",
+        ])
         .output()
         .expect("failed to run oxibrowser");
 
@@ -165,7 +194,13 @@ fn test_error_invalid_url() {
 #[test]
 fn test_error_bad_selector() {
     let output = Command::new(oxibrowser())
-        .args(["fetch", "https://example.com", "--click", "div\x01", "--json"])
+        .args([
+            "fetch",
+            "https://example.com",
+            "--click",
+            "div\x01",
+            "--json",
+        ])
         .output()
         .expect("failed to run oxibrowser");
 
@@ -217,7 +252,11 @@ fn test_session_basic() {
 
     // Parse each line as JSON
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert!(lines.len() >= 5, "expected at least 5 output lines, got {}", lines.len());
+    assert!(
+        lines.len() >= 5,
+        "expected at least 5 output lines, got {}",
+        lines.len()
+    );
 
     // new response
     let resp: serde_json::Value = serde_json::from_str(lines[0]).expect("new JSON");
@@ -232,7 +271,10 @@ fn test_session_basic() {
     // content response
     let resp: serde_json::Value = serde_json::from_str(lines[2]).expect("content JSON");
     assert_eq!(resp["ok"], true);
-    assert!(resp["data"]["markdown"].as_str().unwrap_or("").contains("Example Domain"));
+    assert!(resp["data"]["markdown"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Example Domain"));
 
     // list response
     let resp: serde_json::Value = serde_json::from_str(lines[3]).expect("list JSON");

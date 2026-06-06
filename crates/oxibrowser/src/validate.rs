@@ -198,7 +198,9 @@ mod tests {
     #[test]
     fn test_safe_output_path_ok() {
         assert!(safe_output_path("output.png").is_ok());
-        assert!(safe_output_path("output.png").unwrap().ends_with("output.png"));
+        assert!(safe_output_path("output.png")
+            .unwrap()
+            .ends_with("output.png"));
     }
 
     #[test]

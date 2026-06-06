@@ -52,9 +52,7 @@ impl GitHubEngine {
         );
         headers.insert(
             reqwest::header::ACCEPT,
-            "application/vnd.github.v3+json"
-                .parse()
-                .unwrap(),
+            "application/vnd.github.v3+json".parse().unwrap(),
         );
         if let Some(token) = &self.token {
             let auth = format!("Bearer {token}");
@@ -73,7 +71,11 @@ impl SearchEngine for GitHubEngine {
         }
     }
 
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         match &self.mode {
             GitHubMode::Repos => self.search_repos(query, max_results).await,
             GitHubMode::Issues { repo } => self.search_issues(query, repo, max_results).await,
@@ -83,14 +85,19 @@ impl SearchEngine for GitHubEngine {
 
 impl GitHubEngine {
     /// Search GitHub repositories.
-    async fn search_repos(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_repos(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let per_page = max_results.min(30);
         let url = format!(
             "https://api.github.com/search/repositories?q={encoded}&sort=stars&per_page={per_page}"
         );
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .headers(self.headers())
             .send()
@@ -102,7 +109,9 @@ impl GitHubEngine {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(SearchError::Network(format!("GitHub API returned HTTP {status}: {body}")));
+            return Err(SearchError::Network(format!(
+                "GitHub API returned HTTP {status}: {body}"
+            )));
         }
 
         let bytes = response
@@ -114,14 +123,20 @@ impl GitHubEngine {
     }
 
     /// Search GitHub issues within a repository.
-    async fn search_issues(&self, query: &str, repo: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_issues(
+        &self,
+        query: &str,
+        repo: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let per_page = max_results.min(30);
         let url = format!(
             "https://api.github.com/search/issues?q={encoded}+repo:{repo}&sort=updated&per_page={per_page}"
         );
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .headers(self.headers())
             .send()
@@ -133,7 +148,9 @@ impl GitHubEngine {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(SearchError::Network(format!("GitHub API returned HTTP {status}: {body}")));
+            return Err(SearchError::Network(format!(
+                "GitHub API returned HTTP {status}: {body}"
+            )));
         }
 
         let bytes = response
@@ -203,12 +220,30 @@ fn parse_github_repos(data: &[u8]) -> Result<Vec<SearchResult>, SearchError> {
             None => continue,
         };
 
-        let full_name = obj.get("full_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let html_url = obj.get("html_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let description = obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let stars = obj.get("stargazers_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let full_name = obj
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let html_url = obj
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let description = obj
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stars = obj
+            .get("stargazers_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let forks = obj.get("forks_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let language = obj.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let language = obj
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let topics = obj
             .get("topics")
             .and_then(|v| v.as_array())
@@ -218,7 +253,11 @@ fn parse_github_repos(data: &[u8]) -> Result<Vec<SearchResult>, SearchError> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let updated_at = obj.get("updated_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let updated_at = obj
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         if full_name.is_empty() {
             continue;
@@ -277,13 +316,22 @@ fn parse_github_issues(data: &[u8]) -> Result<Vec<SearchResult>, SearchError> {
             None => continue,
         };
 
-        let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let url = obj.get("html_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = obj
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let state = obj.get("state").and_then(|v| v.as_str()).unwrap_or("");
 
         // Build snippet: "[#123] state: title"
         let number = obj.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-        let user = obj.get("user")
+        let user = obj
+            .get("user")
             .and_then(|v| v.as_object())
             .and_then(|u| u.get("login"))
             .and_then(|v| v.as_str())
@@ -306,9 +354,7 @@ fn parse_github_issues(data: &[u8]) -> Result<Vec<SearchResult>, SearchError> {
         };
 
         let comments = obj.get("comments").and_then(|v| v.as_u64()).unwrap_or(0);
-        let snippet = format!(
-            "#{number} by {user} · {state}{label_str} · {comments} comments"
-        );
+        let snippet = format!("#{number} by {user} · {state}{label_str} · {comments} comments");
 
         if title.is_empty() {
             continue;

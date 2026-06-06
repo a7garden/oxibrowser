@@ -266,12 +266,17 @@ impl Document {
 
     /// Recursively collect all text, skipping invisible elements.
     fn collect_all_text(&self, node_id: NodeId, text: &mut String) {
-        let Some(node) = self.nodes.get(&node_id) else { return };
+        let Some(node) = self.nodes.get(&node_id) else {
+            return;
+        };
         match &node.node_type {
             NodeType::Text(t) => text.push_str(t),
             NodeType::Element { tag, .. } => {
                 let t = tag.to_lowercase();
-                if matches!(t.as_str(), "script" | "style" | "link" | "meta" | "noscript") {
+                if matches!(
+                    t.as_str(),
+                    "script" | "style" | "link" | "meta" | "noscript"
+                ) {
                     return;
                 }
                 for &child in self.tree.children(node_id) {
@@ -286,13 +291,41 @@ impl Document {
     /// between block-level siblings (for human-readable body text output).
     fn collect_text_with_separators(&self, node_id: NodeId, text: &mut String) {
         let block_tags = [
-            "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
-            "li", "td", "th", "tr", "blockquote", "pre", "hr",
-            "section", "article", "header", "footer", "main", "nav",
-            "ul", "ol", "form", "table", "thead", "tbody", "tfoot",
-            "center", "figure", "figcaption", "details", "summary",
+            "p",
+            "div",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "li",
+            "td",
+            "th",
+            "tr",
+            "blockquote",
+            "pre",
+            "hr",
+            "section",
+            "article",
+            "header",
+            "footer",
+            "main",
+            "nav",
+            "ul",
+            "ol",
+            "form",
+            "table",
+            "thead",
+            "tbody",
+            "tfoot",
+            "center",
+            "figure",
+            "figcaption",
+            "details",
+            "summary",
         ];
-        let children: Vec<_> = self.tree.children(node_id).iter().copied().collect();
+        let children: Vec<_> = self.tree.children(node_id).to_vec();
         for (i, &child) in children.iter().enumerate() {
             // Recurse: block elements preserve internal structure;
             // non-block elements are flattened into surrounding text
@@ -315,7 +348,11 @@ impl Document {
     pub fn text_content(&self, node_id: NodeId) -> Option<String> {
         let mut text = String::new();
         self.collect_all_text(node_id, &mut text);
-        if text.is_empty() { None } else { Some(text) }
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     /// Extract all sub-resource URLs from the document.

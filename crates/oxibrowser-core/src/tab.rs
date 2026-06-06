@@ -108,12 +108,7 @@ impl Tab {
                 .root_frame()
                 .extract_resource_urls()
                 .into_iter()
-                .filter(|r| {
-                    matches!(
-                        r.kind,
-                        oxibrowser_webapi::dom::ResourceKind::Script
-                    )
-                })
+                .filter(|r| matches!(r.kind, oxibrowser_webapi::dom::ResourceKind::Script))
                 .count(),
             None => 0,
         }

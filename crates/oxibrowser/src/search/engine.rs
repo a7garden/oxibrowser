@@ -78,7 +78,11 @@ pub trait SearchEngine: Send + Sync {
     /// Human-readable engine name (e.g. "DuckDuckGo", "Wikipedia", "Bing").
     fn name(&self) -> &'static str;
     /// Execute a search query and return up to max_results results.
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError>;
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +93,7 @@ pub trait SearchEngine: Send + Sync {
 pub fn build_search_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent(&format!("oxibrowser/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("oxibrowser/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
         .build()
         .expect("reqwest::Client::builder() failed")

@@ -52,8 +52,7 @@ pub async fn run_session() -> i32 {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .unwrap_or_else(|_| {
             // SIGTERM not available (e.g. Windows) — create a dummy that never fires
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-                .unwrap()
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()).unwrap()
         });
 
     let exit_code = loop {

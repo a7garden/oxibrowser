@@ -25,13 +25,18 @@ impl SearchEngine for WikipediaEngine {
         "Wikipedia"
     }
 
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let url = format!(
             "https://en.wikipedia.org/w/api.php?action=opensearch&search={encoded}&limit={max_results}&format=json"
         );
 
-        let body = self.client
+        let body = self
+            .client
             .get(&url)
             .send()
             .await
@@ -39,7 +44,9 @@ impl SearchEngine for WikipediaEngine {
 
         let status = body.status();
         if !status.is_success() {
-            return Err(SearchError::Network(format!("Wikipedia API returned HTTP {status}")));
+            return Err(SearchError::Network(format!(
+                "Wikipedia API returned HTTP {status}"
+            )));
         }
 
         let bytes = body
@@ -56,17 +63,17 @@ impl SearchEngine for WikipediaEngine {
             return Err(SearchError::Parse("incomplete Wikipedia response".into()));
         }
 
-        let titles = parsed[1].as_array().ok_or_else(|| SearchError::Parse("expected titles array".into()))?;
+        let titles = parsed[1]
+            .as_array()
+            .ok_or_else(|| SearchError::Parse("expected titles array".into()))?;
         // OpenSearch returns URLs in index 2 (traditionally) or index 3 (actual).
         // Use whichever has actual content.
         let url_sources = parsed[2].as_array();
         let snippet_sources = parsed[3].as_array();
 
-        let count = titles.len();
-
-        let mut results = Vec::with_capacity(count);
-        for i in 0..count {
-            let title = titles[i].as_str().unwrap_or("").to_string();
+        let mut results = Vec::with_capacity(titles.len());
+        for (i, title_val) in titles.iter().enumerate() {
+            let title = title_val.as_str().unwrap_or("").to_string();
             // URL: prefer index 2 (canonical), fall back to index 3
             let url = url_sources
                 .and_then(|a| a.get(i))
@@ -85,7 +92,7 @@ impl SearchEngine for WikipediaEngine {
                 .and_then(|a| a.get(i))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.starts_with("http"))
-                .map(|s| decode_html_entities(s))
+                .map(decode_html_entities)
                 .unwrap_or_default();
 
             results.push(SearchResult {
@@ -109,7 +116,10 @@ mod tests {
         let json = serde_json::json!([
             "rust",
             ["Rust (programming language)", "Rust (band)"],
-            ["https://en.wikipedia.org/wiki/Rust_(programming_language)", "https://en.wikipedia.org/wiki/Rust_(band)"],
+            [
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://en.wikipedia.org/wiki/Rust_(band)"
+            ],
             ["A systems programming language", "A German rock band"]
         ]);
 

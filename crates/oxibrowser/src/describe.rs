@@ -224,9 +224,6 @@ pub fn describe_command(name: &str) -> CliResponse {
 
     match commands.and_then(|c| c.get(name)) {
         Some(cmd) => CliResponse::success(cmd.clone()),
-        None => CliResponse::error(
-            format!("unknown command: {name}"),
-            "INVALID_COMMAND",
-        ),
+        None => CliResponse::error(format!("unknown command: {name}"), "INVALID_COMMAND"),
     }
 }

@@ -69,7 +69,10 @@ fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     ctx.events.set_fetch_enabled(has_patterns);
     ctx.events.set_fetch_patterns(patterns.clone());
     if has_patterns {
-        tracing::info!(patterns = patterns.len(), "Fetch domain enabled with patterns");
+        tracing::info!(
+            patterns = patterns.len(),
+            "Fetch domain enabled with patterns"
+        );
     } else {
         tracing::info!("Fetch domain enabled (no patterns — interception disabled)");
     }
@@ -371,12 +374,7 @@ pub fn emit_request_paused(
         }),
     );
 
-    tracing::debug!(
-        request_id,
-        url,
-        method,
-        "Fetch.requestPaused"
-    );
+    tracing::debug!(request_id, url, method, "Fetch.requestPaused");
 
     rx
 }

@@ -6,12 +6,10 @@
 /// Strip leading/trailing matching quotes (single or double) from a string.
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
-    if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"')) ||
-           (s.starts_with('\'') && s.ends_with('\''))
-        {
-            return &s[1..s.len()-1];
-        }
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        return &s[1..s.len() - 1];
     }
     s
 }
@@ -37,13 +35,25 @@ pub enum SessionCommand {
     /// Click an element.
     Click { tab_id: String, selector: String },
     /// Fill an input with a value.
-    Fill { tab_id: String, selector: String, value: String },
+    Fill {
+        tab_id: String,
+        selector: String,
+        value: String,
+    },
     /// Press a key combo.
     Press { tab_id: String, key: String },
     /// Type text into an element.
-    Type { tab_id: String, selector: String, text: String },
+    Type {
+        tab_id: String,
+        selector: String,
+        text: String,
+    },
     /// Select an option by value.
-    Select { tab_id: String, selector: String, value: String },
+    Select {
+        tab_id: String,
+        selector: String,
+        value: String,
+    },
     /// Check a checkbox/radio.
     Check { tab_id: String, selector: String },
     /// Uncheck a checkbox/radio.
@@ -51,7 +61,11 @@ pub enum SessionCommand {
     /// Scroll by dx, dy pixels.
     Scroll { tab_id: String, dx: f64, dy: f64 },
     /// Evaluate JS expression.
-    Eval { tab_id: String, expression: String, await_promise: bool },
+    Eval {
+        tab_id: String,
+        expression: String,
+        await_promise: bool,
+    },
     /// Extract structured data from a tab.
     Extract {
         tab_id: String,
@@ -187,7 +201,10 @@ pub fn parse_session_command(line: &str) -> Result<SessionCommand, String> {
 
         "uncheck" => {
             let (pos, tab_id) = require_tab_id(args, "uncheck <tab_id> <selector>")?;
-            let selector = pos.first().ok_or("uncheck <tab_id> <selector>")?.to_string();
+            let selector = pos
+                .first()
+                .ok_or("uncheck <tab_id> <selector>")?
+                .to_string();
             Ok(SessionCommand::Uncheck { tab_id, selector })
         }
 
@@ -212,10 +229,13 @@ pub fn parse_session_command(line: &str) -> Result<SessionCommand, String> {
         "wait" => parse_wait(args),
 
         "close" => {
-            if args.first().map(|s| *s) == Some("--all") {
+            if args.first().copied() == Some("--all") {
                 Ok(SessionCommand::CloseAll)
             } else {
-                let tab_id = args.first().ok_or("close <tab_id> | close --all")?.to_string();
+                let tab_id = args
+                    .first()
+                    .ok_or("close <tab_id> | close --all")?
+                    .to_string();
                 Ok(SessionCommand::Close { tab_id })
             }
         }
@@ -246,19 +266,32 @@ fn parse_goto(args: &[&str]) -> Result<SessionCommand, String> {
         match pos[i] {
             "--wait" => {
                 i += 1;
-                wait_selector = Some(pos.get(i).ok_or("goto: --wait requires a selector")?.to_string());
+                wait_selector = Some(
+                    pos.get(i)
+                        .ok_or("goto: --wait requires a selector")?
+                        .to_string(),
+                );
             }
             "--timeout" => {
                 i += 1;
-                timeout_ms = Some(pos.get(i).ok_or("goto: --timeout requires a value")?
-                    .parse::<u64>().map_err(|_| "goto: --timeout must be a number")?);
+                timeout_ms = Some(
+                    pos.get(i)
+                        .ok_or("goto: --timeout requires a value")?
+                        .parse::<u64>()
+                        .map_err(|_| "goto: --timeout must be a number")?,
+                );
             }
             other => return Err(format!("goto: unexpected argument: {other}")),
         }
         i += 1;
     }
 
-    Ok(SessionCommand::Goto { tab_id, url, wait_selector, timeout_ms })
+    Ok(SessionCommand::Goto {
+        tab_id,
+        url,
+        wait_selector,
+        timeout_ms,
+    })
 }
 
 fn parse_eval(args: &[&str]) -> Result<SessionCommand, String> {
@@ -270,7 +303,9 @@ fn parse_eval(args: &[&str]) -> Result<SessionCommand, String> {
     let mut i = 0;
     while i < pos.len() {
         match pos[i] {
-            "--await" => { await_promise = true; }
+            "--await" => {
+                await_promise = true;
+            }
             other => expr_parts.push(other),
         }
         i += 1;
@@ -282,7 +317,11 @@ fn parse_eval(args: &[&str]) -> Result<SessionCommand, String> {
         strip_quotes(&expr_parts.join(" ")).to_string()
     };
 
-    Ok(SessionCommand::Eval { tab_id, expression, await_promise })
+    Ok(SessionCommand::Eval {
+        tab_id,
+        expression,
+        await_promise,
+    })
 }
 
 fn parse_extract(args: &[&str]) -> Result<SessionCommand, String> {
@@ -303,28 +342,60 @@ fn parse_extract(args: &[&str]) -> Result<SessionCommand, String> {
         match pos[i] {
             "--selector" => {
                 i += 1;
-                selector = Some(pos.get(i).ok_or("extract: --selector requires a value")?.to_string());
+                selector = Some(
+                    pos.get(i)
+                        .ok_or("extract: --selector requires a value")?
+                        .to_string(),
+                );
             }
-            "--all" => { all = true; }
+            "--all" => {
+                all = true;
+            }
             "--attrs" => {
                 i += 1;
-                attrs = Some(pos.get(i).ok_or("extract: --attrs requires a value")?.to_string());
+                attrs = Some(
+                    pos.get(i)
+                        .ok_or("extract: --attrs requires a value")?
+                        .to_string(),
+                );
             }
-            "--links" => { links = true; }
-            "--title" => { title = true; }
-            "--text" => { text = true; }
-            "--markdown" => { markdown = true; }
+            "--links" => {
+                links = true;
+            }
+            "--title" => {
+                title = true;
+            }
+            "--text" => {
+                text = true;
+            }
+            "--markdown" => {
+                markdown = true;
+            }
             "--max-bytes" => {
                 i += 1;
-                max_bytes = Some(pos.get(i).ok_or("extract: --max-bytes requires a value")?
-                    .parse::<u64>().map_err(|_| "extract: --max-bytes must be a number")?);
+                max_bytes = Some(
+                    pos.get(i)
+                        .ok_or("extract: --max-bytes requires a value")?
+                        .parse::<u64>()
+                        .map_err(|_| "extract: --max-bytes must be a number")?,
+                );
             }
             other => return Err(format!("extract: unexpected argument: {other}")),
         }
         i += 1;
     }
 
-    Ok(SessionCommand::Extract { tab_id, selector, all, attrs, links, title, text, markdown, max_bytes })
+    Ok(SessionCommand::Extract {
+        tab_id,
+        selector,
+        all,
+        attrs,
+        links,
+        title,
+        text,
+        markdown,
+        max_bytes,
+    })
 }
 
 fn parse_content(args: &[&str]) -> Result<SessionCommand, String> {
@@ -339,19 +410,30 @@ fn parse_content(args: &[&str]) -> Result<SessionCommand, String> {
         match pos[i] {
             "--format" => {
                 i += 1;
-                format = pos.get(i).ok_or("content: --format requires a value")?.to_string();
+                format = pos
+                    .get(i)
+                    .ok_or("content: --format requires a value")?
+                    .to_string();
             }
             "--max-bytes" => {
                 i += 1;
-                max_bytes = Some(pos.get(i).ok_or("content: --max-bytes requires a value")?
-                    .parse::<u64>().map_err(|_| "content: --max-bytes must be a number")?);
+                max_bytes = Some(
+                    pos.get(i)
+                        .ok_or("content: --max-bytes requires a value")?
+                        .parse::<u64>()
+                        .map_err(|_| "content: --max-bytes must be a number")?,
+                );
             }
             other => return Err(format!("content: unexpected argument: {other}")),
         }
         i += 1;
     }
 
-    Ok(SessionCommand::Content { tab_id, format, max_bytes })
+    Ok(SessionCommand::Content {
+        tab_id,
+        format,
+        max_bytes,
+    })
 }
 
 fn parse_screenshot(args: &[&str]) -> Result<SessionCommand, String> {
@@ -366,19 +448,31 @@ fn parse_screenshot(args: &[&str]) -> Result<SessionCommand, String> {
         match pos[i] {
             "-o" => {
                 i += 1;
-                output_path = Some(pos.get(i).ok_or("screenshot: -o requires a path")?.to_string());
+                output_path = Some(
+                    pos.get(i)
+                        .ok_or("screenshot: -o requires a path")?
+                        .to_string(),
+                );
             }
             "--width" => {
                 i += 1;
-                width = Some(pos.get(i).ok_or("screenshot: --width requires a value")?
-                    .parse::<u32>().map_err(|_| "screenshot: --width must be a number")?);
+                width = Some(
+                    pos.get(i)
+                        .ok_or("screenshot: --width requires a value")?
+                        .parse::<u32>()
+                        .map_err(|_| "screenshot: --width must be a number")?,
+                );
             }
             other => return Err(format!("screenshot: unexpected argument: {other}")),
         }
         i += 1;
     }
 
-    Ok(SessionCommand::Screenshot { tab_id, output_path, width })
+    Ok(SessionCommand::Screenshot {
+        tab_id,
+        output_path,
+        width,
+    })
 }
 
 fn parse_wait(args: &[&str]) -> Result<SessionCommand, String> {
@@ -392,15 +486,23 @@ fn parse_wait(args: &[&str]) -> Result<SessionCommand, String> {
         match pos[i] {
             "--timeout" => {
                 i += 1;
-                timeout_ms = Some(pos.get(i).ok_or("wait: --timeout requires a value")?
-                    .parse::<u64>().map_err(|_| "wait: --timeout must be a number")?);
+                timeout_ms = Some(
+                    pos.get(i)
+                        .ok_or("wait: --timeout requires a value")?
+                        .parse::<u64>()
+                        .map_err(|_| "wait: --timeout must be a number")?,
+                );
             }
             other => return Err(format!("wait: unexpected argument: {other}")),
         }
         i += 1;
     }
 
-    Ok(SessionCommand::Wait { tab_id, selector, timeout_ms })
+    Ok(SessionCommand::Wait {
+        tab_id,
+        selector,
+        timeout_ms,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +573,12 @@ mod tests {
     fn test_parse_goto_simple() {
         let cmd = parse_session_command("goto t1 https://example.com").unwrap();
         match cmd {
-            SessionCommand::Goto { tab_id, url, wait_selector, timeout_ms } => {
+            SessionCommand::Goto {
+                tab_id,
+                url,
+                wait_selector,
+                timeout_ms,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(url, "https://example.com");
                 assert!(wait_selector.is_none());
@@ -483,9 +590,16 @@ mod tests {
 
     #[test]
     fn test_parse_goto_with_flags() {
-        let cmd = parse_session_command("goto t1 https://example.com --wait .content --timeout 3000").unwrap();
+        let cmd =
+            parse_session_command("goto t1 https://example.com --wait .content --timeout 3000")
+                .unwrap();
         match cmd {
-            SessionCommand::Goto { tab_id, url, wait_selector, timeout_ms } => {
+            SessionCommand::Goto {
+                tab_id,
+                url,
+                wait_selector,
+                timeout_ms,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(url, "https://example.com");
                 assert_eq!(wait_selector.unwrap(), ".content");
@@ -529,7 +643,11 @@ mod tests {
     fn test_parse_fill() {
         let cmd = parse_session_command("fill t1 input#name John").unwrap();
         match cmd {
-            SessionCommand::Fill { tab_id, selector, value } => {
+            SessionCommand::Fill {
+                tab_id,
+                selector,
+                value,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(selector, "input#name");
                 assert_eq!(value, "John");
@@ -549,7 +667,11 @@ mod tests {
     fn test_parse_type() {
         let cmd = parse_session_command("type t1 input#search hello world").unwrap();
         match cmd {
-            SessionCommand::Type { tab_id, selector, text } => {
+            SessionCommand::Type {
+                tab_id,
+                selector,
+                text,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(selector, "input#search");
                 assert_eq!(text, "hello world");
@@ -562,7 +684,11 @@ mod tests {
     fn test_parse_select() {
         let cmd = parse_session_command("select t1 select#country US").unwrap();
         match cmd {
-            SessionCommand::Select { tab_id, selector, value } => {
+            SessionCommand::Select {
+                tab_id,
+                selector,
+                value,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(selector, "select#country");
                 assert_eq!(value, "US");
@@ -596,7 +722,11 @@ mod tests {
     fn test_parse_eval() {
         let cmd = parse_session_command("eval t1 document.title").unwrap();
         match cmd {
-            SessionCommand::Eval { tab_id, expression, await_promise } => {
+            SessionCommand::Eval {
+                tab_id,
+                expression,
+                await_promise,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(expression, "document.title");
                 assert!(!await_promise);
@@ -609,7 +739,11 @@ mod tests {
     fn test_parse_eval_await() {
         let cmd = parse_session_command("eval t1 fetch('/api') --await").unwrap();
         match cmd {
-            SessionCommand::Eval { tab_id, expression, await_promise } => {
+            SessionCommand::Eval {
+                tab_id,
+                expression,
+                await_promise,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert!(await_promise);
                 assert_eq!(expression, "fetch('/api')");
@@ -622,7 +756,14 @@ mod tests {
     fn test_parse_extract() {
         let cmd = parse_session_command("extract t1 --selector h1 --all --links --title").unwrap();
         match cmd {
-            SessionCommand::Extract { tab_id, selector, all, links, title, .. } => {
+            SessionCommand::Extract {
+                tab_id,
+                selector,
+                all,
+                links,
+                title,
+                ..
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(selector.unwrap(), "h1");
                 assert!(all);
@@ -637,7 +778,11 @@ mod tests {
     fn test_parse_content() {
         let cmd = parse_session_command("content t1 --format html --max-bytes 1024").unwrap();
         match cmd {
-            SessionCommand::Content { tab_id, format, max_bytes } => {
+            SessionCommand::Content {
+                tab_id,
+                format,
+                max_bytes,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(format, "html");
                 assert_eq!(max_bytes.unwrap(), 1024);
@@ -650,7 +795,11 @@ mod tests {
     fn test_parse_screenshot() {
         let cmd = parse_session_command("screenshot t1 -o out.png --width 1024").unwrap();
         match cmd {
-            SessionCommand::Screenshot { tab_id, output_path, width } => {
+            SessionCommand::Screenshot {
+                tab_id,
+                output_path,
+                width,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(output_path.unwrap(), "out.png");
                 assert_eq!(width.unwrap(), 1024);
@@ -663,7 +812,11 @@ mod tests {
     fn test_parse_wait() {
         let cmd = parse_session_command("wait t1 .loaded --timeout 5000").unwrap();
         match cmd {
-            SessionCommand::Wait { tab_id, selector, timeout_ms } => {
+            SessionCommand::Wait {
+                tab_id,
+                selector,
+                timeout_ms,
+            } => {
                 assert_eq!(tab_id, "t1");
                 assert_eq!(selector, ".loaded");
                 assert_eq!(timeout_ms.unwrap(), 5000);
@@ -689,6 +842,9 @@ mod tests {
         assert_eq!(strip_quotes("\"hello\""), "hello");
         assert_eq!(strip_quotes("'world'"), "world");
         assert_eq!(strip_quotes("no quotes"), "no quotes");
-        assert_eq!(strip_quotes("\"unclosed, 'unclosed2'"), "\"unclosed, 'unclosed2'");
+        assert_eq!(
+            strip_quotes("\"unclosed, 'unclosed2'"),
+            "\"unclosed, 'unclosed2'"
+        );
     }
 }

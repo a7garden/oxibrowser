@@ -14,9 +14,9 @@ use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
 use crate::page::Page;
 use parking_lot::RwLock;
+use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use percent_encoding::percent_decode_str;
 use std::sync::Arc;
 use tracing::info;
 use url::Url;
@@ -354,34 +354,34 @@ impl Session {
     /// Retries DNS errors, connection timeouts, and 5xx errors with
     /// exponential backoff (500ms, 1000ms, 1500ms, ...).
     async fn navigate_data_url(&mut self, url: &Url) -> Result<()> {
-    let data_str = url.as_str();
-    let data_part = data_str.strip_prefix("data:").unwrap_or("");
-    let (mime, encoded_body) = if let Some(comma_idx) = data_part.find(',') {
-        let mime = data_part[..comma_idx].trim().to_string();
-        let body = &data_part[comma_idx+1..];
-        (mime, body)
-    } else {
-        ("text/plain".to_string(), data_part)
-    };
+        let data_str = url.as_str();
+        let data_part = data_str.strip_prefix("data:").unwrap_or("");
+        let (mime, encoded_body) = if let Some(comma_idx) = data_part.find(',') {
+            let mime = data_part[..comma_idx].trim().to_string();
+            let body = &data_part[comma_idx + 1..];
+            (mime, body)
+        } else {
+            ("text/plain".to_string(), data_part)
+        };
 
-    // Percent-decode the body (the url crate encodes special chars)
-    let body = percent_decode_str(encoded_body)
-        .decode_utf8()
-        .unwrap_or_else(|_| encoded_body.into());
+        // Percent-decode the body (the url crate encodes special chars)
+        let body = percent_decode_str(encoded_body)
+            .decode_utf8()
+            .unwrap_or_else(|_| encoded_body.into());
 
-    let page = Page::from_html(url.clone(), &body, 200, mime.clone()).await?;
-    if self.history.is_empty() {
-    } else if self.history_index < self.history.len() - 1 {
-        self.history.truncate(self.history_index + 1);
+        let page = Page::from_html(url.clone(), &body, 200, mime.clone()).await?;
+        if self.history.is_empty() {
+        } else if self.history_index < self.history.len() - 1 {
+            self.history.truncate(self.history_index + 1);
+        }
+        self.history.push(url.clone());
+        self.history_index = self.history.len() - 1;
+        self.active_page = Some(page);
+        self.inject_dom_snapshot();
+        Ok(())
     }
-    self.history.push(url.clone());
-    self.history_index = self.history.len() - 1;
-    self.active_page = Some(page);
-    self.inject_dom_snapshot();
-    Ok(())
-}
     #[tracing::instrument(skip(self), fields(session = %self.id), err)]
-pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Result<()> {
+    pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Result<()> {
         let mut last_error: Option<CoreError> = None;
 
         for attempt in 0..=max_retries {

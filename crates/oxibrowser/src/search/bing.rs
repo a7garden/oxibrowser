@@ -6,8 +6,8 @@
 //! CAPTCHA detection: response body contains "CaptchaChallenge" or " Bing captcha ".
 //! On CAPTCHA → transparent fallback to DuckDuckGo (no error propagated to caller).
 
-use super::engine::{decode_html_entities, url_encode, SearchEngine, SearchError, SearchResult};
 use super::ddg::DuckDuckGoEngine;
+use super::engine::{decode_html_entities, url_encode, SearchEngine, SearchError, SearchResult};
 
 pub struct BingEngine {
     client: reqwest::Client,
@@ -31,7 +31,11 @@ impl SearchEngine for BingEngine {
         "Bing"
     }
 
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         match self.search_bing(query, max_results).await {
             Ok(results) => Ok(results),
             Err(SearchError::Captcha(msg)) => {
@@ -44,11 +48,16 @@ impl SearchEngine for BingEngine {
 }
 
 impl BingEngine {
-    async fn search_bing(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search_bing(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         let encoded = url_encode(query);
         let url = format!("https://www.bing.com/search?q={encoded}");
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .header("Accept-Language", "en-US,en;q=0.5")
             .send()
@@ -67,7 +76,9 @@ impl BingEngine {
 
         // CAPTCHA detection
         if html.contains("CaptchaChallenge") || html.contains(" Bing captcha ") {
-            return Err(SearchError::Captcha("Bing CAPTCHA challenge detected".into()));
+            return Err(SearchError::Captcha(
+                "Bing CAPTCHA challenge detected".into(),
+            ));
         }
 
         Ok(parse_bing_html(&html, max_results))
@@ -296,7 +307,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Example Domain");
         assert_eq!(results[0].url, "https://example.com");
-        assert_eq!(results[0].snippet, "This domain is for use in illustrative examples.");
+        assert_eq!(
+            results[0].snippet,
+            "This domain is for use in illustrative examples."
+        );
         assert_eq!(results[0].source, "Bing");
     }
 

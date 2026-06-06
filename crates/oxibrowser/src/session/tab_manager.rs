@@ -3,8 +3,8 @@
 //! Manages a collection of named tabs (t1, t2, ...) and maps them to
 //! the underlying `Tab` handles from the browser.
 
-use std::collections::HashMap;
 use oxibrowser_core::{Browser, Tab};
+use std::collections::HashMap;
 
 /// Manages multiple named tabs within a session REPL.
 pub struct TabManager {

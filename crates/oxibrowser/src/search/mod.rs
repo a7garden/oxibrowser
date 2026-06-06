@@ -34,7 +34,11 @@ impl WebEngine {
         }
     }
 
-    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, SearchError> {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
         match self {
             Self::DuckDuckGo(e) => e.search(query, max_results).await,
             Self::Wikipedia(e) => e.search(query, max_results).await,
@@ -50,8 +54,12 @@ fn parse_engines(spec: &str, client: reqwest::Client) -> Result<Vec<WebEngine>, 
     let mut engines = Vec::new();
     for name in spec.split(',') {
         match name.trim() {
-            "ddg" => engines.push(WebEngine::DuckDuckGo(ddg::DuckDuckGoEngine::new(client.clone()))),
-            "wiki" => engines.push(WebEngine::Wikipedia(wiki::WikipediaEngine::new(client.clone()))),
+            "ddg" => engines.push(WebEngine::DuckDuckGo(ddg::DuckDuckGoEngine::new(
+                client.clone(),
+            ))),
+            "wiki" => engines.push(WebEngine::Wikipedia(wiki::WikipediaEngine::new(
+                client.clone(),
+            ))),
             "bing" => engines.push(WebEngine::Bing(bing::BingEngine::new(client.clone()))),
             other => {
                 return Err(SearchError::Parse(format!(
@@ -62,7 +70,9 @@ fn parse_engines(spec: &str, client: reqwest::Client) -> Result<Vec<WebEngine>, 
         }
     }
     if engines.is_empty() {
-        return Err(SearchError::Parse("no engines specified in --engine".into()));
+        return Err(SearchError::Parse(
+            "no engines specified in --engine".into(),
+        ));
     }
     Ok(engines)
 }
@@ -90,7 +100,7 @@ pub async fn dispatch(
     max_results: usize,
     timeout_secs: u64,
 ) -> Result<SearchOutput, SearchError> {
-    let max_results = max_results.max(1).min(30);
+    let max_results = max_results.clamp(1, 30);
     let client = build_search_client(timeout_secs);
 
     match source {
@@ -115,7 +125,11 @@ async fn search_web(
     timeout_secs: u64,
 ) -> Result<SearchOutput, SearchError> {
     let engines = parse_engines(engine_spec, client)?;
-    let engine_label = engines.iter().map(|e| e.name()).collect::<Vec<_>>().join(",");
+    let engine_label = engines
+        .iter()
+        .map(|e| e.name())
+        .collect::<Vec<_>>()
+        .join(",");
     let timeout = Duration::from_secs(timeout_secs);
 
     // Run all engines in parallel with per-engine timeout
@@ -190,9 +204,11 @@ async fn search_github_issues(
     token: Option<&str>,
     max_results: usize,
 ) -> Result<SearchOutput, SearchError> {
-    let repo = repo
-        .ok_or_else(|| SearchError::Parse("--repo is required for source 'github-issues'".into()))?;
-    let engine = github::GitHubEngine::issues(client, token.map(|s| s.to_string()), repo.to_string());
+    let repo = repo.ok_or_else(|| {
+        SearchError::Parse("--repo is required for source 'github-issues'".into())
+    })?;
+    let engine =
+        github::GitHubEngine::issues(client, token.map(|s| s.to_string()), repo.to_string());
     let results = engine.search(query, max_results).await?;
 
     Ok(SearchOutput {
@@ -232,6 +248,8 @@ pub fn format_human(output: &SearchOutput) {
         println!();
     }
 
-    eprintln!("{} result(s) | source: {} | engine: {}",
-        output.total_results, output.source, output.engine);
+    eprintln!(
+        "{} result(s) | source: {} | engine: {}",
+        output.total_results, output.source, output.engine
+    );
 }

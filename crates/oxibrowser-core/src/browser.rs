@@ -511,7 +511,7 @@ mod tests {
         for i in 0..100 {
             let _ = browser.event_tx.send(BrowserEvent::NavigationStarted {
                 tab_id: uuid::Uuid::nil(),
-                url: format!("https://example.com/{i}").into(),
+                url: format!("https://example.com/{i}"),
             });
         }
     }

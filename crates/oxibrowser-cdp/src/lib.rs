@@ -4,7 +4,6 @@
 //! Playwright can connect to OxiBrowser, just like they connect to Chrome.
 //!
 
-
 pub mod event;
 pub mod protocol;
 pub mod server;

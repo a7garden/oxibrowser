@@ -73,12 +73,22 @@ impl CliResponse {
             data: Some(data),
             error: None,
             error_code: None,
-            meta: Some(Meta { tab_id, elapsed_ms, source: None, engine: None }),
+            meta: Some(Meta {
+                tab_id,
+                elapsed_ms,
+                source: None,
+                engine: None,
+            }),
         }
     }
 
     /// Create a success response for search commands (includes source/engine in meta).
-    pub fn success_with_search_meta(data: Value, elapsed_ms: u64, source: &str, engine: &str) -> Self {
+    pub fn success_with_search_meta(
+        data: Value,
+        elapsed_ms: u64,
+        source: &str,
+        engine: &str,
+    ) -> Self {
         Self {
             ok: true,
             data: Some(data),
@@ -117,7 +127,12 @@ impl CliResponse {
             data: None,
             error: Some(error.into()),
             error_code: Some(error_code.as_ref().to_string()),
-            meta: Some(Meta { tab_id, elapsed_ms, source: None, engine: None }),
+            meta: Some(Meta {
+                tab_id,
+                elapsed_ms,
+                source: None,
+                engine: None,
+            }),
         }
     }
 
@@ -126,7 +141,7 @@ impl CliResponse {
         CliResponse::error(e.to_string(), e.error_code())
     }
 
-/// Determine the exit code from the error_code field.
+    /// Determine the exit code from the error_code field.
     pub fn exit_code(&self) -> i32 {
         if self.ok {
             return exit_code::OK;
@@ -295,7 +310,11 @@ pub fn filter_fields(data: &mut Value, fields: &[&str]) {
 
 /// Parse a comma-separated fields string into a vec of field names.
 pub fn parse_fields(fields: &str) -> Vec<&str> {
-    fields.split(',').map(|f| f.trim()).filter(|f| !f.is_empty()).collect()
+    fields
+        .split(',')
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +399,6 @@ pub fn core_exit_code(error: &oxibrowser_core::error::CoreError) -> i32 {
 // Print helpers for non-JSON mode
 // ---------------------------------------------------------------------------
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,7 +456,8 @@ mod tests {
 
     #[test]
     fn test_truncate_fields_truncates() {
-        let mut data = serde_json::json!({"a": "short", "b": "a very long string that exceeds the limit"});
+        let mut data =
+            serde_json::json!({"a": "short", "b": "a very long string that exceeds the limit"});
         truncate_fields(&mut data, 10);
         assert!(data.get("truncated").unwrap().as_bool().unwrap());
         assert!(data.get("total_bytes").unwrap().as_u64().unwrap() > 10);
@@ -447,7 +466,8 @@ mod tests {
 
     #[test]
     fn test_filter_fields() {
-        let mut data = serde_json::json!({"url": "https://example.com", "title": "Example", "html": "<html>"});
+        let mut data =
+            serde_json::json!({"url": "https://example.com", "title": "Example", "html": "<html>"});
         filter_fields(&mut data, &["url", "title"]);
         assert!(data.get("url").is_some());
         assert!(data.get("title").is_some());

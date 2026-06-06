@@ -1,8 +1,8 @@
 #[tokio::test]
 async fn save_visual_output_for_inspection() {
+    use oxibrowser_core::css::{render_accessibility_tree, render_box_model_png};
     use oxibrowser_core::frame::Frame;
     use oxibrowser_core::js::dom_snapshot::DomSnapshot;
-    use oxibrowser_core::css::{render_accessibility_tree, render_box_model_png};
 
     let html = r##"<html><head><title>Test Page</title></head><body>
         <h1>Welcome to My Site</h1>
@@ -20,10 +20,9 @@ async fn save_visual_output_for_inspection() {
         <p style="display:none">This is hidden</p>
     </body></html>"##;
 
-    let frame = Frame::from_html(
-        url::Url::parse("http://test/").unwrap(),
-        html,
-    ).await.unwrap();
+    let frame = Frame::from_html(url::Url::parse("http://test/").unwrap(), html)
+        .await
+        .unwrap();
 
     let snapshot = DomSnapshot::from_frame(&frame);
 

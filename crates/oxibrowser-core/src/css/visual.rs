@@ -20,7 +20,10 @@ const GLYPH_COUNT: usize = 95;
 ///
 /// Each visible element is drawn as a colored rectangle at its estimated
 /// position. Text content is rendered inside. Hidden elements are skipped.
-pub fn render_box_model_png(snapshot: &DomSnapshot, viewport_width: u32) -> Result<Vec<u8>, String> {
+pub fn render_box_model_png(
+    snapshot: &DomSnapshot,
+    viewport_width: u32,
+) -> Result<Vec<u8>, String> {
     let vw = viewport_width.max(320);
     let img_h = estimate_page_height(snapshot, vw);
     let img_h = img_h.min(MAX_IMAGE_HEIGHT);
@@ -50,7 +53,8 @@ pub fn render_accessibility_tree(snapshot: &DomSnapshot) -> String {
 
     output.push_str(&format!(
         "page ({}×{})\n",
-        1280, 720 // viewport
+        1280,
+        720 // viewport
     ));
 
     if let Some(body) = snapshot.nodes.get(&body_id) {
@@ -88,12 +92,7 @@ fn estimate_page_height(snapshot: &DomSnapshot, _viewport_width: u32) -> u32 {
 }
 
 /// Recursively render a subtree of nodes as colored boxes.
-fn render_subtree(
-    snapshot: &DomSnapshot,
-    node_id: u32,
-    img: &mut RgbaImage,
-    viewport_w: u32,
-) {
+fn render_subtree(snapshot: &DomSnapshot, node_id: u32, img: &mut RgbaImage, viewport_w: u32) {
     let node = match snapshot.nodes.get(&node_id) {
         Some(n) => n,
         None => return,
@@ -212,7 +211,14 @@ fn draw_rect_outline(img: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32, color:
 }
 
 /// Draw text with optional scaling.
-fn draw_scaled_text(img: &mut RgbaImage, text: &str, px: u32, py: u32, color: Rgba<u8>, scale: u32) {
+fn draw_scaled_text(
+    img: &mut RgbaImage,
+    text: &str,
+    px: u32,
+    py: u32,
+    color: Rgba<u8>,
+    scale: u32,
+) {
     let scale = scale.max(1);
     let mut cx = px;
     for ch in text.chars() {
@@ -471,15 +477,16 @@ fn parse_color_component(s: &str) -> Option<f64> {
     if let Some(inner) = s.strip_suffix('%') {
         inner.parse::<f64>().ok().map(|v| v / 100.0)
     } else {
-        s.parse::<f64>().ok().map(|v| {
-            if v > 1.0 { v / 255.0 } else { v }
-        })
+        s.parse::<f64>()
+            .ok()
+            .map(|v| if v > 1.0 { v / 255.0 } else { v })
     }
 }
 
 fn parse_percent(s: &str) -> Option<f64> {
     let s = s.trim();
-    s.strip_suffix('%').and_then(|inner| inner.parse::<f64>().ok().map(|v| v / 100.0))
+    s.strip_suffix('%')
+        .and_then(|inner| inner.parse::<f64>().ok().map(|v| v / 100.0))
 }
 
 fn parse_alpha(s: &str) -> Option<f64> {
@@ -501,7 +508,11 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
         return (v, v, v);
     }
 
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
 
     let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
@@ -512,7 +523,13 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 }
 
 fn hue_to_rgb(p: f64, q: f64, t: f64) -> f64 {
-    let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
+    let t = if t < 0.0 {
+        t + 1.0
+    } else if t > 1.0 {
+        t - 1.0
+    } else {
+        t
+    };
     if t < 1.0 / 6.0 {
         return p + (q - p) * 6.0 * t;
     }
@@ -618,10 +635,7 @@ fn build_a11y_node(snapshot: &DomSnapshot, node_id: u32, output: &mut String, de
         let child_is_duplicate_text = snapshot
             .nodes
             .get(&child_id)
-            .map(|cn| {
-                cn.node_type == 3
-                    && cn.text_content.trim().to_lowercase() == label_trimmed
-            })
+            .map(|cn| cn.node_type == 3 && cn.text_content.trim().to_lowercase() == label_trimmed)
             .unwrap_or(false);
         if child_is_duplicate_text {
             continue; // skip duplicate text
@@ -662,12 +676,24 @@ fn compute_a11y_role(
             ("link".into(), if text.is_empty() { href } else { text })
         }
         "BUTTON" => {
-            let role = if disabled { "button (disabled)" } else { "button" };
+            let role = if disabled {
+                "button (disabled)"
+            } else {
+                "button"
+            };
             (role.into(), text)
         }
         "INPUT" => {
-            let input_type = node.attributes.get("type").map(|s| s.as_str()).unwrap_or("text");
-            let placeholder = node.attributes.get("placeholder").cloned().unwrap_or_default();
+            let input_type = node
+                .attributes
+                .get("type")
+                .map(|s| s.as_str())
+                .unwrap_or("text");
+            let placeholder = node
+                .attributes
+                .get("placeholder")
+                .cloned()
+                .unwrap_or_default();
             let name = node.attributes.get("name").cloned().unwrap_or_default();
             let label = if !placeholder.is_empty() {
                 placeholder
@@ -678,8 +704,17 @@ fn compute_a11y_role(
             };
             (format!("textbox (type={})", input_type), label)
         }
-        "TEXTAREA" => ("textbox (multiline)".into(), node.attributes.get("placeholder").cloned().unwrap_or_default()),
-        "SELECT" => ("listbox".into(), node.attributes.get("name").cloned().unwrap_or_default()),
+        "TEXTAREA" => (
+            "textbox (multiline)".into(),
+            node.attributes
+                .get("placeholder")
+                .cloned()
+                .unwrap_or_default(),
+        ),
+        "SELECT" => (
+            "listbox".into(),
+            node.attributes.get("name").cloned().unwrap_or_default(),
+        ),
         "OPTION" => ("option".into(), text),
         "IMG" => {
             let alt = node.attributes.get("alt").cloned().unwrap_or_default();
@@ -691,14 +726,23 @@ fn compute_a11y_role(
         "TABLE" => ("table".into(), String::new()),
         "TR" => ("row".into(), String::new()),
         "TD" | "TH" => ("cell".into(), text),
-        "FORM" => ("form".into(), node.attributes.get("action").cloned().unwrap_or_default()),
+        "FORM" => (
+            "form".into(),
+            node.attributes.get("action").cloned().unwrap_or_default(),
+        ),
         "LABEL" => ("label".into(), text),
         "NAV" => ("navigation".into(), String::new()),
         "MAIN" => ("main".into(), String::new()),
         "HEADER" => ("banner".into(), String::new()),
         "FOOTER" => ("contentinfo".into(), String::new()),
         "ASIDE" => ("complementary".into(), String::new()),
-        "SECTION" => ("region".into(), node.attributes.get("aria-label").cloned().unwrap_or_default()),
+        "SECTION" => (
+            "region".into(),
+            node.attributes
+                .get("aria-label")
+                .cloned()
+                .unwrap_or_default(),
+        ),
         "ARTICLE" => ("article".into(), String::new()),
         "SPAN" | "STRONG" | "EM" | "B" | "I" | "U" | "SMALL" | "CODE" => ("text".into(), text),
         "DIV" => ("group".into(), String::new()),
@@ -738,27 +782,57 @@ mod tests {
         let body_id = 2u32;
         let div_id = 3u32;
 
-        nodes.insert(root_id, DomNode {
-            id: root_id, tag: "html".into(), attributes: Default::default(),
-            text_content: String::new(), children: vec![body_id], parent: None, node_type: 1,
-        });
-        nodes.insert(body_id, DomNode {
-            id: body_id, tag: "body".into(), attributes: Default::default(),
-            text_content: String::new(), children: vec![div_id], parent: Some(root_id), node_type: 1,
-        });
-        nodes.insert(div_id, DomNode {
-            id: div_id, tag: "div".into(),
-            attributes: {
-                let mut a = std::collections::HashMap::new();
-                a.insert("style".into(), "width:200px;height:100px;background-color:#336699".into());
-                a
+        nodes.insert(
+            root_id,
+            DomNode {
+                id: root_id,
+                tag: "html".into(),
+                attributes: Default::default(),
+                text_content: String::new(),
+                children: vec![body_id],
+                parent: None,
+                node_type: 1,
             },
-            text_content: "Hello".into(), children: vec![], parent: Some(body_id), node_type: 1,
-        });
+        );
+        nodes.insert(
+            body_id,
+            DomNode {
+                id: body_id,
+                tag: "body".into(),
+                attributes: Default::default(),
+                text_content: String::new(),
+                children: vec![div_id],
+                parent: Some(root_id),
+                node_type: 1,
+            },
+        );
+        nodes.insert(
+            div_id,
+            DomNode {
+                id: div_id,
+                tag: "div".into(),
+                attributes: {
+                    let mut a = std::collections::HashMap::new();
+                    a.insert(
+                        "style".into(),
+                        "width:200px;height:100px;background-color:#336699".into(),
+                    );
+                    a
+                },
+                text_content: "Hello".into(),
+                children: vec![],
+                parent: Some(body_id),
+                node_type: 1,
+            },
+        );
 
         let snap = DomSnapshot {
-            url: "http://test/".into(), title: String::new(),
-            nodes, root_id, body_id: Some(body_id), head_id: None,
+            url: "http://test/".into(),
+            title: String::new(),
+            nodes,
+            root_id,
+            body_id: Some(body_id),
+            head_id: None,
         };
 
         let png = render_box_model_png(&snap, 640).unwrap();
@@ -775,34 +849,82 @@ mod tests {
         let p_id = 4u32;
         let btn_id = 5u32;
 
-        nodes.insert(root_id, DomNode {
-            id: root_id, tag: "html".into(), attributes: Default::default(),
-            text_content: String::new(), children: vec![body_id], parent: None, node_type: 1,
-        });
-        nodes.insert(body_id, DomNode {
-            id: body_id, tag: "body".into(), attributes: Default::default(),
-            text_content: String::new(), children: vec![h1_id, p_id, btn_id], parent: Some(root_id), node_type: 1,
-        });
-        nodes.insert(h1_id, DomNode {
-            id: h1_id, tag: "h1".into(), attributes: Default::default(),
-            text_content: "Title".into(), children: vec![], parent: Some(body_id), node_type: 1,
-        });
-        nodes.insert(p_id, DomNode {
-            id: p_id, tag: "p".into(), attributes: Default::default(),
-            text_content: "Hello world".into(), children: vec![], parent: Some(body_id), node_type: 1,
-        });
-        nodes.insert(btn_id, DomNode {
-            id: btn_id, tag: "button".into(), attributes: Default::default(),
-            text_content: "Click".into(), children: vec![], parent: Some(body_id), node_type: 1,
-        });
+        nodes.insert(
+            root_id,
+            DomNode {
+                id: root_id,
+                tag: "html".into(),
+                attributes: Default::default(),
+                text_content: String::new(),
+                children: vec![body_id],
+                parent: None,
+                node_type: 1,
+            },
+        );
+        nodes.insert(
+            body_id,
+            DomNode {
+                id: body_id,
+                tag: "body".into(),
+                attributes: Default::default(),
+                text_content: String::new(),
+                children: vec![h1_id, p_id, btn_id],
+                parent: Some(root_id),
+                node_type: 1,
+            },
+        );
+        nodes.insert(
+            h1_id,
+            DomNode {
+                id: h1_id,
+                tag: "h1".into(),
+                attributes: Default::default(),
+                text_content: "Title".into(),
+                children: vec![],
+                parent: Some(body_id),
+                node_type: 1,
+            },
+        );
+        nodes.insert(
+            p_id,
+            DomNode {
+                id: p_id,
+                tag: "p".into(),
+                attributes: Default::default(),
+                text_content: "Hello world".into(),
+                children: vec![],
+                parent: Some(body_id),
+                node_type: 1,
+            },
+        );
+        nodes.insert(
+            btn_id,
+            DomNode {
+                id: btn_id,
+                tag: "button".into(),
+                attributes: Default::default(),
+                text_content: "Click".into(),
+                children: vec![],
+                parent: Some(body_id),
+                node_type: 1,
+            },
+        );
 
         let snap = DomSnapshot {
-            url: "http://test/".into(), title: String::new(),
-            nodes, root_id, body_id: Some(body_id), head_id: None,
+            url: "http://test/".into(),
+            title: String::new(),
+            nodes,
+            root_id,
+            body_id: Some(body_id),
+            head_id: None,
         };
 
         let tree = render_accessibility_tree(&snap);
-        assert!(tree.contains("heading"), "Should contain heading role, got: {}", tree);
+        assert!(
+            tree.contains("heading"),
+            "Should contain heading role, got: {}",
+            tree
+        );
         assert!(tree.contains("Title"), "Should contain heading text");
         assert!(tree.contains("paragraph"), "Should contain paragraph role");
         assert!(tree.contains("button"), "Should contain button role");
@@ -812,7 +934,7 @@ mod tests {
     #[tokio::test]
     async fn test_accessibility_tree_realistic_page() {
         use crate::frame::Frame;
-        
+
         let html = r##"<html><head><title>Demo</title></head><body>
             <h1>Welcome</h1>
             <p style="color:red">Red text here</p>
@@ -823,20 +945,22 @@ mod tests {
             <img src="logo.png" alt="Logo">
             <p style="display:none">Hidden</p>
         </body></html>"##;
-        
-        let frame = Frame::from_html(
-            url::Url::parse("http://test/").unwrap(),
-            html,
-        ).await.unwrap();
-        
+
+        let frame = Frame::from_html(url::Url::parse("http://test/").unwrap(), html)
+            .await
+            .unwrap();
+
         let snapshot = crate::js::dom_snapshot::DomSnapshot::from_frame(&frame);
         let tree = render_accessibility_tree(&snapshot);
-        
+
         assert!(tree.contains("heading"), "Should have heading");
         assert!(tree.contains("Welcome"), "Should have heading text");
         assert!(tree.contains("paragraph"), "Should have paragraph");
         assert!(tree.contains("button"), "Should have button");
-        assert!(tree.contains("interactive"), "Should have interactive elements");
+        assert!(
+            tree.contains("interactive"),
+            "Should have interactive elements"
+        );
         assert!(tree.contains("hidden"), "Should mark hidden elements");
         assert!(tree.contains("image"), "Should have image role");
         assert!(tree.contains("Logo"), "Should have image alt text");
@@ -845,21 +969,20 @@ mod tests {
     #[tokio::test]
     async fn test_box_model_screenshot_realistic() {
         use crate::frame::Frame;
-        
+
         let html = r##"<html><body>
             <h1>Title</h1>
             <p>Text</p>
             <div style="width:200px;height:50px;background-color:#336699">Box</div>
         </body></html>"##;
-        
-        let frame = Frame::from_html(
-            url::Url::parse("http://test/").unwrap(),
-            html,
-        ).await.unwrap();
-        
+
+        let frame = Frame::from_html(url::Url::parse("http://test/").unwrap(), html)
+            .await
+            .unwrap();
+
         let snapshot = crate::js::dom_snapshot::DomSnapshot::from_frame(&frame);
         let png = render_box_model_png(&snapshot, 640).unwrap();
-        
+
         assert!(png.len() > 100, "PNG should have meaningful size");
         assert_eq!(&png[0..4], b"\x89PNG", "Should be valid PNG");
     }

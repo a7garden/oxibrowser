@@ -36,13 +36,11 @@ use base64::Engine;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
-use boa_engine::{
-    js_string, Context, JsString, JsValue, NativeFunction, Source,
-};
+use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
 use serde_json::Value;
 
-use crate::error::{CoreError, Result};
 use crate::css::LayoutEngine;
+use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
@@ -423,7 +421,11 @@ impl JsRuntime {
         // Clear shared console buffer
         self.console_output.write().clear();
 
-        tracing::debug!(expr_len = expression.len(), timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms), "JS evaluation started");
+        tracing::debug!(
+            expr_len = expression.len(),
+            timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms),
+            "JS evaluation started"
+        );
 
         // Send eval command with limits
         self.cmd_tx
@@ -454,9 +456,17 @@ impl JsRuntime {
             } => {
                 let has_value = value.is_some();
                 let has_exception = exception.is_some();
-                tracing::debug!(has_value, has_exception, timed_out, "JS evaluation completed");
+                tracing::debug!(
+                    has_value,
+                    has_exception,
+                    timed_out,
+                    "JS evaluation completed"
+                );
                 if timed_out {
-                    tracing::warn!(timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms), "JS evaluation timed out — context reset");
+                    tracing::warn!(
+                        timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms),
+                        "JS evaluation timed out — context reset"
+                    );
                     // Context was reset — clear our globals tracking too
                     // (they're stale in the new context)
                     // We do NOT clear self.globals because set_global can re-inject them.
@@ -4698,12 +4708,32 @@ fn create_element_object(
             let obj = boa_engine::object::ObjectInitializer::new(_ctx)
                 .property(js_string!("x"), JsValue::from(rect.x), Attribute::all())
                 .property(js_string!("y"), JsValue::from(rect.y), Attribute::all())
-                .property(js_string!("width"), JsValue::from(rect.width), Attribute::all())
-                .property(js_string!("height"), JsValue::from(rect.height), Attribute::all())
+                .property(
+                    js_string!("width"),
+                    JsValue::from(rect.width),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("height"),
+                    JsValue::from(rect.height),
+                    Attribute::all(),
+                )
                 .property(js_string!("top"), JsValue::from(rect.top), Attribute::all())
-                .property(js_string!("right"), JsValue::from(rect.right), Attribute::all())
-                .property(js_string!("bottom"), JsValue::from(rect.bottom), Attribute::all())
-                .property(js_string!("left"), JsValue::from(rect.left), Attribute::all())
+                .property(
+                    js_string!("right"),
+                    JsValue::from(rect.right),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("bottom"),
+                    JsValue::from(rect.bottom),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("left"),
+                    JsValue::from(rect.left),
+                    Attribute::all(),
+                )
                 .build();
             Ok(JsValue::from(obj))
         })
@@ -5212,7 +5242,11 @@ fn create_element_object(
             Attribute::all(),
         )
         // ── 레이아웃 평가 ──
-        .function(get_bounding_client_rect_fn, js_string!("getBoundingClientRect"), 0)
+        .function(
+            get_bounding_client_rect_fn,
+            js_string!("getBoundingClientRect"),
+            0,
+        )
         .accessor(
             js_string!("offsetWidth"),
             Some(offset_width_getter),
@@ -6115,13 +6149,11 @@ fn register_window_globals(
         Attribute::all(),
     );
     // Register getComputedStyle as a standalone global before moving window_final
-    let gcs_fn_val = window_final.get(js_string!("getComputedStyle"), ctx)
+    let gcs_fn_val = window_final
+        .get(js_string!("getComputedStyle"), ctx)
         .unwrap_or(JsValue::undefined());
-    let _ = ctx.register_global_property(
-        js_string!("getComputedStyle"),
-        gcs_fn_val,
-        Attribute::all(),
-    );
+    let _ =
+        ctx.register_global_property(js_string!("getComputedStyle"), gcs_fn_val, Attribute::all());
     let _ = ctx.register_global_property(
         js_string!("self"),
         JsValue::from(window_final),
@@ -7472,12 +7504,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_computed_style_get_property_value() {
         let mut rt = JsRuntime::new();
-        let html = r##"<html><body><div id="box" style="position:absolute">Abs</div></body></html>"##;
+        let html =
+            r##"<html><body><div id="box" style="position:absolute">Abs</div></body></html>"##;
         let frame = make_frame(html);
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
-            .evaluate(r#"getComputedStyle(document.getElementById("box")).getPropertyValue("position")"#)
+            .evaluate(
+                r#"getComputedStyle(document.getElementById("box")).getPropertyValue("position")"#,
+            )
             .await
             .unwrap();
         assert!(result.is_ok());

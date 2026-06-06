@@ -166,8 +166,9 @@ async fn get_box_model_screenshot(params: Option<Value>, ctx: &DispatchContext) 
         .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
 
     let png_bytes = match snapshot {
-        Some(s) => oxibrowser_core::css::render_box_model_png(&s, viewport_width)
-            .unwrap_or_default(),
+        Some(s) => {
+            oxibrowser_core::css::render_box_model_png(&s, viewport_width).unwrap_or_default()
+        }
         None => Vec::new(),
     };
 
