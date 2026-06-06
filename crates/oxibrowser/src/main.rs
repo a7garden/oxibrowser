@@ -13,10 +13,12 @@ use tracing::info;
 
 mod describe;
 mod output;
-mod search;
 mod session;
 mod skill;
 mod validate;
+
+// search is declared in lib.rs and re-exported as `pub mod search`.
+use oxibrowser::search;
 
 /// OxiBrowser — headless browser for AI agents.
 #[derive(Parser)]

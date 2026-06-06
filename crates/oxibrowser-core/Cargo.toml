@@ -1,6 +1,6 @@
 [package]
 name = "oxibrowser-core"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -40,7 +40,7 @@ serde_yaml = "0.9"
 regex = "1.10"
 chrono = "0.4"
 
-oxibrowser-webapi = { version = "0.14", path = "../oxibrowser-webapi" }
+oxibrowser-webapi = { version = "0.14.1", path = "../oxibrowser-webapi" }
 getrandom = { workspace = true }
 
 [dev-dependencies]

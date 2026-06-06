@@ -19,14 +19,14 @@ use engine::{build_search_client, SearchEngine, SearchError, SearchOutput, Searc
 // ---------------------------------------------------------------------------
 
 /// Supported web search engines.
-enum WebEngine {
+pub enum WebEngine {
     DuckDuckGo(ddg::DuckDuckGoEngine),
     Wikipedia(wiki::WikipediaEngine),
     Bing(bing::BingEngine),
 }
 
 impl WebEngine {
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::DuckDuckGo(e) => e.name(),
             Self::Wikipedia(e) => e.name(),
@@ -34,7 +34,7 @@ impl WebEngine {
         }
     }
 
-    async fn search(
+    pub async fn search(
         &self,
         query: &str,
         max_results: usize,
@@ -50,7 +50,7 @@ impl WebEngine {
 const ENGINE_NAMES: &[&str] = &["ddg", "wiki", "bing"];
 
 /// Parse `--engine` spec (comma-separated) into WebEngine instances.
-fn parse_engines(spec: &str, client: reqwest::Client) -> Result<Vec<WebEngine>, SearchError> {
+pub fn parse_engines(spec: &str, client: reqwest::Client) -> Result<Vec<WebEngine>, SearchError> {
     let mut engines = Vec::new();
     for name in spec.split(',') {
         match name.trim() {
