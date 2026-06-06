@@ -76,6 +76,7 @@ impl CdpServer {
     /// Start the CDP server.
     ///
     /// Returns the actual bound address (useful when port 0 is used).
+    #[tracing::instrument(skip(self), fields(addr = %self.addr), err)]
     pub async fn start(self: &Arc<Self>) -> anyhow::Result<SocketAddr> {
         let listener = TcpListener::bind(self.addr).await?;
         let actual_addr = listener.local_addr()?;
@@ -164,6 +165,15 @@ impl CdpServer {
         browser: Arc<Browser>,
     ) -> anyhow::Result<Response<HttpBody>> {
         match req.uri().path() {
+            "/health" => {
+                let body = serde_json::json!({
+                    "status": "ok",
+                    "version": env!("CARGO_PKG_VERSION"),
+                });
+                Ok(Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Full::new(Bytes::from(body.to_string())))?)
+            }
             "/json/version" => {
                 let version = JsonVersion::new(ws_url.to_string());
                 let body = serde_json::to_string(&version)?;

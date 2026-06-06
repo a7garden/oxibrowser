@@ -64,6 +64,7 @@ pub struct Browser {
 
 impl Browser {
     /// Create a new Browser instance with the given config.
+    #[tracing::instrument(skip(config), err)]
     pub async fn new(config: BrowserConfig) -> Result<Self> {
         let cookie_jar = if let Some(ref path) = config.cookie_file {
             match CookieJar::load_from_file(path) {
@@ -111,6 +112,7 @@ impl Browser {
     ///
     /// A session represents a browsing context group (cookie jar, session
     /// storage, navigation history).
+    #[tracing::instrument(skip(self), fields(id = %self.id), err)]
     pub async fn new_session(&self) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         self.ensure_open()?;
 
@@ -147,6 +149,7 @@ impl Browser {
     /// the browser's shared cookie jar.
     ///
     /// This covers the 90% agent use case: "read this URL".
+    #[tracing::instrument(skip(self), fields(id = %self.id), err)]
     pub async fn browse(&self, url: &str) -> Result<BrowseResult> {
         self.ensure_open()?;
         let session = self.new_session().await?;
@@ -174,6 +177,7 @@ impl Browser {
     /// The returned `Tab` is wired to this `Browser`'s event stream —
     /// navigation/wait/screenshot operations emit `BrowserEvent`s to
     /// subscribers of `subscribe_events()`.
+    #[tracing::instrument(skip(self), fields(id = %self.id), err)]
     pub async fn new_tab(&self) -> Result<Tab> {
         self.ensure_open()?;
 
@@ -210,14 +214,15 @@ impl Browser {
     }
 
     /// Convenience: create a session and navigate to a URL.
+    #[tracing::instrument(skip(self), fields(id = %self.id), err)]
     pub async fn new_page(&self, url: &str) -> Result<Arc<tokio::sync::RwLock<Session>>> {
-        let _span = tracing::info_span!("new_page", browser = %self.id, url = %url).entered();
         let session = self.new_session().await?;
         session.write().await.navigate(url).await?;
         Ok(session)
     }
 
     /// Close all sessions and shut down.
+    #[tracing::instrument(skip(self), fields(id = %self.id), err)]
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(()); // Already closed

@@ -92,6 +92,14 @@ pub enum BrowserEvent {
         /// Wall-clock duration of the render.
         duration: Duration,
     },
+
+    /// Navigation failed with an error.
+    NavigationFailed {
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
+        url: String,
+        error: String,
+    },
 }
 
 impl BrowserEvent {
@@ -139,6 +147,10 @@ impl BrowserEvent {
                     "Screenshot ready — {} · {viewport_width} px · {ms} ms",
                     human_bytes(*bytes as u64),
                 )
+            }
+
+            Self::NavigationFailed { url, error, .. } => {
+                format!("Failed to open {url} — {error}")
             }
         }
     }

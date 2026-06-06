@@ -57,11 +57,11 @@ async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> Dom
         .unwrap_or_else(current_timestamp_ms);
 
     tracing::debug!(
-        "Input.dispatchKeyEvent: type={}, key={}, code={}, modifiers={}",
         event_type,
         key,
         code,
-        modifiers
+        modifiers,
+        "Input.dispatchKeyEvent"
     );
 
     // Generate JS to dispatch the keyboard event
@@ -71,7 +71,7 @@ async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> Dom
 
     match result {
         Ok(val) => {
-            tracing::debug!("dispatchKeyEvent result: {:?}", val);
+            tracing::trace!(?val, "dispatchKeyEvent result");
             ctx.events.send_page_event(
                 "Input.dispatchKeyEvent",
                 json!({
@@ -83,7 +83,7 @@ async fn dispatch_key_event(params: Option<Value>, ctx: &DispatchContext) -> Dom
             );
         }
         Err(e) => {
-            tracing::warn!("dispatchKeyEvent JS eval failed: {}", e);
+            tracing::warn!(error = %e, "dispatchKeyEvent JS eval failed");
         }
     }
 
@@ -100,7 +100,7 @@ async fn insert_text(params: Option<Value>, ctx: &DispatchContext) -> DomainResu
     })?;
 
     let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    tracing::debug!("Input.insertText: text={}", text);
+    tracing::debug!(text, "Input.insertText");
 
     let js = js_insert_text(text);
     let mut session_guard = ctx.session.write().await;
@@ -121,7 +121,7 @@ async fn ime_set_composition(params: Option<Value>, _ctx: &DispatchContext) -> D
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
-    tracing::debug!("Input.imeSetComposition: {} segments", selections);
+    tracing::debug!(selections, "Input.imeSetComposition");
 
     Ok(Some(json!({})))
 }
@@ -149,12 +149,12 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
     let click_count = p.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
 
     tracing::debug!(
-        "Input.dispatchMouseEvent: type={}, x={}, y={}, button={}, clicks={}",
         event_type,
         x,
         y,
         button,
-        click_count
+        click_count,
+        "Input.dispatchMouseEvent"
     );
 
     // Generate JS to dispatch the mouse event
@@ -164,7 +164,7 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
 
     match result {
         Ok(val) => {
-            tracing::debug!("dispatchMouseEvent result: {:?}", val);
+            tracing::trace!(?val, "dispatchMouseEvent result");
             ctx.events.send_page_event(
                 "Input.dispatchMouseEvent",
                 json!({
@@ -177,7 +177,7 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
             );
         }
         Err(e) => {
-            tracing::warn!("dispatchMouseEvent JS eval failed: {}", e);
+            tracing::warn!(error = %e, "dispatchMouseEvent JS eval failed");
         }
     }
 
@@ -196,10 +196,10 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     tracing::debug!(
-        "Input.dispatchDragEvent: type={}, x={}, y={}",
         event_type,
         x,
-        y
+        y,
+        "Input.dispatchDragEvent"
     );
 
     Ok(Some(json!({})))

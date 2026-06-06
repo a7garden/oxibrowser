@@ -97,18 +97,25 @@ impl HttpClient {
 
     /// Store all Set-Cookie headers from a response.
     fn store_response_cookies(&self, url: &Url, response: &Response) {
+        let mut set_cookie_count = 0usize;
         for val in response.headers().get_all("set-cookie").iter() {
             if let Ok(cookie_str) = val.to_str() {
                 self.cookie_jar.write().store(url, cookie_str);
+                set_cookie_count += 1;
             }
         }
+        tracing::trace!(url = %url, set_cookie_count, "response cookies stored");
     }
 
     /// Fetch a URL and return the response.
+    #[tracing::instrument(skip(self), err)]
     pub async fn fetch(&self, url: &Url) -> Result<Response> {
         self.check_ssrf(url)?;
 
+        tracing::debug!(url = %url, "HTTP request started");
+
         let cookies = self.cookie_jar.read().cookies_for_url(url);
+        tracing::trace!(url = %url, cookie_count = cookies.len(), "cookies attached");
 
         let mut request = self.client.get(url.as_str());
         if !cookies.is_empty() {
@@ -119,6 +126,8 @@ impl HttpClient {
             .send()
             .await
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        tracing::debug!(url = %url, status = response.status().as_u16(), "HTTP response received");
 
         // Store response cookies (handle multiple Set-Cookie headers)
         self.store_response_cookies(url, &response);
@@ -131,6 +140,7 @@ impl HttpClient {
     /// - `Continue`: perform the actual HTTP request (with optional modifications)
     /// - `Fail`: return a network error immediately
     /// - `Fulfill`: return a synthetic response via InterceptedResponse
+    #[tracing::instrument(skip(self, action), err)]
     pub async fn intercept(
         &self,
         url: &Url,
@@ -211,6 +221,7 @@ impl HttpClient {
     ///
     /// Uses `Content-Type` header charset, BOM, and HTML `<meta>` tags
     /// to detect the character encoding. Falls back to UTF-8.
+    #[tracing::instrument(skip(self), err)]
     pub async fn fetch_text(&self, url: &Url) -> Result<String> {
         let response = self.fetch(url).await?;
         let content_type = response
@@ -231,6 +242,7 @@ impl HttpClient {
     }
 
     /// Send a POST request with a raw body.
+    #[tracing::instrument(skip(self, body), err)]
     pub async fn post(&self, url: &Url, body: impl Into<reqwest::Body>) -> Result<Response> {
         self.check_ssrf(url)?;
 
@@ -248,6 +260,7 @@ impl HttpClient {
     }
 
     /// Send a POST request with a JSON body.
+    #[tracing::instrument(skip(self, json), err)]
     pub async fn post_json(&self, url: &Url, json: &serde_json::Value) -> Result<Response> {
         self.check_ssrf(url)?;
 
@@ -265,6 +278,7 @@ impl HttpClient {
     }
 
     /// Send a POST request with URL-encoded form data.
+    #[tracing::instrument(skip(self, form), err)]
     pub async fn post_form(&self, url: &Url, form: &[(&str, &str)]) -> Result<Response> {
         self.check_ssrf(url)?;
 

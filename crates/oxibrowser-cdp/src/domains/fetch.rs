@@ -69,7 +69,7 @@ fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     ctx.events.set_fetch_enabled(has_patterns);
     ctx.events.set_fetch_patterns(patterns.clone());
     if has_patterns {
-        tracing::info!("Fetch domain enabled with {} pattern(s)", patterns.len());
+        tracing::info!(patterns = patterns.len(), "Fetch domain enabled with patterns");
     } else {
         tracing::info!("Fetch domain enabled (no patterns — interception disabled)");
     }
@@ -104,7 +104,7 @@ async fn continue_request(params: Option<Value>, ctx: &DispatchContext) -> Domai
     let request = match ctx.fetch_registry.take(request_id) {
         Some(r) => r,
         None => {
-            tracing::warn!("continueRequest: unknown requestId={}", request_id);
+            tracing::warn!(request_id, "unknown requestId in continueRequest");
             return Err(CdpError {
                 code: -32601,
                 message: format!("requestId not found: {}", request_id),
@@ -148,7 +148,7 @@ async fn continue_request(params: Option<Value>, ctx: &DispatchContext) -> Domai
     let action = build_continue(url, method, headers, post_data);
     let _ = request.tx.send(action);
 
-    tracing::debug!("Fetch.continueRequest: requestId={} resumed", request_id);
+    tracing::debug!(request_id, "Fetch.continueRequest resumed");
     Ok(Some(json!({})))
 }
 
@@ -171,7 +171,7 @@ async fn fail_request(params: Option<Value>, ctx: &DispatchContext) -> DomainRes
     let request = match ctx.fetch_registry.take(request_id) {
         Some(r) => r,
         None => {
-            tracing::warn!("failRequest: unknown requestId={}", request_id);
+            tracing::warn!(request_id, "unknown requestId in failRequest");
             return Err(CdpError {
                 code: -32601,
                 message: format!("requestId not found: {}", request_id),
@@ -182,11 +182,7 @@ async fn fail_request(params: Option<Value>, ctx: &DispatchContext) -> DomainRes
     let action = build_fail(error_reason.to_string());
     let _ = request.tx.send(action);
 
-    tracing::debug!(
-        "Fetch.failRequest: requestId={} failed ({})",
-        request_id,
-        error_reason
-    );
+    tracing::debug!(request_id, error_reason, "Fetch.failRequest");
     Ok(Some(json!({})))
 }
 
@@ -238,7 +234,7 @@ async fn fulfill_request(params: Option<Value>, ctx: &DispatchContext) -> Domain
     let request = match ctx.fetch_registry.take(request_id) {
         Some(r) => r,
         None => {
-            tracing::warn!("fulfillRequest: unknown requestId={}", request_id);
+            tracing::warn!(request_id, "unknown requestId in fulfillRequest");
             return Err(CdpError {
                 code: -32601,
                 message: format!("requestId not found: {}", request_id),
@@ -250,11 +246,11 @@ async fn fulfill_request(params: Option<Value>, ctx: &DispatchContext) -> Domain
     let _ = request.tx.send(action);
 
     tracing::debug!(
-        "Fetch.fulfillRequest: requestId={}, status={}, body_size={}, headers={}",
         request_id,
         status_code,
         body_size,
-        headers_count
+        headers_count,
+        "Fetch.fulfillRequest completed"
     );
     Ok(Some(json!({
         "responseCode": status_code,
@@ -376,10 +372,10 @@ pub fn emit_request_paused(
     );
 
     tracing::debug!(
-        "Fetch.requestPaused: requestId={}, url={}, method={}",
         request_id,
         url,
-        method
+        method,
+        "Fetch.requestPaused"
     );
 
     rx

@@ -219,6 +219,7 @@ fn handle_local_storage_sync(
 
 impl Session {
     /// Create a new session.
+    #[tracing::instrument(skip(config, http_client, cookie_jar), err)]
     pub async fn new(
         browser_id: BrowserId,
         config: BrowserConfig,
@@ -276,6 +277,7 @@ impl Session {
     }
 
     /// Navigate to a URL.
+    #[tracing::instrument(skip(self), fields(session = %self.id), err)]
     pub async fn navigate(&mut self, url: &str) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
@@ -283,12 +285,13 @@ impl Session {
 
         let parsed = Url::parse(url)?;
 
-               info!(url = %parsed, "navigating");
+        info!(url = %parsed, "navigating");
 
         if parsed.scheme() == "data" {
             return self.navigate_data_url(&parsed).await;
         }
         // Fetch the document
+        let start = std::time::Instant::now();
         let response = self.http_client.fetch(&parsed).await?;
         let status = response.status().as_u16();
         let final_url = response.url().clone();
@@ -315,11 +318,16 @@ impl Session {
 
         let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
 
+        tracing::debug!(status, final_url = %final_url, elapsed_ms = start.elapsed().as_millis() as u64, "page fetched");
+
         // Store the response body for Network.getResponseBody
         if !html.is_empty() {
             let request_id = format!("REQ-{}", uuid::Uuid::new_v4().as_simple());
             self.store_response_body(&request_id, html.clone(), &ct_header);
+            tracing::trace!(request_id, body_len = html.len(), "response body stored");
         }
+
+        tracing::debug!(html_bytes = html.len(), "response decoded");
 
         // Create a new page for this navigation (use final URL after redirects)
         let page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
@@ -372,6 +380,7 @@ impl Session {
     self.inject_dom_snapshot();
     Ok(())
 }
+    #[tracing::instrument(skip(self), fields(session = %self.id), err)]
 pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Result<()> {
         let mut last_error: Option<CoreError> = None;
 
@@ -497,6 +506,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
     /// - `"application/json"` — body is parsed as JSON and sent as JSON
     /// - `"application/x-www-form-urlencoded"` — body is parsed as `key=value&key2=value2` form data
     /// - Any other value — body is sent as raw bytes
+    #[tracing::instrument(skip(self, body), fields(session = %self.id), err)]
     pub async fn post(&mut self, url: &str, body: &str, content_type: &str) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
@@ -578,6 +588,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
     }
 
     /// Evaluate a JS expression, optionally awaiting Promise resolution.
+    #[tracing::instrument(skip(self), fields(session = %self.id), err)]
     pub async fn evaluate_js_with_await(
         &mut self,
         expression: &str,
@@ -586,6 +597,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
         if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::SessionClosed);
         }
+        tracing::debug!(expr_len = expression.len(), await = await_promise, "evaluating JS");
         let result = self
             .js_runtime
             .evaluate_with_await(expression, await_promise)
@@ -594,6 +606,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
         // Collect and apply DOM mutations
         let mutations = self.js_runtime.drain_mutations();
         if !mutations.is_empty() {
+            tracing::debug!(mutations = mutations.len(), "DOM mutations applied");
             self.apply_mutations(&mutations);
             self.inject_dom_snapshot();
         }
@@ -604,6 +617,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
     /// Apply recorded DOM mutations to the active page's DOM tree.
     fn apply_mutations(&mut self, mutations: &[DomMutation]) {
         for m in mutations {
+            tracing::trace!(mutation = ?m, "applying DOM mutation");
             match m {
                 DomMutation::SetAttribute {
                     node_id,
@@ -713,6 +727,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
     fn inject_dom_snapshot(&mut self) {
         if let Some(page) = &self.active_page {
             let snapshot = DomSnapshot::from_frame(page.root_frame());
+            tracing::debug!(node_count = snapshot.nodes.len(), "DOM snapshot injected");
             let url = self
                 .current_url()
                 .map(|u| u.as_str())
@@ -824,6 +839,7 @@ pub async fn navigate_with_retry(&mut self, url: &str, max_retries: u32) -> Resu
     }
 
     /// Close the session.
+    #[tracing::instrument(skip(self), fields(session = %self.id), err)]
     pub async fn close(&mut self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());

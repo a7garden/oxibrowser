@@ -47,6 +47,7 @@ pub struct Page {
 
 impl Page {
     /// Create a page from HTML content.
+    #[tracing::instrument(skip(html), err)]
     pub async fn from_html(
         url: Url,
         html: &str,

@@ -44,6 +44,7 @@ pub struct Frame {
 
 impl Frame {
     /// Parse HTML into a Frame with its DOM tree.
+    #[tracing::instrument(skip(html), err)]
     pub async fn from_html(url: Url, html: &str) -> Result<Self> {
         let id = FrameId::next();
         let document = Document::parse(html);

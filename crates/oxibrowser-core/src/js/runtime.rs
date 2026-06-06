@@ -423,6 +423,8 @@ impl JsRuntime {
         // Clear shared console buffer
         self.console_output.write().clear();
 
+        tracing::debug!(expr_len = expression.len(), timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms), "JS evaluation started");
+
         // Send eval command with limits
         self.cmd_tx
             .send(JsCommand::Eval {
@@ -450,7 +452,11 @@ impl JsRuntime {
                 console_output,
                 timed_out,
             } => {
+                let has_value = value.is_some();
+                let has_exception = exception.is_some();
+                tracing::debug!(has_value, has_exception, timed_out, "JS evaluation completed");
                 if timed_out {
+                    tracing::warn!(timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms), "JS evaluation timed out — context reset");
                     // Context was reset — clear our globals tracking too
                     // (they're stale in the new context)
                     // We do NOT clear self.globals because set_global can re-inject them.

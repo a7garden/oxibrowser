@@ -56,6 +56,7 @@ impl CdpSession {
     ///
     /// This also creates a new Browser `Session` for page interaction
     /// and an event broadcaster for CDP event publishing.
+    #[tracing::instrument(skip(ws_stream, browser), err)]
     pub async fn new(
         ws_stream: tokio_tungstenite::WebSocketStream<
             hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
@@ -90,6 +91,7 @@ impl CdpSession {
     ///
     /// Reads commands from WebSocket, dispatches to domain handlers,
     /// sends responses back, and forwards CDP events to the client.
+    #[tracing::instrument(skip(self), fields(session_id = %self.session_id), err)]
     pub async fn run(mut self) -> anyhow::Result<()> {
         info!(session_id = %self.session_id, "CDP session started");
 
@@ -158,6 +160,7 @@ impl CdpSession {
     }
 
     /// Handle a single text message.
+    #[tracing::instrument(skip(self, text), fields(session_id = %self.session_id))]
     async fn handle_text_message(&mut self, text: &str) -> anyhow::Result<()> {
         // Validate message size
         if text.len() > MAX_CDP_MESSAGE_SIZE {
