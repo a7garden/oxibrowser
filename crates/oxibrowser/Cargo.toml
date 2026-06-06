@@ -1,6 +1,6 @@
 [package]
 name = "oxibrowser"
-version = "0.13.0"
+version = "0.14.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -22,9 +22,12 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 url = { workspace = true }
 base64 = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
 
-oxibrowser-core = { version = "0.13", path = "../oxibrowser-core" }
-oxibrowser-cdp = { version = "0.13", path = "../oxibrowser-cdp" }
+oxibrowser-core = { version = "0.14", path = "../oxibrowser-core" }
+oxibrowser-cdp = { version = "0.14", path = "../oxibrowser-cdp" }
 
 [dev-dependencies]
 futures = { workspace = true }

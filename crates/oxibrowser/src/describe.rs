@@ -31,6 +31,10 @@ pub fn describe_all(compact: bool) -> CliResponse {
                 "args": ["command?"],
                 "flags": ["compact","json"]
             },
+            "search": {
+                "args": ["query"],
+                "flags": ["source","engine","repo","token","json","max-results","timeout"]
+            },
             "skill": {}
         }))
     } else {
@@ -155,6 +159,44 @@ pub fn describe_all(compact: bool) -> CliResponse {
                 "skill": {
                     "description": "Print agent skill guide as markdown",
                     "usage": "oxibrowser skill"
+                },
+                "search": {
+                    "description": "Search the web or GitHub (lightweight HTTP, no browser needed)",
+                    "usage": "oxibrowser search <query> [--source web|github|github-issues] [--engine ddg|wiki|bing] [--repo owner/repo] [--token ghp_xxx] [--max-results N] [--timeout sec] [--json]",
+                    "args": [
+                        {"name": "query", "type": "string", "required": true, "description": "Search query (all positional args joined)"}
+                    ],
+                    "flags": {
+                        "source": {"type": "enum", "values": ["web", "github", "github-issues"], "default": "web", "description": "Search source"},
+                        "engine": {"type": "string", "default": "ddg", "description": "Comma-separated: ddg, wiki, bing"},
+                        "repo": {"type": "string", "description": "owner/repo for github-issues"},
+                        "token": {"type": "string", "description": "GitHub PAT (optional, increases rate limit)"},
+                        "json": {"type": "bool", "default": false, "description": "Output as JSON (automatic when piped)"},
+                        "max-results": {"type": "int", "default": 10, "description": "Max results (max 30)"},
+                        "timeout": {"type": "int", "default": 15, "unit": "seconds", "description": "Per-engine timeout"}
+                    },
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "source": {"type": "string"},
+                            "engine": {"type": "string"},
+                            "total_results": {"type": "integer"},
+                            "results": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "url": {"type": "string"},
+                                        "snippet": {"type": "string"},
+                                        "source": {"type": "string"},
+                                        "extra": {"type": "object", "optional": true}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "output_format": {

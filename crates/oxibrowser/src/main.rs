@@ -2,7 +2,7 @@
 //!
 //! Human is the default. `--json` opts into machine-readable output.
 //!
-//! 7 subcommands: fetch, extract, run, session, serve, describe, skill, version
+//! 8 subcommands: fetch, extract, run, session, serve, search, describe, skill, version
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -13,6 +13,7 @@ use tracing::info;
 
 mod describe;
 mod output;
+mod search;
 mod session;
 mod skill;
 mod validate;
@@ -162,6 +163,33 @@ enum Commands {
         json: bool,
     },
 
+    /// Search the web or GitHub (lightweight HTTP, no browser needed).
+    Search {
+        /// Search query (all positional args are joined).
+        query: Vec<String>,
+        /// Search source: web, github, github-issues.
+        #[arg(long, default_value = "web", value_parser = clap::builder::PossibleValuesParser::new(["web", "github", "github-issues"]))]
+        source: String,
+        /// Search engine(s) for web source: ddg, wiki, bing (comma-separated).
+        #[arg(long, default_value = "ddg")]
+        engine: String,
+        /// Repository for github-issues (owner/repo).
+        #[arg(long)]
+        repo: Option<String>,
+        /// GitHub personal access token (increases rate limit).
+        #[arg(long)]
+        token: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Max results (max 30).
+        #[arg(long, default_value_t = 10)]
+        max_results: u32,
+        /// Timeout in seconds.
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+    },
+
     /// Print version information.
     Version {
         /// Output as JSON.
@@ -219,6 +247,9 @@ async fn main() {
         Commands::Session => session::run_session().await,
         Commands::Serve { host, port, cookie_file } => {
             run_serve(&host, port, cookie_file.as_deref()).await
+        }
+        Commands::Search { query, source, engine, repo, token, json, max_results, timeout } => {
+            run_search(&query, &source, &engine, repo.as_deref(), token.as_deref(), json, max_results, timeout).await
         }
         Commands::Describe { command, compact, .. } => run_describe(command.as_deref(), compact),
         Commands::Skill { json } => {
@@ -924,6 +955,53 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> i32 {
     server.shutdown();
     browser.close().await.ok();
     0
+}
+
+// ---------------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------------
+
+async fn run_search(
+    query_parts: &[String],
+    source: &str,
+    engine: &str,
+    repo: Option<&str>,
+    token: Option<&str>,
+    json: bool,
+    max_results: u32,
+    timeout: u64,
+) -> i32 {
+    let start = std::time::Instant::now();
+    let json = crate::output::should_output_json(json);
+
+    let query = query_parts.join(" ");
+    let query = query.trim();
+    if query.is_empty() {
+        return print_error("empty search query", "INPUT_VALIDATION", json);
+    }
+
+    let result = search::dispatch(
+        query, source, engine, repo, token,
+        max_results as usize,
+        timeout,
+    ).await;
+
+    match result {
+        Ok(output) => {
+            let elapsed = start.elapsed().as_millis() as u64;
+            if json {
+                let data = serde_json::to_value(&output).unwrap_or_default();
+                let resp = output::CliResponse::success_with_search_meta(
+                    data, elapsed, &output.source, &output.engine,
+                );
+                resp.print_json()
+            } else {
+                search::format_human(&output);
+                0
+            }
+        }
+        Err(e) => print_error(&e.to_string(), "SEARCH_ERROR", json),
+    }
 }
 
 // ---------------------------------------------------------------------------

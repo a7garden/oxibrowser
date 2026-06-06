@@ -46,6 +46,12 @@ pub struct Meta {
     pub tab_id: Option<String>,
     /// Wall-clock time in milliseconds.
     pub elapsed_ms: u64,
+    /// Search source (web, github, etc.) — only for search command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Search engine (ddg, wiki, bing, etc.) — only for search command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 impl CliResponse {
@@ -67,7 +73,23 @@ impl CliResponse {
             data: Some(data),
             error: None,
             error_code: None,
-            meta: Some(Meta { tab_id, elapsed_ms }),
+            meta: Some(Meta { tab_id, elapsed_ms, source: None, engine: None }),
+        }
+    }
+
+    /// Create a success response for search commands (includes source/engine in meta).
+    pub fn success_with_search_meta(data: Value, elapsed_ms: u64, source: &str, engine: &str) -> Self {
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+            error_code: None,
+            meta: Some(Meta {
+                tab_id: None,
+                elapsed_ms,
+                source: Some(source.to_string()),
+                engine: Some(engine.to_string()),
+            }),
         }
     }
 
@@ -95,7 +117,7 @@ impl CliResponse {
             data: None,
             error: Some(error.into()),
             error_code: Some(error_code.as_ref().to_string()),
-            meta: Some(Meta { tab_id, elapsed_ms }),
+            meta: Some(Meta { tab_id, elapsed_ms, source: None, engine: None }),
         }
     }
 
