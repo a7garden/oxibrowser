@@ -8,7 +8,7 @@
 use futures::{SinkExt, StreamExt};
 use oxibrowser_cdp::CdpServer;
 use oxibrowser_core::Browser;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite;
@@ -207,10 +207,10 @@ async fn collect_events(
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
                 let msg: Value = serde_json::from_str(&text).unwrap();
-                if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
-                    if method.starts_with(method_prefix) {
-                        events.push(msg);
-                    }
+                if let Some(method) = msg.get("method").and_then(|v| v.as_str())
+                    && method.starts_with(method_prefix)
+                {
+                    events.push(msg);
                 }
             }
             Ok(Some(Ok(_))) => continue,

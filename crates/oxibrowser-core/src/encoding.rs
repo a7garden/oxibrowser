@@ -29,10 +29,10 @@ pub fn decode_html(bytes: &[u8], content_type_header: Option<&str>) -> String {
 /// 4. UTF-8 fallback
 fn detect_encoding(bytes: &[u8], content_type: Option<&str>) -> &'static Encoding {
     // 1. HTTP Content-Type header
-    if let Some(ct) = content_type {
-        if let Some(enc) = parse_content_type_charset(ct) {
-            return enc;
-        }
+    if let Some(ct) = content_type
+        && let Some(enc) = parse_content_type_charset(ct)
+    {
+        return enc;
     }
 
     // 2. BOM

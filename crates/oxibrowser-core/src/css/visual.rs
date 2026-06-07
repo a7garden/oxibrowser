@@ -396,39 +396,40 @@ fn parse_color_to_rgba(color: &str, is_background: bool) -> Rgba<u8> {
     }
 
     // #RRGGBB
-    if c.starts_with('#') && c.len() == 7 {
-        if let (Ok(rv), Ok(gv), Ok(bv)) = (
+    if c.starts_with('#')
+        && c.len() == 7
+        && let (Ok(rv), Ok(gv), Ok(bv)) = (
             u8::from_str_radix(&c[1..3], 16),
             u8::from_str_radix(&c[3..5], 16),
             u8::from_str_radix(&c[5..7], 16),
-        ) {
-            return Rgba([rv, gv, bv, 255]);
-        }
+        )
+    {
+        return Rgba([rv, gv, bv, 255]);
     }
 
     // rgb(r, g, b) or rgba(r, g, b, a) — supports 0-255, 0-100%, or 0.0-1.0
     if c.starts_with("rgba(") || c.starts_with("rgb(") {
         let inner = &c[4..c.len() - 1];
-        if let Some((r_str, rest)) = split_first_comma(inner) {
-            if let Some((g_str, rest2)) = split_first_comma(rest) {
-                let (b_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
-                if let (Some(rv), Some(gv), Some(bv)) = (
-                    parse_color_component(r_str),
-                    parse_color_component(g_str),
-                    parse_color_component(b_str),
-                ) {
-                    let a = if c.starts_with("rgba(") {
-                        parse_alpha(a_str).unwrap_or(1.0)
-                    } else {
-                        1.0
-                    };
-                    return Rgba([
-                        (rv * 255.0) as u8,
-                        (gv * 255.0) as u8,
-                        (bv * 255.0) as u8,
-                        (a * 255.0) as u8,
-                    ]);
-                }
+        if let Some((r_str, rest)) = split_first_comma(inner)
+            && let Some((g_str, rest2)) = split_first_comma(rest)
+        {
+            let (b_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
+            if let (Some(rv), Some(gv), Some(bv)) = (
+                parse_color_component(r_str),
+                parse_color_component(g_str),
+                parse_color_component(b_str),
+            ) {
+                let a = if c.starts_with("rgba(") {
+                    parse_alpha(a_str).unwrap_or(1.0)
+                } else {
+                    1.0
+                };
+                return Rgba([
+                    (rv * 255.0) as u8,
+                    (gv * 255.0) as u8,
+                    (bv * 255.0) as u8,
+                    (a * 255.0) as u8,
+                ]);
             }
         }
     }
@@ -436,22 +437,22 @@ fn parse_color_to_rgba(color: &str, is_background: bool) -> Rgba<u8> {
     // hsl(h, s%, l%) or hsla(h, s%, l%, a)
     if c.starts_with("hsla(") || c.starts_with("hsl(") {
         let inner = &c[4..c.len() - 1];
-        if let Some((h_str, rest)) = split_first_comma(inner) {
-            if let Some((s_str, rest2)) = split_first_comma(rest) {
-                let (l_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
-                if let (Some(h), Some(s), Some(l)) = (
-                    h_str.trim().parse::<f64>().ok(),
-                    parse_percent(s_str),
-                    parse_percent(l_str),
-                ) {
-                    let a = if c.starts_with("hsla(") {
-                        parse_alpha(a_str).unwrap_or(1.0)
-                    } else {
-                        1.0
-                    };
-                    let (r, g, b) = hsl_to_rgb(h, s, l);
-                    return Rgba([r, g, b, (a * 255.0) as u8]);
-                }
+        if let Some((h_str, rest)) = split_first_comma(inner)
+            && let Some((s_str, rest2)) = split_first_comma(rest)
+        {
+            let (l_str, a_str) = split_first_comma(rest2).unwrap_or((rest2, "1"));
+            if let (Some(h), Some(s), Some(l)) = (
+                h_str.trim().parse::<f64>().ok(),
+                parse_percent(s_str),
+                parse_percent(l_str),
+            ) {
+                let a = if c.starts_with("hsla(") {
+                    parse_alpha(a_str).unwrap_or(1.0)
+                } else {
+                    1.0
+                };
+                let (r, g, b) = hsl_to_rgb(h, s, l);
+                return Rgba([r, g, b, (a * 255.0) as u8]);
             }
         }
     }
@@ -604,10 +605,11 @@ fn build_a11y_node(snapshot: &DomSnapshot, node_id: u32, output: &mut String, de
     if rect.width > 0.0 && rect.height > 0.0 {
         annotations.push(format!("at y:{}", rect.top as i32));
     }
-    if let Some(ref s) = style {
-        if s.background_color != "transparent" && s.background_color != "#ffffff" {
-            annotations.push(format!("bg:{}", s.background_color));
-        }
+    if let Some(ref s) = style
+        && s.background_color != "transparent"
+        && s.background_color != "#ffffff"
+    {
+        annotations.push(format!("bg:{}", s.background_color));
     }
 
     let ann_str = if annotations.is_empty() {

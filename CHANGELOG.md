@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-06-07
+
+### ⚠️ BREAKING CHANGES
+
+- **MSRV raised from 1.82 to 1.96** — downstream crates must build on Rust 1.96 or later. Pinning an older toolchain against `oxibrowser` `0.15.0` will fail at dependency resolution.
+- **Edition upgraded from 2021 to 2024** — the workspace now uses `edition = "2024"`. Transitive consumers in the same workspace will pick this up; downstream crates that depend on `oxibrowser` are unaffected unless they use `cargo metadata` to read our edition.
+
+### Changed
+
+- **Toolchain & edition** — all four crates (`oxibrowser`, `oxibrowser-core`, `oxibrowser-cdp`, `oxibrowser-webapi`) now declare `edition = "2024"` and `rust-version = "1.96"`. CI updated to `dtolnay/rust-toolchain@1.96` (was `@1.82`).
+- **Documentation** — README and CONTRIBUTING updated to advertise Rust 1.96+ and Edition 2024.
+
+### Internal
+
+- **Match ergonomics** — `crates/oxibrowser-webapi/src/dom/node.rs:135` `set_text_content` rewritten to drop the explicit `ref mut` binding mode. Edition 2024 disallows explicit borrow modes in implicitly-borrowing patterns.
+- **Clippy `collapsible_if` cleanup** — 143 nested-`if` blocks collapsed to let-chains (`if let X = y && condition { ... }`) via `cargo clippy --fix`. Let-chains are stable since Rust 1.88.
+- **`assert_matches!` adoption** — 15 occurrences of `assert!(matches!(cmd, ...))` in `crates/oxibrowser/src/session/parser.rs` switched to the stable `std::assert_matches!` macro (Rust 1.96). Better failure diagnostics (prints the actual `Debug` value on mismatch).
+- **`Vec::extract_if` adoption** — two retain+count patterns simplified to a single-pass `extract_if(.., predicate).collect()` / `.count()`:
+  - `crates/oxibrowser-core/src/js/job_queue.rs::pop_due_timers` (was 8 lines, 2 passes; now 4 lines, 1 pass).
+  - `crates/oxibrowser-core/src/browser.rs::cleanup_closed_sessions` (removed length before/after trick; `extract_if().count()` returns removed count directly). Predicate inverted to match: returns `true` for items to remove, `false` for items to keep.
+- **Formatting** — `cargo fmt` applied across the workspace; no semantic changes.
+
 ## [0.13.0] - 2026-06-04
 
 ### ⚠️ BREAKING CHANGES

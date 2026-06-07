@@ -214,12 +214,12 @@ impl IpFilter {
     /// Check if an IP address is allowed.
     pub fn is_allowed(&self, addr: &IpAddr) -> bool {
         // Check IPv4-mapped IPv6 addresses by extracting the IPv4 and checking against v4 blocks
-        if let IpAddr::V6(v6) = addr {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                // Also check the mapped IPv4 against IPv4 rules
-                if !self.is_allowed(&IpAddr::V4(v4)) {
-                    return false;
-                }
+        if let IpAddr::V6(v6) = addr
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            // Also check the mapped IPv4 against IPv4 rules
+            if !self.is_allowed(&IpAddr::V4(v4)) {
+                return false;
             }
         }
 

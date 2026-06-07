@@ -596,8 +596,8 @@ async fn fetch_direct(
             // Use markdown → strip formatting for readable plain text.
             let md = page.to_markdown();
             // Strip markdown syntax: # headings, **bold**, [links](url), etc.
-            let text = md
-                .lines()
+
+            md.lines()
                 .map(|line| {
                     let l = line.trim();
                     // Strip heading markers
@@ -610,8 +610,7 @@ async fn fetch_direct(
                 })
                 .filter(|l| !l.is_empty())
                 .collect::<Vec<_>>()
-                .join("\n");
-            text
+                .join("\n")
         }
         _ => page.content().to_string(),
     };
@@ -683,7 +682,7 @@ async fn fetch_with_tab(
             return Err(FetchError {
                 msg: format!("timed out after {timeout}s"),
                 code: "TIMEOUT".into(),
-            })
+            });
         }
     }
 
@@ -853,10 +852,10 @@ async fn run_extract(
     if let Err(e) = validate::validate_url(url) {
         return print_error(&e.to_string(), e.error_code(), json);
     }
-    if let Some(sel) = selector {
-        if let Err(e) = validate::validate_selector(sel) {
-            return print_error(&e.to_string(), e.error_code(), json);
-        }
+    if let Some(sel) = selector
+        && let Err(e) = validate::validate_selector(sel)
+    {
+        return print_error(&e.to_string(), e.error_code(), json);
     }
 
     let requested_attrs: Vec<&str> = output::parse_fields(attrs);
@@ -1014,10 +1013,10 @@ fn print_extract_human(data: &Value) {
     };
 
     // Title
-    if let Some(title) = obj.get("title").and_then(|v| v.as_str()) {
-        if !title.is_empty() {
-            println!("Title: {title}");
-        }
+    if let Some(title) = obj.get("title").and_then(|v| v.as_str())
+        && !title.is_empty()
+    {
+        println!("Title: {title}");
     }
     // Blank line after title for visual separation
     if obj.contains_key("title")
@@ -1060,18 +1059,18 @@ fn print_extract_human(data: &Value) {
         }
     }
     // Body text
-    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-        if !text.is_empty() {
-            for line in text.lines() {
-                println!("{line}");
-            }
+    if let Some(text) = obj.get("text").and_then(|v| v.as_str())
+        && !text.is_empty()
+    {
+        for line in text.lines() {
+            println!("{line}");
         }
     }
     // Markdown
-    if let Some(md) = obj.get("markdown").and_then(|v| v.as_str()) {
-        if !md.is_empty() {
-            print!("{md}");
-        }
+    if let Some(md) = obj.get("markdown").and_then(|v| v.as_str())
+        && !md.is_empty()
+    {
+        print!("{md}");
     }
 }
 
@@ -1320,33 +1319,33 @@ fn validate_fetch_inputs(
     if let Err(e) = validate::validate_url(url) {
         return Some(output::CliResponse::from_validation(e));
     }
-    if let Some(sel) = click {
-        if let Err(e) = validate::validate_selector(sel) {
-            return Some(output::CliResponse::from_validation(e));
-        }
+    if let Some(sel) = click
+        && let Err(e) = validate::validate_selector(sel)
+    {
+        return Some(output::CliResponse::from_validation(e));
     }
-    if let Some(spec) = fill {
-        if !spec.contains(':') {
-            return Some(output::CliResponse::error(
-                "--fill must be in the format selector:value",
-                "INPUT_VALIDATION",
-            ));
-        }
+    if let Some(spec) = fill
+        && !spec.contains(':')
+    {
+        return Some(output::CliResponse::error(
+            "--fill must be in the format selector:value",
+            "INPUT_VALIDATION",
+        ));
     }
-    if let Some(sel) = wait {
-        if let Err(e) = validate::validate_selector(sel) {
-            return Some(output::CliResponse::from_validation(e));
-        }
+    if let Some(sel) = wait
+        && let Err(e) = validate::validate_selector(sel)
+    {
+        return Some(output::CliResponse::from_validation(e));
     }
-    if let Some(sel) = extract {
-        if let Err(e) = validate::validate_selector(sel) {
-            return Some(output::CliResponse::from_validation(e));
-        }
+    if let Some(sel) = extract
+        && let Err(e) = validate::validate_selector(sel)
+    {
+        return Some(output::CliResponse::from_validation(e));
     }
-    if let Some(expr) = eval {
-        if let Err(e) = validate::validate_expression(expr) {
-            return Some(output::CliResponse::from_validation(e));
-        }
+    if let Some(expr) = eval
+        && let Err(e) = validate::validate_expression(expr)
+    {
+        return Some(output::CliResponse::from_validation(e));
     }
     None
 }

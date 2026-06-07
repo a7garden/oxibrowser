@@ -503,11 +503,11 @@ impl LayoutEngine {
 
             // Accumulate this child's height (lightweight estimate, no recursion)
             let child_style = Self::compute_style(snapshot, child_id);
-            if let Some(cs) = &child_style {
-                if cs.display != "none" {
-                    let h = Self::quick_height(snapshot, child_id, cs);
-                    y += cs.margin_top + h + cs.margin_bottom;
-                }
+            if let Some(cs) = &child_style
+                && cs.display != "none"
+            {
+                let h = Self::quick_height(snapshot, child_id, cs);
+                y += cs.margin_top + h + cs.margin_bottom;
             }
         }
         None
@@ -703,23 +703,23 @@ fn normalize_color(val: &str) -> String {
 
     // #rgb → #rrggbb
     if let Some(hex) = v.strip_prefix('#') {
-        if hex.len() == 3 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
+        if hex.len() == 3
+            && let (Ok(r), Ok(g), Ok(b)) = (
                 u8::from_str_radix(&hex[0..1].repeat(2), 16),
                 u8::from_str_radix(&hex[1..2].repeat(2), 16),
                 u8::from_str_radix(&hex[2..3].repeat(2), 16),
-            ) {
-                return format!("#{:02x}{:02x}{:02x}", r, g, b);
-            }
+            )
+        {
+            return format!("#{:02x}{:02x}{:02x}", r, g, b);
         }
-        if hex.len() == 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
+        if hex.len() == 6
+            && let (Ok(r), Ok(g), Ok(b)) = (
                 u8::from_str_radix(&hex[0..2], 16),
                 u8::from_str_radix(&hex[2..4], 16),
                 u8::from_str_radix(&hex[4..6], 16),
-            ) {
-                return format!("#{:02x}{:02x}{:02x}", r, g, b);
-            }
+            )
+        {
+            return format!("#{:02x}{:02x}{:02x}", r, g, b);
         }
         // Return as-is for 8-digit hex or invalid
         return format!("#{}", hex);

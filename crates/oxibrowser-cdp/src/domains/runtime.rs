@@ -9,7 +9,7 @@
 use crate::domains::{DispatchContext, DomainResult};
 use crate::event::EventSender;
 use crate::protocol::CdpError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Dispatch Runtime domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
@@ -190,7 +190,11 @@ async fn call_function_on(params: Option<Value>, ctx: &DispatchContext) -> Domai
             "(function() {{ var __fn = {func}; var __el = document.querySelector('[data-oxi-node-id=\"{nid}\"]') || document.body; return __fn(__el{args}); }})()",
             func = function_declaration,
             nid = node_id_str,
-            args = if args_str.is_empty() { String::new() } else { format!(", {}", args_str) }
+            args = if args_str.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", args_str)
+            }
         )
     } else if object_id.is_empty() {
         // No objectId — just call the function directly

@@ -290,10 +290,10 @@ impl CookieJar {
                 .filter(|(_, v)| !v.is_empty())
                 .find(|(k, _)| *k != &storage_domain)
                 .map(|(k, _)| k.clone());
-            if let Some(d) = domain_to_evict {
-                if let Some(v) = self.cookies.get_mut(&d) {
-                    v.remove(0);
-                }
+            if let Some(d) = domain_to_evict
+                && let Some(v) = self.cookies.get_mut(&d)
+            {
+                v.remove(0);
             }
         }
 
@@ -448,10 +448,11 @@ impl CookieJar {
                 if c.name != name {
                     return true;
                 }
-                if let (Some(dom), Some(cdom)) = (&c.domain, url.domain()) {
-                    if !dom.starts_with('.') && dom != cdom {
-                        return true;
-                    }
+                if let (Some(dom), Some(cdom)) = (&c.domain, url.domain())
+                    && !dom.starts_with('.')
+                    && dom != cdom
+                {
+                    return true;
                 }
                 false
             });

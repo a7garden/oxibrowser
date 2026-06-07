@@ -12,7 +12,7 @@
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
 use oxibrowser_core::js::{js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Dispatch Input domain methods.

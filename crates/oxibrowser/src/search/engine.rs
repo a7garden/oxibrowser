@@ -116,33 +116,33 @@ pub fn decode_html_entities(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'&' {
-            if let Some(end) = bytes[i..].iter().position(|&b| b == b';') {
-                let entity = &text[i + 1..i + end];
-                let ch = match entity {
-                    "amp" => Some('&'),
-                    "lt" => Some('<'),
-                    "gt" => Some('>'),
-                    "quot" => Some('"'),
-                    "apos" => Some('\''),
-                    // Numeric entities
-                    _ if entity.starts_with('#') => {
-                        let num = &entity[1..];
-                        if let Ok(code) = num.parse::<u32>() {
-                            char::from_u32(code)
-                        } else if let Ok(code) = num.parse::<u32>() {
-                            char::from_u32(code)
-                        } else {
-                            None
-                        }
+        if bytes[i] == b'&'
+            && let Some(end) = bytes[i..].iter().position(|&b| b == b';')
+        {
+            let entity = &text[i + 1..i + end];
+            let ch = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                // Numeric entities
+                _ if entity.starts_with('#') => {
+                    let num = &entity[1..];
+                    if let Ok(code) = num.parse::<u32>() {
+                        char::from_u32(code)
+                    } else if let Ok(code) = num.parse::<u32>() {
+                        char::from_u32(code)
+                    } else {
+                        None
                     }
-                    _ => None,
-                };
-                if let Some(c) = ch {
-                    result.push(c);
-                    i += end + 1; // skip past closing ;
-                    continue;
                 }
+                _ => None,
+            };
+            if let Some(c) = ch {
+                result.push(c);
+                i += end + 1; // skip past closing ;
+                continue;
             }
         }
         result.push(bytes[i] as char);

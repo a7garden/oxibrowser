@@ -15,9 +15,9 @@ use crate::event::BrowserEvent;
 use crate::js;
 use crate::session::Session;
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 /// Clone-able, `&self`-only interactive tab for agent use.
@@ -453,14 +453,14 @@ impl Tab {
             }})()"#,
         );
         let value = self.eval_js_checked(js).await?;
-        if let Value::Object(map) = value {
-            if map.get("found").and_then(|v| v.as_bool()) == Some(true) {
-                let attr_val = map
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                return Ok(attr_val);
-            }
+        if let Value::Object(map) = value
+            && map.get("found").and_then(|v| v.as_bool()) == Some(true)
+        {
+            let attr_val = map
+                .get("value")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Ok(attr_val);
         }
         Err(CoreError::DomError(format!(
             "query_attr: no element matching '{selector}'"
@@ -535,10 +535,10 @@ impl Tab {
         loop {
             {
                 let session = self.inner.lock().await;
-                if let Some(page) = session.page() {
-                    if page.root_frame().query_selector(selector).is_some() {
-                        return Ok(());
-                    }
+                if let Some(page) = session.page()
+                    && page.root_frame().query_selector(selector).is_some()
+                {
+                    return Ok(());
                 }
             }
             // release the lock before sleeping
@@ -594,10 +594,10 @@ impl Tab {
     pub async fn close(&self) -> Result<()> {
         let mut session = self.inner.lock().await;
         let result = session.close().await;
-        if result.is_ok() {
-            if let Some(ref counter) = self.tab_count {
-                counter.fetch_sub(1, Ordering::Relaxed);
-            }
+        if result.is_ok()
+            && let Some(ref counter) = self.tab_count
+        {
+            counter.fetch_sub(1, Ordering::Relaxed);
         }
         result
     }
@@ -724,8 +724,8 @@ mod tests {
     use super::*;
     use crate::browser::BrowserId;
     use crate::config::BrowserConfig;
-    use crate::network::cookie::CookieJar;
     use crate::network::HttpClient;
+    use crate::network::cookie::CookieJar;
     use crate::page::Page;
     use parking_lot::RwLock;
 

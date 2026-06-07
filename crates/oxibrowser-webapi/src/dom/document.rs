@@ -8,7 +8,7 @@ use crate::dom::tree::Tree;
 use html5ever::interface::tree_builder::{ElementFlags, NodeOrText, TreeSink};
 use html5ever::tendril::StrTendril;
 use html5ever::tendril::TendrilSink;
-use html5ever::{namespace_url, ns, parse_document, Attribute, QualName};
+use html5ever::{Attribute, QualName, namespace_url, ns, parse_document};
 use markup5ever::interface::ExpandedName;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -86,11 +86,11 @@ impl Document {
             return;
         }
 
-        if let Some(_node) = self.nodes.get(&current) {
-            if self.node_matches_selector(current, selector) {
-                *result = Some(current);
-                return;
-            }
+        if let Some(_node) = self.nodes.get(&current)
+            && self.node_matches_selector(current, selector)
+        {
+            *result = Some(current);
+            return;
         }
 
         for &child in self.tree.children(current) {
@@ -152,16 +152,14 @@ impl Document {
                 if idx == 0 {
                     return true;
                 }
-                if let Some(ancestor) = self.nodes.get(&ancestor_id) {
-                    if let NodeType::Element {
+                if let Some(ancestor) = self.nodes.get(&ancestor_id)
+                    && let NodeType::Element {
                         tag: a_tag,
                         attributes: a_attrs,
                     } = &ancestor.node_type
-                    {
-                        if self.matches_simple(a_tag, a_attrs, ancestor_parts[idx - 1]) {
-                            idx -= 1;
-                        }
-                    }
+                    && self.matches_simple(a_tag, a_attrs, ancestor_parts[idx - 1])
+                {
+                    idx -= 1;
                 }
                 current = self.tree.parent(ancestor_id);
             }
@@ -179,25 +177,24 @@ impl Document {
         }
 
         // Check for attribute selector: "a[href]" or "[href]"
-        if let Some(bracket_start) = selector.find('[') {
-            if let Some(bracket_end) = selector.find(']') {
-                if bracket_start < bracket_end {
-                    let tag_part = &selector[..bracket_start];
-                    let attr_part = &selector[bracket_start + 1..bracket_end];
+        if let Some(bracket_start) = selector.find('[')
+            && let Some(bracket_end) = selector.find(']')
+            && bracket_start < bracket_end
+        {
+            let tag_part = &selector[..bracket_start];
+            let attr_part = &selector[bracket_start + 1..bracket_end];
 
-                    if !tag_part.is_empty() && !tag.eq_ignore_ascii_case(tag_part) {
-                        return false;
-                    }
-
-                    return if let Some(eq_pos) = attr_part.find('=') {
-                        let attr_name = &attr_part[..eq_pos];
-                        let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
-                        attributes.iter().any(|(k, v)| k == attr_name && v == val)
-                    } else {
-                        attributes.iter().any(|(k, _)| k == attr_part)
-                    };
-                }
+            if !tag_part.is_empty() && !tag.eq_ignore_ascii_case(tag_part) {
+                return false;
             }
+
+            return if let Some(eq_pos) = attr_part.find('=') {
+                let attr_name = &attr_part[..eq_pos];
+                let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
+                attributes.iter().any(|(k, v)| k == attr_name && v == val)
+            } else {
+                attributes.iter().any(|(k, _)| k == attr_part)
+            };
         }
 
         // ID selector: #foo
@@ -257,11 +254,7 @@ impl Document {
         let node_id = self.query_selector(selector)?;
         let mut text = String::new();
         self.collect_text_with_separators(node_id, &mut text);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 
     /// Recursively collect all text, skipping invisible elements.
@@ -329,16 +322,15 @@ impl Document {
         for (i, &child) in children.iter().enumerate() {
             // Recurse: block elements preserve internal structure;
             // non-block elements are flattened into surrounding text
-            if let Some(n) = self.nodes.get(&child) {
-                if let NodeType::Element { tag, .. } = &n.node_type {
-                    if block_tags.contains(&tag.to_lowercase().as_str()) {
-                        if i > 0 {
-                            text.push_str("\n\n");
-                        }
-                        self.collect_text_with_separators(child, text);
-                        continue;
-                    }
+            if let Some(n) = self.nodes.get(&child)
+                && let NodeType::Element { tag, .. } = &n.node_type
+                && block_tags.contains(&tag.to_lowercase().as_str())
+            {
+                if i > 0 {
+                    text.push_str("\n\n");
                 }
+                self.collect_text_with_separators(child, text);
+                continue;
             }
             self.collect_all_text(child, text);
         }
@@ -348,11 +340,7 @@ impl Document {
     pub fn text_content(&self, node_id: NodeId) -> Option<String> {
         let mut text = String::new();
         self.collect_all_text(node_id, &mut text);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 
     /// Extract all sub-resource URLs from the document.
@@ -368,69 +356,68 @@ impl Document {
     }
 
     fn extract_resources_recursive(&self, node_id: NodeId, urls: &mut Vec<ResourceUrl>) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            if let NodeType::Element {
+        if let Some(node) = self.nodes.get(&node_id)
+            && let NodeType::Element {
                 tag, attributes, ..
             } = &node.node_type
-            {
-                let tag_lower = tag.to_lowercase();
-                match tag_lower.as_str() {
-                    "script" => {
-                        if let Some(src) = attributes
-                            .iter()
-                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
-                        {
+        {
+            let tag_lower = tag.to_lowercase();
+            match tag_lower.as_str() {
+                "script" => {
+                    if let Some(src) = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                    {
+                        urls.push(ResourceUrl {
+                            url: src.to_string(),
+                            kind: ResourceKind::Script,
+                        });
+                    }
+                }
+                "link" => {
+                    let rel = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "rel").then_some(v.as_str()));
+                    let href = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "href").then_some(v.as_str()));
+                    if let (Some(rel), Some(href)) = (rel, href) {
+                        if rel.contains("stylesheet") {
                             urls.push(ResourceUrl {
-                                url: src.to_string(),
-                                kind: ResourceKind::Script,
+                                url: href.to_string(),
+                                kind: ResourceKind::Stylesheet,
                             });
-                        }
-                    }
-                    "link" => {
-                        let rel = attributes
-                            .iter()
-                            .find_map(|(k, v)| (k == "rel").then_some(v.as_str()));
-                        let href = attributes
-                            .iter()
-                            .find_map(|(k, v)| (k == "href").then_some(v.as_str()));
-                        if let (Some(rel), Some(href)) = (rel, href) {
-                            if rel.contains("stylesheet") {
-                                urls.push(ResourceUrl {
-                                    url: href.to_string(),
-                                    kind: ResourceKind::Stylesheet,
-                                });
-                            } else if rel.contains("icon") {
-                                urls.push(ResourceUrl {
-                                    url: href.to_string(),
-                                    kind: ResourceKind::Image,
-                                });
-                            }
-                        }
-                    }
-                    "img" => {
-                        if let Some(src) = attributes
-                            .iter()
-                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
-                        {
+                        } else if rel.contains("icon") {
                             urls.push(ResourceUrl {
-                                url: src.to_string(),
+                                url: href.to_string(),
                                 kind: ResourceKind::Image,
                             });
                         }
                     }
-                    "iframe" => {
-                        if let Some(src) = attributes
-                            .iter()
-                            .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
-                        {
-                            urls.push(ResourceUrl {
-                                url: src.to_string(),
-                                kind: ResourceKind::Iframe,
-                            });
-                        }
-                    }
-                    _ => {}
                 }
+                "img" => {
+                    if let Some(src) = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                    {
+                        urls.push(ResourceUrl {
+                            url: src.to_string(),
+                            kind: ResourceKind::Image,
+                        });
+                    }
+                }
+                "iframe" => {
+                    if let Some(src) = attributes
+                        .iter()
+                        .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+                    {
+                        urls.push(ResourceUrl {
+                            url: src.to_string(),
+                            kind: ResourceKind::Iframe,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         for &child in self.tree.children(node_id) {
@@ -663,20 +650,16 @@ impl Document {
     }
 
     fn extract_iframe_srcs_recursive(&self, node_id: NodeId, results: &mut Vec<(String, NodeId)>) {
-        if let Some(node) = self.nodes.get(&node_id) {
-            if let NodeType::Element {
+        if let Some(node) = self.nodes.get(&node_id)
+            && let NodeType::Element {
                 tag, attributes, ..
             } = &node.node_type
-            {
-                if tag.eq_ignore_ascii_case("iframe") {
-                    if let Some(src) = attributes
-                        .iter()
-                        .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
-                    {
-                        results.push((src.to_string(), node_id));
-                    }
-                }
-            }
+            && tag.eq_ignore_ascii_case("iframe")
+            && let Some(src) = attributes
+                .iter()
+                .find_map(|(k, v)| (k == "src").then_some(v.as_str()))
+        {
+            results.push((src.to_string(), node_id));
         }
         for &child in self.tree.children(node_id) {
             self.extract_iframe_srcs_recursive(child, results);
@@ -951,10 +934,10 @@ impl TreeSink for DomSink {
     fn remove_from_parent(&self, target: &Self::Handle) {
         let child = *target;
         let old_parent = self.tree.borrow().parent(child);
-        if let Some(old_parent) = old_parent {
-            if let Some(c) = self.tree.borrow_mut().children_mut(old_parent) {
-                c.retain(|&id| id != child);
-            }
+        if let Some(old_parent) = old_parent
+            && let Some(c) = self.tree.borrow_mut().children_mut(old_parent)
+        {
+            c.retain(|&id| id != child);
         }
         self.tree.borrow_mut().remove_parent(child);
     }
@@ -968,13 +951,13 @@ impl TreeSink for DomSink {
 
     fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<Attribute>) {
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(node) = nodes.get_mut(target) {
-            if let NodeType::Element { attributes, .. } = &mut node.node_type {
-                for attr in attrs {
-                    let name = attr.name.local.to_string();
-                    if !attributes.iter().any(|(k, _)| k == &name) {
-                        attributes.push((name, attr.value.to_string()));
-                    }
+        if let Some(node) = nodes.get_mut(target)
+            && let NodeType::Element { attributes, .. } = &mut node.node_type
+        {
+            for attr in attrs {
+                let name = attr.name.local.to_string();
+                if !attributes.iter().any(|(k, _)| k == &name) {
+                    attributes.push((name, attr.value.to_string()));
                 }
             }
         }
@@ -1104,10 +1087,10 @@ mod tests {
         let root = doc.root().expect("document should have a root");
         let mut visited = Vec::new();
         doc.tree().traverse_dfs(root, &mut |id| {
-            if let Some(node) = doc.get_node(id) {
-                if let Some(tag) = node.tag_name() {
-                    visited.push(tag.to_string());
-                }
+            if let Some(node) = doc.get_node(id)
+                && let Some(tag) = node.tag_name()
+            {
+                visited.push(tag.to_string());
             }
         });
         // DFS: html comes before head/body, head before title, body before p's

@@ -132,7 +132,7 @@ impl Node {
     /// mutation would require tree surgery, which we defer).
     pub fn set_text_content(&mut self, text: &str) {
         match &mut self.node_type {
-            NodeType::Text(ref mut t) => {
+            NodeType::Text(t) => {
                 *t = text.to_string();
             }
             NodeType::Element { attributes, .. } => {

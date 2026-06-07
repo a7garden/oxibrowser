@@ -522,35 +522,36 @@ fn require_tab_id<'a>(args: &'a [&str], usage: &str) -> Result<(Vec<&'a str>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_parse_new() {
         let cmd = parse_session_command("new").unwrap();
-        assert!(matches!(cmd, SessionCommand::New));
+        assert_matches!(cmd, SessionCommand::New);
     }
 
     #[test]
     fn test_parse_exit() {
         let cmd = parse_session_command("exit").unwrap();
-        assert!(matches!(cmd, SessionCommand::Exit));
+        assert_matches!(cmd, SessionCommand::Exit);
     }
 
     #[test]
     fn test_parse_quit() {
         let cmd = parse_session_command("quit").unwrap();
-        assert!(matches!(cmd, SessionCommand::Exit));
+        assert_matches!(cmd, SessionCommand::Exit);
     }
 
     #[test]
     fn test_parse_list() {
         let cmd = parse_session_command("list").unwrap();
-        assert!(matches!(cmd, SessionCommand::List));
+        assert_matches!(cmd, SessionCommand::List);
     }
 
     #[test]
     fn test_parse_help() {
         let cmd = parse_session_command("help").unwrap();
-        assert!(matches!(cmd, SessionCommand::Help));
+        assert_matches!(cmd, SessionCommand::Help);
     }
 
     #[test]
@@ -617,26 +618,26 @@ mod tests {
     #[test]
     fn test_parse_back() {
         let cmd = parse_session_command("back t1").unwrap();
-        assert!(matches!(cmd, SessionCommand::Back { tab_id } if tab_id == "t1"));
+        assert_matches!(cmd, SessionCommand::Back { tab_id } if tab_id == "t1");
     }
 
     #[test]
     fn test_parse_forward() {
         let cmd = parse_session_command("forward t1").unwrap();
-        assert!(matches!(cmd, SessionCommand::Forward { tab_id } if tab_id == "t1"));
+        assert_matches!(cmd, SessionCommand::Forward { tab_id } if tab_id == "t1");
     }
 
     #[test]
     fn test_parse_reload() {
         let cmd = parse_session_command("reload t1").unwrap();
-        assert!(matches!(cmd, SessionCommand::Reload { tab_id } if tab_id == "t1"));
+        assert_matches!(cmd, SessionCommand::Reload { tab_id } if tab_id == "t1");
     }
 
     #[test]
     fn test_parse_click() {
         let cmd = parse_session_command("click t1 button.submit").unwrap();
-        assert!(matches!(cmd, SessionCommand::Click { tab_id, selector }
-            if tab_id == "t1" && selector == "button.submit"));
+        assert_matches!(cmd, SessionCommand::Click { tab_id, selector }
+            if tab_id == "t1" && selector == "button.submit");
     }
 
     #[test]
@@ -659,8 +660,8 @@ mod tests {
     #[test]
     fn test_parse_press() {
         let cmd = parse_session_command("press t1 Enter").unwrap();
-        assert!(matches!(cmd, SessionCommand::Press { tab_id, key }
-            if tab_id == "t1" && key == "Enter"));
+        assert_matches!(cmd, SessionCommand::Press { tab_id, key }
+            if tab_id == "t1" && key == "Enter");
     }
 
     #[test]
@@ -700,22 +701,22 @@ mod tests {
     #[test]
     fn test_parse_check() {
         let cmd = parse_session_command("check t1 input#agree").unwrap();
-        assert!(matches!(cmd, SessionCommand::Check { tab_id, selector }
-            if tab_id == "t1" && selector == "input#agree"));
+        assert_matches!(cmd, SessionCommand::Check { tab_id, selector }
+            if tab_id == "t1" && selector == "input#agree");
     }
 
     #[test]
     fn test_parse_uncheck() {
         let cmd = parse_session_command("uncheck t1 input#agree").unwrap();
-        assert!(matches!(cmd, SessionCommand::Uncheck { tab_id, selector }
-            if tab_id == "t1" && selector == "input#agree"));
+        assert_matches!(cmd, SessionCommand::Uncheck { tab_id, selector }
+            if tab_id == "t1" && selector == "input#agree");
     }
 
     #[test]
     fn test_parse_scroll() {
         let cmd = parse_session_command("scroll t1 0 500").unwrap();
-        assert!(matches!(cmd, SessionCommand::Scroll { tab_id, dx, dy }
-            if tab_id == "t1" && dx == 0.0 && dy == 500.0));
+        assert_matches!(cmd, SessionCommand::Scroll { tab_id, dx, dy }
+            if tab_id == "t1" && dx == 0.0 && dy == 500.0);
     }
 
     #[test]
@@ -828,13 +829,13 @@ mod tests {
     #[test]
     fn test_parse_close() {
         let cmd = parse_session_command("close t1").unwrap();
-        assert!(matches!(cmd, SessionCommand::Close { tab_id } if tab_id == "t1"));
+        assert_matches!(cmd, SessionCommand::Close { tab_id } if tab_id == "t1");
     }
 
     #[test]
     fn test_parse_close_all() {
         let cmd = parse_session_command("close --all").unwrap();
-        assert!(matches!(cmd, SessionCommand::CloseAll));
+        assert_matches!(cmd, SessionCommand::CloseAll);
     }
 
     #[test]

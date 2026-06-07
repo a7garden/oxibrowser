@@ -20,12 +20,12 @@ use hyper_util::rt::TokioIo;
 use oxibrowser_core::Browser;
 use sha1::{Digest, Sha1};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::{error, info, warn};
 
 /// Type alias for HTTP response body.

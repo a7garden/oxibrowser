@@ -40,12 +40,11 @@ impl Tree {
     /// old parent's children list first (reparenting).
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
         // Remove from old parent if reparenting
-        if let Some(old_parent) = self.parents.get(&child).copied() {
-            if old_parent != parent {
-                if let Some(children) = self.children.get_mut(&old_parent) {
-                    children.retain(|&c| c != child);
-                }
-            }
+        if let Some(old_parent) = self.parents.get(&child).copied()
+            && old_parent != parent
+            && let Some(children) = self.children.get_mut(&old_parent)
+        {
+            children.retain(|&c| c != child);
         }
         self.parents.insert(child, parent);
         self.children.entry(parent).or_default().push(child);

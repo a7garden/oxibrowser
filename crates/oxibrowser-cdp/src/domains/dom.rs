@@ -6,7 +6,7 @@
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
 use oxibrowser_webapi::dom::{NodeId, NodeType};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Dispatch DOM domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
@@ -44,7 +44,7 @@ async fn get_document(ctx: &DispatchContext) -> DomainResult {
                             "nodeValue": "",
                             "childNodeCount": 0
                         }
-                    })))
+                    })));
                 }
             };
             Ok(Some(json!({
@@ -271,10 +271,10 @@ fn build_cdp_node(
             .children(node_id)
             .iter()
             .filter(|&&child_id| {
-                if let Some(child_node) = document.get_node(child_id) {
-                    if let NodeType::Text(t) = &child_node.node_type {
-                        return !t.trim().is_empty();
-                    }
+                if let Some(child_node) = document.get_node(child_id)
+                    && let NodeType::Text(t) = &child_node.node_type
+                {
+                    return !t.trim().is_empty();
                 }
                 true
             })

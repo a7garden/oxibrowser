@@ -7,9 +7,9 @@
 use crate::domains::fetch::FetchPattern;
 use crate::protocol::CdpEvent;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 

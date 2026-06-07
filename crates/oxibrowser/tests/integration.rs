@@ -5,8 +5,8 @@
 //!
 //! Note: assertions are intentionally lenient since external sites may change.
 
-use oxibrowser_core::config::BrowserConfig;
 use oxibrowser_core::Browser;
+use oxibrowser_core::config::BrowserConfig;
 
 #[tokio::test]
 #[ignore]
@@ -38,10 +38,10 @@ async fn test_extract_links_from_example() {
     // Verify at least some links have href attributes
     let mut href_count = 0;
     for link_id in &links {
-        if let Some(node) = doc.get_node(*link_id) {
-            if let Some(_href) = node.href() {
-                href_count += 1;
-            }
+        if let Some(node) = doc.get_node(*link_id)
+            && let Some(_href) = node.href()
+        {
+            href_count += 1;
         }
     }
     assert!(href_count > 0, "should have at least one link with href");

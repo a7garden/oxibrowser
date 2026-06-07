@@ -27,10 +27,12 @@ fn test_fetch_markdown() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let resp: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(resp["ok"], true);
-    assert!(resp["data"]["markdown"]
-        .as_str()
-        .unwrap()
-        .contains("Example Domain"));
+    assert!(
+        resp["data"]["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Example Domain")
+    );
     assert_eq!(resp["data"]["status"], 200);
     assert!(resp["meta"]["elapsed_ms"].as_u64().unwrap() > 0);
 }
@@ -271,10 +273,12 @@ fn test_session_basic() {
     // content response
     let resp: serde_json::Value = serde_json::from_str(lines[2]).expect("content JSON");
     assert_eq!(resp["ok"], true);
-    assert!(resp["data"]["markdown"]
-        .as_str()
-        .unwrap_or("")
-        .contains("Example Domain"));
+    assert!(
+        resp["data"]["markdown"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Example Domain")
+    );
 
     // list response
     let resp: serde_json::Value = serde_json::from_str(lines[3]).expect("list JSON");

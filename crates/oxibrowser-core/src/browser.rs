@@ -6,13 +6,13 @@ use crate::browse_result::BrowseResult;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::event::BrowserEvent;
-use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
+use crate::network::cookie::CookieJar;
 use crate::session::Session;
 use crate::tab::Tab;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -307,14 +307,12 @@ impl Browser {
     /// so that the session slot is freed for new connections.
     pub fn cleanup_closed_sessions(&self) {
         let mut sessions = self.sessions.write();
-        let before = sessions.len();
-        sessions.retain(|s| {
-            match s.try_read() {
-                Ok(guard) => !guard.is_closed(),
-                Err(_) => true, // locked — keep it for now
-            }
-        });
-        let removed = before - sessions.len();
+        let removed = sessions
+            .extract_if(.., |s| match s.try_read() {
+                Ok(guard) => guard.is_closed(),
+                Err(_) => false, // locked — keep it for now
+            })
+            .count();
         if removed > 0 {
             info!(
                 removed,

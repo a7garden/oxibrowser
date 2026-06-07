@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo bench
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use oxibrowser_webapi::Document;
 
 fn bench_html_parsing(c: &mut Criterion) {

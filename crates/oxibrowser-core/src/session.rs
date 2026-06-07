@@ -6,18 +6,18 @@
 use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
+use crate::js::JsRuntime;
 use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
 use crate::js::runtime::JsRuntimeConfig;
 use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
-use crate::js::JsRuntime;
-use crate::network::cookie::CookieJar;
 use crate::network::HttpClient;
+use crate::network::cookie::CookieJar;
 use crate::page::Page;
 use parking_lot::RwLock;
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tracing::info;
 use url::Url;
 
@@ -748,10 +748,10 @@ impl Session {
         let duration = std::time::Duration::from_millis(timeout_ms);
 
         loop {
-            if let Some(page) = &self.active_page {
-                if page.root_frame().query_selector(selector).is_some() {
-                    return Ok(());
-                }
+            if let Some(page) = &self.active_page
+                && page.root_frame().query_selector(selector).is_some()
+            {
+                return Ok(());
             }
 
             if start.elapsed() >= duration {

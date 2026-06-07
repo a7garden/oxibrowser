@@ -8,7 +8,7 @@
 
 use crate::domains;
 use crate::domains::DispatchContext;
-use crate::event::{event_channel, EventReceiver, EventSender};
+use crate::event::{EventReceiver, EventSender, event_channel};
 use crate::protocol::{CdpEvent, CdpRequest, CdpResponse};
 use crate::server::MAX_CDP_MESSAGE_SIZE;
 use futures::{SinkExt, StreamExt};

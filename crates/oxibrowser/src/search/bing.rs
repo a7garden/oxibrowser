@@ -7,7 +7,7 @@
 //! On CAPTCHA → transparent fallback to DuckDuckGo (no error propagated to caller).
 
 use super::ddg::DuckDuckGoEngine;
-use super::engine::{decode_html_entities, url_encode, SearchEngine, SearchError, SearchResult};
+use super::engine::{SearchEngine, SearchError, SearchResult, decode_html_entities, url_encode};
 
 pub struct BingEngine {
     client: reqwest::Client,

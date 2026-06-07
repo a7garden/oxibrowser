@@ -43,14 +43,10 @@ impl TokioJobQueue {
     /// Pop all timers whose deadline has passed.
     pub fn pop_due_timers(&self) -> Vec<TimerEntry> {
         let now = Instant::now();
-        let mut timers = self.timers.borrow_mut();
-        let due: Vec<TimerEntry> = timers
-            .iter()
-            .filter(|t| t.deadline <= now)
-            .cloned()
-            .collect();
-        timers.retain(|t| t.deadline > now);
-        due
+        self.timers
+            .borrow_mut()
+            .extract_if(.., |t| t.deadline <= now)
+            .collect()
     }
 
     /// Schedule a new timer. Returns the timer ID.

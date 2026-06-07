@@ -8,8 +8,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.14.1"
-edition = "2021"
+version = "0.15.0"
+edition = "2024"
 license = "MIT"
 authors = ["Oxios Team"]
 repository = "https://github.com/a7garden/oxibrowser"
@@ -17,7 +17,7 @@ homepage = "https://github.com/a7garden/oxibrowser"
 readme = "README.md"
 keywords = ["browser", "headless", "cdp", "automation", "dom"]
 categories = ["web-programming", "parser-implementations"]
-rust-version = "1.82"
+rust-version = "1.96"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

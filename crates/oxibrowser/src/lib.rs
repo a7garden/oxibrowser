@@ -4,9 +4,9 @@
 
 pub mod search;
 
-pub use oxibrowser_core::error::Result;
 pub use oxibrowser_core::Browser;
 pub use oxibrowser_core::BrowserConfig;
+pub use oxibrowser_core::error::Result;
 
 // Convenience re-exports for search types.
 pub use search::engine::{GitHubExtra, SearchEngine, SearchError, SearchOutput, SearchResult};

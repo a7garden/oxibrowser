@@ -169,10 +169,10 @@ fn render_node(snapshot: &DomSnapshot, node: &DomNode, output: &mut String, dept
 pub fn render_to_markdown(snapshot: &DomSnapshot) -> String {
     let mut output = String::new();
 
-    if let Some(body_id) = snapshot.body_id {
-        if let Some(body) = snapshot.nodes.get(&body_id) {
-            render_markdown_node(snapshot, body, &mut output);
-        }
+    if let Some(body_id) = snapshot.body_id
+        && let Some(body) = snapshot.nodes.get(&body_id)
+    {
+        render_markdown_node(snapshot, body, &mut output);
     }
 
     output.trim().to_string()

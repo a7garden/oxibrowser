@@ -8,7 +8,7 @@
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Dispatch Target domain methods.
 pub fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {

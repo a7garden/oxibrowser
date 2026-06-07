@@ -12,7 +12,7 @@ pub mod wiki;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use engine::{build_search_client, SearchEngine, SearchError, SearchOutput, SearchResult};
+use engine::{SearchEngine, SearchError, SearchOutput, SearchResult, build_search_client};
 
 // ---------------------------------------------------------------------------
 // WebEngine enum — concrete dispatch without trait objects

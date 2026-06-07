@@ -15,7 +15,7 @@ use crate::domains::{DispatchContext, DomainResult};
 use crate::event::EventSender;
 use crate::protocol::CdpError;
 use oxibrowser_core::network::InterceptAction;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Dispatch Fetch domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
@@ -53,12 +53,12 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
 fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let mut patterns = Vec::new();
 
-    if let Some(p) = params {
-        if let Some(arr) = p.get("patterns").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(p) = parse_fetch_pattern(item) {
-                    patterns.push(p);
-                }
+    if let Some(p) = params
+        && let Some(arr) = p.get("patterns").and_then(|v| v.as_array())
+    {
+        for item in arr {
+            if let Some(p) = parse_fetch_pattern(item) {
+                patterns.push(p);
             }
         }
     }

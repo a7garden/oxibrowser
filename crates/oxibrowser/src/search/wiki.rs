@@ -7,7 +7,7 @@
 //! ["query", ["title1", "title2"], ["url1", "url2"], ["snippet1", "snippet2"]]
 //! ```
 
-use super::engine::{decode_html_entities, url_encode, SearchEngine, SearchError, SearchResult};
+use super::engine::{SearchEngine, SearchError, SearchResult, decode_html_entities, url_encode};
 
 pub struct WikipediaEngine {
     client: reqwest::Client,

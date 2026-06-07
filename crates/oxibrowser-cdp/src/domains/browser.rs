@@ -4,7 +4,7 @@
 
 use crate::domains::DomainResult;
 use crate::protocol::CdpError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Dispatch Browser domain methods.
 pub fn handle(method: &str, _params: Option<Value>) -> DomainResult {

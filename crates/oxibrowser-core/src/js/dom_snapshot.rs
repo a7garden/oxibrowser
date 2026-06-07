@@ -225,12 +225,11 @@ impl DomSnapshot {
         let mut stack = vec![self.root_id];
         while let Some(id) = stack.pop() {
             if let Some(node) = self.nodes.get(&id) {
-                if node.node_type == 1 {
-                    if let Some(cls) = node.attributes.get("class") {
-                        if cls.split_whitespace().any(|c| c == class) {
-                            results.push(id);
-                        }
-                    }
+                if node.node_type == 1
+                    && let Some(cls) = node.attributes.get("class")
+                    && cls.split_whitespace().any(|c| c == class)
+                {
+                    results.push(id);
                 }
                 for &child in node.children.iter().rev() {
                     stack.push(child);
@@ -414,28 +413,27 @@ impl DomSnapshot {
         }
 
         // Check for attribute selector: "a[href]" or "[href]"
-        if let Some(bracket_start) = selector.find('[') {
-            if let Some(bracket_end) = selector.find(']') {
-                if bracket_start < bracket_end {
-                    let tag_part = &selector[..bracket_start];
-                    let attr_part = &selector[bracket_start + 1..bracket_end];
+        if let Some(bracket_start) = selector.find('[')
+            && let Some(bracket_end) = selector.find(']')
+            && bracket_start < bracket_end
+        {
+            let tag_part = &selector[..bracket_start];
+            let attr_part = &selector[bracket_start + 1..bracket_end];
 
-                    // Check tag part matches (if any)
-                    if !tag_part.is_empty() && !node.tag.eq_ignore_ascii_case(tag_part) {
-                        return false;
-                    }
-
-                    // Check attribute: "href" or "href=value" or "href='value'"
-                    return if let Some(eq_pos) = attr_part.find('=') {
-                        let attr_name = &attr_part[..eq_pos];
-                        let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
-                        let has_attr = node.attributes.contains_key(attr_name);
-                        has_attr && node.attributes.get(attr_name).map(|s| s.as_str()) == Some(val)
-                    } else {
-                        node.attributes.contains_key(attr_part)
-                    };
-                }
+            // Check tag part matches (if any)
+            if !tag_part.is_empty() && !node.tag.eq_ignore_ascii_case(tag_part) {
+                return false;
             }
+
+            // Check attribute: "href" or "href=value" or "href='value'"
+            return if let Some(eq_pos) = attr_part.find('=') {
+                let attr_name = &attr_part[..eq_pos];
+                let val = attr_part[eq_pos + 1..].trim_matches('\'').trim_matches('"');
+                let has_attr = node.attributes.contains_key(attr_name);
+                has_attr && node.attributes.get(attr_name).map(|s| s.as_str()) == Some(val)
+            } else {
+                node.attributes.contains_key(attr_part)
+            };
         }
 
         // ID selector: #foo
@@ -548,10 +546,10 @@ fn collect_nodes(
         // Collect text content from direct text children
         let mut text_content = collect_text_content(node_id, doc, tree);
         // For elements with data-oxi-text (set by textContent setter), prefer that
-        if text_content.is_empty() {
-            if let Some(v) = node.get_attribute("data-oxi-text") {
-                text_content = v.to_string();
-            }
+        if text_content.is_empty()
+            && let Some(v) = node.get_attribute("data-oxi-text")
+        {
+            text_content = v.to_string();
         }
 
         let children: Vec<u32> = tree.children(node_id).iter().map(|c| c.0 as u32).collect();
@@ -594,10 +592,10 @@ fn collect_text_recursive(
     text: &mut String,
 ) {
     use oxibrowser_webapi::dom::NodeType;
-    if let Some(node) = doc.get_node(node_id) {
-        if let NodeType::Text(t) = &node.node_type {
-            text.push_str(t);
-        }
+    if let Some(node) = doc.get_node(node_id)
+        && let NodeType::Text(t) = &node.node_type
+    {
+        text.push_str(t);
     }
     for &child in tree.children(node_id) {
         collect_text_recursive(child, doc, tree, text);

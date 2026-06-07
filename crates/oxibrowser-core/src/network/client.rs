@@ -84,13 +84,13 @@ impl HttpClient {
 
     /// Check if a URL's resolved IP is allowed by the SSRF filter.
     fn check_ssrf(&self, url: &Url) -> Result<()> {
-        if !check_url_ssrf(url, &self.ip_filter) {
-            if let Some(host) = url.host_str() {
-                return Err(CoreError::NetworkError(format!(
-                    "SSRF blocked: hostname {} resolves to a blocked IP address",
-                    host
-                )));
-            }
+        if !check_url_ssrf(url, &self.ip_filter)
+            && let Some(host) = url.host_str()
+        {
+            return Err(CoreError::NetworkError(format!(
+                "SSRF blocked: hostname {} resolves to a blocked IP address",
+                host
+            )));
         }
         Ok(())
     }

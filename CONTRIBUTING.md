@@ -26,7 +26,7 @@ git checkout -b feat/my-feature
 
 ## Development Requirements
 
-- **Rust** 1.82+ (`rustup update stable`)
+- **Rust** 1.96+ (`rustup update stable`)
 - **Git**
 - **Internet access** (for integration tests)
 
@@ -52,7 +52,7 @@ All code, comments, documentation, and commit messages must be in **English**.
 
 ### Rust Style
 
-- Edition 2021, MSRV 1.82
+- Edition 2024, MSRV 1.96
 - Error handling: `thiserror` for library crates, `anyhow` for binary
 - Async: `tokio` throughout
 - Sync locks: `parking_lot::RwLock`

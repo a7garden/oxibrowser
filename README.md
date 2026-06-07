@@ -15,7 +15,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 [![GitHub release](https://img.shields.io/github/v/release/a7garden/oxibrowser?style=flat-square&include_prereleases&label=release)](https://github.com/a7garden/oxibrowser/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/a7garden/oxibrowser?style=flat-square&logo=github)](https://github.com/a7garden/oxibrowser/stargazers)
-[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
 [Report Bug](https://github.com/a7garden/oxibrowser/issues) · [Request Feature](https://github.com/a7garden/oxibrowser/issues) · [Read the Docs](https://github.com/a7garden/oxibrowser/blob/main/docs/ARCHITECTURE.md) · [Discord](https://discord.gg/oxibrowser)
 

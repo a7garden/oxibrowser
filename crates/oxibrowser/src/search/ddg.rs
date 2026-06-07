@@ -7,7 +7,7 @@
 //! The lite HTML response is a simple table with `<tr class="result">` rows.
 //! If the lite page returns zero results, we fall through to the JSON API.
 
-use super::engine::{decode_html_entities, url_encode, SearchEngine, SearchError, SearchResult};
+use super::engine::{SearchEngine, SearchError, SearchResult, decode_html_entities, url_encode};
 
 pub struct DuckDuckGoEngine {
     client: reqwest::Client,
@@ -256,24 +256,22 @@ fn parse_ddg_instant_answer(
     let mut results = Vec::new();
 
     // Abstract result (if present)
-    if let Some(abstract_text) = obj.get("AbstractText").and_then(|v| v.as_str()) {
-        if !abstract_text.is_empty() {
-            if let Some(abstract_url) = obj.get("AbstractURL").and_then(|v| v.as_str()) {
-                if !abstract_url.is_empty() {
-                    results.push(SearchResult {
-                        title: obj
-                            .get("Heading")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        url: abstract_url.to_string(),
-                        snippet: abstract_text.to_string(),
-                        source: "DuckDuckGo".into(),
-                        extra: None,
-                    });
-                }
-            }
-        }
+    if let Some(abstract_text) = obj.get("AbstractText").and_then(|v| v.as_str())
+        && !abstract_text.is_empty()
+        && let Some(abstract_url) = obj.get("AbstractURL").and_then(|v| v.as_str())
+        && !abstract_url.is_empty()
+    {
+        results.push(SearchResult {
+            title: obj
+                .get("Heading")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            url: abstract_url.to_string(),
+            snippet: abstract_text.to_string(),
+            source: "DuckDuckGo".into(),
+            extra: None,
+        });
     }
 
     if results.len() >= max_results {

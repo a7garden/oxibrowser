@@ -33,10 +33,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
-use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
+use boa_engine::object::builtins::JsArray;
 use boa_engine::property::Attribute;
-use boa_engine::{js_string, Context, JsString, JsValue, NativeFunction, Source};
+use boa_engine::{Context, JsString, JsValue, NativeFunction, Source, js_string};
 use serde_json::Value;
 
 use crate::css::LayoutEngine;
@@ -981,44 +981,42 @@ fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
 /// Push a mutation record to all active MutationObservers.
 fn notify_mutation_observers(ctx: &mut Context, mutation_type: &str, target_id: u32) {
     let registry = ctx.global_object().get(js_string!("__moRegistry"), ctx);
-    if let Ok(reg_val) = registry {
-        if let Some(reg_obj) = reg_val.as_object() {
-            if let Ok(reg_arr) = JsArray::from_object(reg_obj.clone()) {
-                if let Ok(len) = reg_arr.length(ctx) {
-                    for i in 0..len {
-                        if let Ok(observer_val) = reg_arr.at(i as i64, ctx) {
-                            if let Some(obs_obj) = observer_val.as_object() {
-                                let observing = obs_obj
-                                    .get(js_string!("__observing"), ctx)
-                                    .ok()
-                                    .and_then(|v| v.as_boolean())
-                                    .unwrap_or(false);
-                                if observing {
-                                    // Create MutationRecord
-                                    let record = boa_engine::object::ObjectInitializer::new(ctx)
-                                        .property(
-                                            js_string!("type"),
-                                            JsValue::from(JsString::from(mutation_type)),
-                                            Attribute::all(),
-                                        )
-                                        .property(
-                                            js_string!("target"),
-                                            JsValue::from(target_id),
-                                            Attribute::all(),
-                                        )
-                                        .build();
-                                    // Push to __records
-                                    let records_val = obs_obj
-                                        .get(js_string!("__records"), ctx)
-                                        .unwrap_or(JsValue::Null);
-                                    if let Some(rec_obj) = records_val.as_object() {
-                                        if let Ok(rec_arr) = JsArray::from_object(rec_obj.clone()) {
-                                            let _ = rec_arr.push(JsValue::from(record), ctx);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+    if let Ok(reg_val) = registry
+        && let Some(reg_obj) = reg_val.as_object()
+        && let Ok(reg_arr) = JsArray::from_object(reg_obj.clone())
+        && let Ok(len) = reg_arr.length(ctx)
+    {
+        for i in 0..len {
+            if let Ok(observer_val) = reg_arr.at(i as i64, ctx)
+                && let Some(obs_obj) = observer_val.as_object()
+            {
+                let observing = obs_obj
+                    .get(js_string!("__observing"), ctx)
+                    .ok()
+                    .and_then(|v| v.as_boolean())
+                    .unwrap_or(false);
+                if observing {
+                    // Create MutationRecord
+                    let record = boa_engine::object::ObjectInitializer::new(ctx)
+                        .property(
+                            js_string!("type"),
+                            JsValue::from(JsString::from(mutation_type)),
+                            Attribute::all(),
+                        )
+                        .property(
+                            js_string!("target"),
+                            JsValue::from(target_id),
+                            Attribute::all(),
+                        )
+                        .build();
+                    // Push to __records
+                    let records_val = obs_obj
+                        .get(js_string!("__records"), ctx)
+                        .unwrap_or(JsValue::Null);
+                    if let Some(rec_obj) = records_val.as_object()
+                        && let Ok(rec_arr) = JsArray::from_object(rec_obj.clone())
+                    {
+                        let _ = rec_arr.push(JsValue::from(record), ctx);
                     }
                 }
             }
@@ -1109,12 +1107,12 @@ fn create_context(
             let delay_ms = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u64;
             let cb_args: Vec<JsValue> = args[2..].to_vec();
 
-            if let Some(func) = callback.as_object().cloned() {
-                if func.is_callable() {
-                    let deadline = Instant::now() + Duration::from_millis(delay_ms);
-                    let id = timer_queue_st.schedule_timer(deadline, func, cb_args, false, None);
-                    return Ok(JsValue::from(id as f64));
-                }
+            if let Some(func) = callback.as_object().cloned()
+                && func.is_callable()
+            {
+                let deadline = Instant::now() + Duration::from_millis(delay_ms);
+                let id = timer_queue_st.schedule_timer(deadline, func, cb_args, false, None);
+                return Ok(JsValue::from(id as f64));
             }
             Ok(JsValue::undefined())
         })
@@ -1130,18 +1128,13 @@ fn create_context(
             let delay_ms = args.get(1).and_then(|v| v.as_number()).unwrap_or(0.0) as u64;
             let cb_args: Vec<JsValue> = args[2..].to_vec();
 
-            if let Some(func) = callback.as_object().cloned() {
-                if func.is_callable() {
-                    let deadline = Instant::now() + Duration::from_millis(delay_ms);
-                    let id = timer_queue_si.schedule_timer(
-                        deadline,
-                        func,
-                        cb_args,
-                        true,
-                        Some(delay_ms),
-                    );
-                    return Ok(JsValue::from(id as f64));
-                }
+            if let Some(func) = callback.as_object().cloned()
+                && func.is_callable()
+            {
+                let deadline = Instant::now() + Duration::from_millis(delay_ms);
+                let id =
+                    timer_queue_si.schedule_timer(deadline, func, cb_args, true, Some(delay_ms));
+                return Ok(JsValue::from(id as f64));
             }
             Ok(JsValue::undefined())
         })
@@ -1187,31 +1180,31 @@ fn create_context(
             let mut body: Option<String> = None;
             let mut _timeout_ms: Option<u64> = None;
 
-            if args.len() > 1 {
-                if let Some(opts) = args[1].as_object() {
-                    // method
-                    if let Ok(m) = opts.get(js_string!("method"), ctx) {
-                        if let Some(s) = m.as_string() {
-                            method = s.to_std_string_escaped().to_uppercase();
-                        }
-                    }
-                    // headers (simplified — just extract common ones)
-                    // Full header iteration via enumerate() skipped for simplicity
-                    // since boa 0.20's JsIterator API requires careful handling
-                    // body
-                    if let Ok(b) = opts.get(js_string!("body"), ctx) {
-                        if !b.is_undefined() && !b.is_null() {
-                            if let Some(s) = b.as_string() {
-                                body = Some(s.to_std_string_escaped());
-                            }
-                        }
-                    }
-                    // timeout
-                    if let Ok(t) = opts.get(js_string!("timeout"), ctx) {
-                        if let Some(n) = t.as_number() {
-                            _timeout_ms = Some(n as u64);
-                        }
-                    }
+            if args.len() > 1
+                && let Some(opts) = args[1].as_object()
+            {
+                // method
+                if let Ok(m) = opts.get(js_string!("method"), ctx)
+                    && let Some(s) = m.as_string()
+                {
+                    method = s.to_std_string_escaped().to_uppercase();
+                }
+                // headers (simplified — just extract common ones)
+                // Full header iteration via enumerate() skipped for simplicity
+                // since boa 0.20's JsIterator API requires careful handling
+                // body
+                if let Ok(b) = opts.get(js_string!("body"), ctx)
+                    && !b.is_undefined()
+                    && !b.is_null()
+                    && let Some(s) = b.as_string()
+                {
+                    body = Some(s.to_std_string_escaped());
+                }
+                // timeout
+                if let Ok(t) = opts.get(js_string!("timeout"), ctx)
+                    && let Some(n) = t.as_number()
+                {
+                    _timeout_ms = Some(n as u64);
                 }
             }
 
@@ -1361,8 +1354,8 @@ fn create_context(
             let err_json =
                 serde_json::to_string(&err_msg).unwrap_or_else(|_| "\"fetch failed\"".to_string());
             let reject_code = format!("Promise.reject(new Error({}))", err_json);
-            let result = ctx.eval(Source::from_bytes(reject_code.trim()));
-            result
+
+            ctx.eval(Source::from_bytes(reject_code.trim()))
         })
     };
 
@@ -1504,38 +1497,26 @@ fn create_context(
 
                                     if resp.error.is_none() {
                                         // Fire onload
-                                        if let Some(ref cb) = *send_onload.read() {
-                                            if let Some(cb_obj) = cb.as_object() {
-                                                if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(
-                                                        &JsValue::undefined(),
-                                                        &[],
-                                                        ctx,
-                                                    );
-                                                }
-                                            }
+                                        if let Some(ref cb) = *send_onload.read()
+                                            && let Some(cb_obj) = cb.as_object()
+                                            && cb_obj.is_callable()
+                                        {
+                                            let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
                                         }
                                     } else {
-                                        if let Some(ref cb) = *send_onerror.read() {
-                                            if let Some(cb_obj) = cb.as_object() {
-                                                if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(
-                                                        &JsValue::undefined(),
-                                                        &[],
-                                                        ctx,
-                                                    );
-                                                }
-                                            }
+                                        if let Some(ref cb) = *send_onerror.read()
+                                            && let Some(cb_obj) = cb.as_object()
+                                            && cb_obj.is_callable()
+                                        {
+                                            let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
                                         }
                                     }
                                     // Fire onreadystatechange
-                                    if let Some(ref cb) = *send_onrsc.read() {
-                                        if let Some(cb_obj) = cb.as_object() {
-                                            if cb_obj.is_callable() {
-                                                let _ =
-                                                    cb_obj.call(&JsValue::undefined(), &[], ctx);
-                                            }
-                                        }
+                                    if let Some(ref cb) = *send_onrsc.read()
+                                        && let Some(cb_obj) = cb.as_object()
+                                        && cb_obj.is_callable()
+                                    {
+                                        let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
                                     }
                                 }
                                 Err(_) => {
@@ -1732,10 +1713,10 @@ fn create_context(
                             .global_object()
                             .get(js_string!("__moRegistry"), ctx)
                             .unwrap_or(JsValue::Null);
-                        if let Some(reg_obj) = registry.as_object() {
-                            if let Ok(reg_arr) = JsArray::from_object(reg_obj.clone()) {
-                                let _ = reg_arr.push(JsValue::from(obj.clone()), ctx);
-                            }
+                        if let Some(reg_obj) = registry.as_object()
+                            && let Ok(reg_arr) = JsArray::from_object(reg_obj.clone())
+                        {
+                            let _ = reg_arr.push(JsValue::from(obj.clone()), ctx);
                         }
                     }
                     Ok(JsValue::undefined())
@@ -1972,19 +1953,18 @@ fn create_context(
             let foreach_sp = storage_arc.clone();
             let foreach_fn = {
                 NativeFunction::from_closure(move |_this, _args, ctx| {
-                    if let Some(callback) = _args.first() {
-                        if let Some(cb_obj) = callback.as_object() {
-                            if cb_obj.is_callable() {
-                                for (key, values) in foreach_sp.borrow().iter() {
-                                    for val in values {
-                                        let cb_args = &[
-                                            JsValue::from(JsString::from(val.as_str())),
-                                            JsValue::from(JsString::from(key.as_str())),
-                                            JsValue::undefined(),
-                                        ];
-                                        let _ = cb_obj.call(&JsValue::undefined(), cb_args, ctx);
-                                    }
-                                }
+                    if let Some(callback) = _args.first()
+                        && let Some(cb_obj) = callback.as_object()
+                        && cb_obj.is_callable()
+                    {
+                        for (key, values) in foreach_sp.borrow().iter() {
+                            for val in values {
+                                let cb_args = &[
+                                    JsValue::from(JsString::from(val.as_str())),
+                                    JsValue::from(JsString::from(key.as_str())),
+                                    JsValue::undefined(),
+                                ];
+                                let _ = cb_obj.call(&JsValue::undefined(), cb_args, ctx);
                             }
                         }
                     }
@@ -2397,15 +2377,15 @@ fn create_context(
             let arr = args.first().cloned().unwrap_or(JsValue::undefined());
             if let Some(arr_obj) = arr.as_object() {
                 // Try to get length from the object (works for both JsArray and TypedArray)
-                if let Ok(len_val) = arr_obj.get(js_string!("length"), ctx) {
-                    if let Some(len) = len_val.as_number() {
-                        let arr_len = (len as usize).min(65536);
-                        let mut buf = vec![0u8; arr_len];
-                        // Use real CSPRNG instead of predictable time-based PRNG
-                        let _ = getrandom::fill(&mut buf);
-                        for (i, val) in buf.iter().enumerate().take(arr_len) {
-                            let _ = arr_obj.set(i as u32, JsValue::from(*val as i32), true, ctx);
-                        }
+                if let Ok(len_val) = arr_obj.get(js_string!("length"), ctx)
+                    && let Some(len) = len_val.as_number()
+                {
+                    let arr_len = (len as usize).min(65536);
+                    let mut buf = vec![0u8; arr_len];
+                    // Use real CSPRNG instead of predictable time-based PRNG
+                    let _ = getrandom::fill(&mut buf);
+                    for (i, val) in buf.iter().enumerate().take(arr_len) {
+                        let _ = arr_obj.set(i as u32, JsValue::from(*val as i32), true, ctx);
                     }
                 }
             }
@@ -2490,21 +2470,20 @@ fn create_context(
                 NativeFunction::from_closure(move |_this2, args2, ctx2| {
                     // Decode buffer/array back to string
                     let input = args2.first().cloned().unwrap_or(JsValue::undefined());
-                    if let Some(arr_obj) = input.as_object() {
-                        if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
-                            if let Ok(len) = arr.length(ctx2) {
-                                let mut bytes = Vec::with_capacity(len as usize);
-                                for i in 0..len {
-                                    if let Ok(v) = arr.at(i as i64, ctx2) {
-                                        if let Some(n) = v.as_number() {
-                                            bytes.push(n as u8);
-                                        }
-                                    }
-                                }
-                                let s = String::from_utf8_lossy(&bytes).to_string();
-                                return Ok(JsValue::from(JsString::from(s.as_str())));
+                    if let Some(arr_obj) = input.as_object()
+                        && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+                        && let Ok(len) = arr.length(ctx2)
+                    {
+                        let mut bytes = Vec::with_capacity(len as usize);
+                        for i in 0..len {
+                            if let Ok(v) = arr.at(i as i64, ctx2)
+                                && let Some(n) = v.as_number()
+                            {
+                                bytes.push(n as u8);
                             }
                         }
+                        let s = String::from_utf8_lossy(&bytes).to_string();
+                        return Ok(JsValue::from(JsString::from(s.as_str())));
                     }
                     Ok(JsValue::from(JsString::from("")))
                 })
@@ -2534,23 +2513,23 @@ fn create_context(
 
             // Case 1: Already an array → shallow copy
             if let Some(obj) = source.as_object() {
-                if let Ok(arr) = JsArray::from_object(obj.clone()) {
-                    if let Ok(len) = arr.length(ctx) {
-                        let items: Vec<JsValue> = (0..len)
-                            .filter_map(|i| arr.at(i as i64, ctx).ok())
-                            .collect();
-                        return Ok(JsArray::from_iter(items, ctx).into());
-                    }
+                if let Ok(arr) = JsArray::from_object(obj.clone())
+                    && let Ok(len) = arr.length(ctx)
+                {
+                    let items: Vec<JsValue> = (0..len)
+                        .filter_map(|i| arr.at(i as i64, ctx).ok())
+                        .collect();
+                    return Ok(JsArray::from_iter(items, ctx).into());
                 }
 
                 // Case 2: Array-like object (has .length + indexed props)
-                if let Ok(len_val) = obj.get(js_string!("length"), ctx) {
-                    if let Some(len) = len_val.as_number() {
-                        let items: Vec<JsValue> = (0..len as u32)
-                            .filter_map(|i| obj.get(i, ctx).ok())
-                            .collect();
-                        return Ok(JsArray::from_iter(items, ctx).into());
-                    }
+                if let Ok(len_val) = obj.get(js_string!("length"), ctx)
+                    && let Some(len) = len_val.as_number()
+                {
+                    let items: Vec<JsValue> = (0..len as u32)
+                        .filter_map(|i| obj.get(i, ctx).ok())
+                        .collect();
+                    return Ok(JsArray::from_iter(items, ctx).into());
                 }
             }
 
@@ -2781,13 +2760,13 @@ fn register_document_object(
     let cookie_getter: NativeFunction = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             let dom = dom_for_cookie.read();
-            if let Some(ref s) = *dom {
-                if let Ok(url) = url::Url::parse(&s.url) {
-                    let guard = cookie_jar_for_get.read();
-                    if let Some(ref jar) = *guard {
-                        let cookies = jar.read().cookies_for_js(&url);
-                        return Ok(JsValue::from(JsString::from(cookies.as_str())));
-                    }
+            if let Some(ref s) = *dom
+                && let Ok(url) = url::Url::parse(&s.url)
+            {
+                let guard = cookie_jar_for_get.read();
+                if let Some(ref jar) = *guard {
+                    let cookies = jar.read().cookies_for_js(&url);
+                    return Ok(JsValue::from(JsString::from(cookies.as_str())));
                 }
             }
             Ok(JsValue::from(JsString::from("")))
@@ -2804,12 +2783,12 @@ fn register_document_object(
             if let Some(cookie_str) = args.first().and_then(|v| v.as_string()) {
                 let cookie_string = cookie_str.to_std_string_escaped();
                 let dom = dom_for_cookie_set.read();
-                if let Some(ref s) = *dom {
-                    if let Ok(url) = url::Url::parse(&s.url) {
-                        let guard = cookie_jar_for_set.read();
-                        if let Some(ref jar) = *guard {
-                            jar.write().store(&url, &cookie_string);
-                        }
+                if let Some(ref s) = *dom
+                    && let Ok(url) = url::Url::parse(&s.url)
+                {
+                    let guard = cookie_jar_for_set.read();
+                    if let Some(ref jar) = *guard {
+                        jar.write().store(&url, &cookie_string);
                     }
                 }
             }
@@ -2832,18 +2811,17 @@ fn register_document_object(
                 .unwrap_or_default();
 
             let dom = dom_capture_qs.read();
-            if let Some(ref snapshot) = *dom {
-                if let Some(node_id) = snapshot.query_selector(&selector) {
-                    if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(
-                            snapshot,
-                            node,
-                            ctx,
-                            &mutations_capture_qs,
-                            &dom_capture_qs,
-                        ));
-                    }
-                }
+            if let Some(ref snapshot) = *dom
+                && let Some(node_id) = snapshot.query_selector(&selector)
+                && let Some(node) = snapshot.nodes.get(&node_id)
+            {
+                return Ok(create_element_object(
+                    snapshot,
+                    node,
+                    ctx,
+                    &mutations_capture_qs,
+                    &dom_capture_qs,
+                ));
             }
             Ok(JsValue::null())
         })
@@ -2897,18 +2875,17 @@ fn register_document_object(
                 .unwrap_or_default();
 
             let dom = dom_capture_gbi.read();
-            if let Some(ref snapshot) = *dom {
-                if let Some(node_id) = snapshot.get_element_by_id(&id) {
-                    if let Some(node) = snapshot.nodes.get(&node_id) {
-                        return Ok(create_element_object(
-                            snapshot,
-                            node,
-                            ctx,
-                            &mutations_capture_gbi,
-                            &dom_capture_gbi,
-                        ));
-                    }
-                }
+            if let Some(ref snapshot) = *dom
+                && let Some(node_id) = snapshot.get_element_by_id(&id)
+                && let Some(node) = snapshot.nodes.get(&node_id)
+            {
+                return Ok(create_element_object(
+                    snapshot,
+                    node,
+                    ctx,
+                    &mutations_capture_gbi,
+                    &dom_capture_gbi,
+                ));
             }
             Ok(JsValue::null())
         })
@@ -3032,10 +3009,10 @@ fn register_document_object(
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
             }
             let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
-            if let Some(arr_obj) = arr_val.as_object() {
-                if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
-                    let _ = arr.push(callback, ctx);
-                }
+            if let Some(arr_obj) = arr_val.as_object()
+                && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+            {
+                let _ = arr.push(callback, ctx);
             }
 
             Ok(JsValue::undefined())
@@ -3050,17 +3027,16 @@ fn register_document_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            if let Some(this_obj) = _this.as_object() {
-                if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
-                    if let Some(l_obj) = l_val.as_object() {
-                        let _ = l_obj.set(
-                            JsString::from(event_type.as_str()),
-                            JsValue::Null,
-                            true,
-                            ctx,
-                        );
-                    }
-                }
+            if let Some(this_obj) = _this.as_object()
+                && let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx)
+                && let Some(l_obj) = l_val.as_object()
+            {
+                let _ = l_obj.set(
+                    JsString::from(event_type.as_str()),
+                    JsValue::Null,
+                    true,
+                    ctx,
+                );
             }
             Ok(JsValue::undefined())
         })
@@ -3082,30 +3058,23 @@ fn register_document_object(
                 return Ok(JsValue::from(true));
             };
 
-            if let Some(this_obj) = _this.as_object() {
-                if let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx) {
-                    if let Some(l_obj) = l_val.as_object() {
-                        let arr_val = l_obj
-                            .get(JsString::from(event_type.as_str()), ctx)
-                            .unwrap_or(JsValue::Null);
-                        if let Some(arr_obj) = arr_val.as_object() {
-                            if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
-                                if let Ok(len) = arr.length(ctx) {
-                                    for i in 0..len {
-                                        if let Ok(cb) = arr.at(i as i64, ctx) {
-                                            if let Some(cb_obj) = cb.as_object() {
-                                                if cb_obj.is_callable() {
-                                                    let _ = cb_obj.call(
-                                                        _this,
-                                                        std::slice::from_ref(&event),
-                                                        ctx,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            if let Some(this_obj) = _this.as_object()
+                && let Ok(l_val) = this_obj.get(js_string!("__listeners"), ctx)
+                && let Some(l_obj) = l_val.as_object()
+            {
+                let arr_val = l_obj
+                    .get(JsString::from(event_type.as_str()), ctx)
+                    .unwrap_or(JsValue::Null);
+                if let Some(arr_obj) = arr_val.as_object()
+                    && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+                    && let Ok(len) = arr.length(ctx)
+                {
+                    for i in 0..len {
+                        if let Ok(cb) = arr.at(i as i64, ctx)
+                            && let Some(cb_obj) = cb.as_object()
+                            && cb_obj.is_callable()
+                        {
+                            let _ = cb_obj.call(_this, std::slice::from_ref(&event), ctx);
                         }
                     }
                 }
@@ -3123,18 +3092,17 @@ fn register_document_object(
         let getter: NativeFunction = unsafe {
             NativeFunction::from_closure(move |_this, _args, ctx| {
                 let snap = dom_snap_body.read();
-                if let Some(ref s) = *snap {
-                    if let Some(bid) = s.body_id {
-                        if let Some(node) = s.nodes.get(&bid) {
-                            return Ok(create_element_object(
-                                s,
-                                node,
-                                ctx,
-                                &mutations_clone,
-                                &dom_snap_body_clone,
-                            ));
-                        }
-                    }
+                if let Some(ref s) = *snap
+                    && let Some(bid) = s.body_id
+                    && let Some(node) = s.nodes.get(&bid)
+                {
+                    return Ok(create_element_object(
+                        s,
+                        node,
+                        ctx,
+                        &mutations_clone,
+                        &dom_snap_body_clone,
+                    ));
                 }
                 Ok(JsValue::null())
             })
@@ -3151,18 +3119,17 @@ fn register_document_object(
         let getter: NativeFunction = unsafe {
             NativeFunction::from_closure(move |_this, _args, ctx| {
                 let snap = dom_snap_head.read();
-                if let Some(ref s) = *snap {
-                    if let Some(hid) = s.head_id {
-                        if let Some(node) = s.nodes.get(&hid) {
-                            return Ok(create_element_object(
-                                s,
-                                node,
-                                ctx,
-                                &mutations_clone,
-                                &dom_snap_head_clone,
-                            ));
-                        }
-                    }
+                if let Some(ref s) = *snap
+                    && let Some(hid) = s.head_id
+                    && let Some(node) = s.nodes.get(&hid)
+                {
+                    return Ok(create_element_object(
+                        s,
+                        node,
+                        ctx,
+                        &mutations_clone,
+                        &dom_snap_head_clone,
+                    ));
                 }
                 Ok(JsValue::null())
             })
@@ -3338,10 +3305,10 @@ fn register_document_object(
                     // Sync to snapshot so querySelector can find the attribute
                     {
                         let mut dom = dom_snap_for_setattr.write();
-                        if let Some(ref mut snap) = *dom {
-                            if let Some(node) = snap.nodes.get_mut(&mut_set_id) {
-                                node.attributes.insert(name.clone(), value.clone());
-                            }
+                        if let Some(ref mut snap) = *dom
+                            && let Some(node) = snap.nodes.get_mut(&mut_set_id)
+                        {
+                            node.attributes.insert(name.clone(), value.clone());
                         }
                     }
                     mut_set_attr.write().push(DomMutation::SetAttribute {
@@ -3398,10 +3365,10 @@ fn register_document_object(
                             let mut dom = dom_snap_ac.write();
                             if let Some(ref mut snap) = *dom {
                                 // Add child to parent's children list
-                                if let Some(parent) = snap.nodes.get_mut(&parent_id_ac) {
-                                    if !parent.children.contains(&cid) {
-                                        parent.children.push(cid);
-                                    }
+                                if let Some(parent) = snap.nodes.get_mut(&parent_id_ac)
+                                    && !parent.children.contains(&cid)
+                                {
+                                    parent.children.push(cid);
                                 }
                                 // Set child's parent
                                 if let Some(child_node) = snap.nodes.get_mut(&cid) {
@@ -3420,16 +3387,16 @@ fn register_document_object(
             // 생성된 노드를 snapshot에서 찾아 create_element_object로 완전한 요소 생성
             // 이렇게 하면 새 요소도 style, classList, cloneNode, remove 등 모든 메서드를 가짐
             let dom = dom_snap_ce.read();
-            if let Some(ref snap) = *dom {
-                if let Some(new_node) = snap.nodes.get(&new_id) {
-                    return Ok(create_element_object(
-                        snap,
-                        new_node,
-                        ctx,
-                        &mutations_ce,
-                        &dom_snap_ce,
-                    ));
-                }
+            if let Some(ref snap) = *dom
+                && let Some(new_node) = snap.nodes.get(&new_id)
+            {
+                return Ok(create_element_object(
+                    snap,
+                    new_node,
+                    ctx,
+                    &mutations_ce,
+                    &dom_snap_ce,
+                ));
             }
             // fallback: snapshot에서 못 찾으면 기본 객체 반환
             let obj = boa_engine::object::ObjectInitializer::new(ctx)
@@ -3619,79 +3586,59 @@ fn register_document_object(
                                 .and_then(|v| v.to_number(ctx).ok())
                                 .unwrap_or(0.0);
                             let snap = snap_efp.read();
-                            if let Some(ref s) = *snap {
-                                if let Some(bid) = s.body_id {
-                                    if let Some(body) = s.nodes.get(&bid) {
-                                        // Walk body children in order, estimate Y positions
-                                        let mut estimated_y = 0.0;
-                                        let mut last_visible_el: Option<&DomNode> = None;
-                                        for &child_id in &body.children {
-                                            if let Some(el) = s.nodes.get(&child_id) {
-                                                let el_h = estimate_element_height(el);
-                                                if el_h <= 0.0 {
-                                                    continue; // skip invisible elements
-                                                }
-                                                if y >= estimated_y && y < estimated_y + el_h {
-                                                    // Found the approximate Y band.
-                                                    // If this element has visible children, try to
-                                                    // narrow down using X coordinate.
-                                                    let visible_children: Vec<u32> = el
-                                                        .children
-                                                        .iter()
-                                                        .filter(|&&cid| {
-                                                            s.nodes
-                                                                .get(&cid)
-                                                                .map(|c| {
-                                                                    estimate_element_height(c) > 0.0
-                                                                })
-                                                                .unwrap_or(false)
-                                                        })
-                                                        .copied()
-                                                        .collect();
+                            if let Some(ref s) = *snap
+                                && let Some(bid) = s.body_id
+                                && let Some(body) = s.nodes.get(&bid)
+                            {
+                                // Walk body children in order, estimate Y positions
+                                let mut estimated_y = 0.0;
+                                let mut last_visible_el: Option<&DomNode> = None;
+                                for &child_id in &body.children {
+                                    if let Some(el) = s.nodes.get(&child_id) {
+                                        let el_h = estimate_element_height(el);
+                                        if el_h <= 0.0 {
+                                            continue; // skip invisible elements
+                                        }
+                                        if y >= estimated_y && y < estimated_y + el_h {
+                                            // Found the approximate Y band.
+                                            // If this element has visible children, try to
+                                            // narrow down using X coordinate.
+                                            let visible_children: Vec<u32> = el
+                                                .children
+                                                .iter()
+                                                .filter(|&&cid| {
+                                                    s.nodes
+                                                        .get(&cid)
+                                                        .map(|c| estimate_element_height(c) > 0.0)
+                                                        .unwrap_or(false)
+                                                })
+                                                .copied()
+                                                .collect();
 
-                                                    if !visible_children.is_empty() {
-                                                        // Estimate viewport width (fallback 1280).
-                                                        // TODO: pass actual viewport from the runtime config.
-                                                        let vp_w: f64 = 1280.0;
-                                                        // Pick child based on X position
-                                                        let idx = ((x / vp_w)
-                                                            * visible_children.len() as f64)
-                                                            .floor()
-                                                            as usize;
-                                                        let idx =
-                                                            idx.min(visible_children.len() - 1);
-                                                        if let Some(&picked_id) =
-                                                            visible_children.get(idx)
-                                                        {
-                                                            if let Some(picked) =
-                                                                s.nodes.get(&picked_id)
-                                                            {
-                                                                return Ok(create_element_object(
-                                                                    s,
-                                                                    picked,
-                                                                    ctx,
-                                                                    &mutations_efp,
-                                                                    &dom_efp,
-                                                                ));
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // No suitable children — return this element
+                                            if !visible_children.is_empty() {
+                                                // Estimate viewport width (fallback 1280).
+                                                // TODO: pass actual viewport from the runtime config.
+                                                let vp_w: f64 = 1280.0;
+                                                // Pick child based on X position
+                                                let idx = ((x / vp_w)
+                                                    * visible_children.len() as f64)
+                                                    .floor()
+                                                    as usize;
+                                                let idx = idx.min(visible_children.len() - 1);
+                                                if let Some(&picked_id) = visible_children.get(idx)
+                                                    && let Some(picked) = s.nodes.get(&picked_id)
+                                                {
                                                     return Ok(create_element_object(
                                                         s,
-                                                        el,
+                                                        picked,
                                                         ctx,
                                                         &mutations_efp,
                                                         &dom_efp,
                                                     ));
                                                 }
-                                                estimated_y += el_h;
-                                                last_visible_el = Some(el);
                                             }
-                                        }
-                                        // If y exceeds all estimated heights, return the last visible element
-                                        if let Some(el) = last_visible_el {
+
+                                            // No suitable children — return this element
                                             return Ok(create_element_object(
                                                 s,
                                                 el,
@@ -3700,16 +3647,28 @@ fn register_document_object(
                                                 &dom_efp,
                                             ));
                                         }
-                                        // Fallback: return body itself
-                                        return Ok(create_element_object(
-                                            s,
-                                            body,
-                                            ctx,
-                                            &mutations_efp,
-                                            &dom_efp,
-                                        ));
+                                        estimated_y += el_h;
+                                        last_visible_el = Some(el);
                                     }
                                 }
+                                // If y exceeds all estimated heights, return the last visible element
+                                if let Some(el) = last_visible_el {
+                                    return Ok(create_element_object(
+                                        s,
+                                        el,
+                                        ctx,
+                                        &mutations_efp,
+                                        &dom_efp,
+                                    ));
+                                }
+                                // Fallback: return body itself
+                                return Ok(create_element_object(
+                                    s,
+                                    body,
+                                    ctx,
+                                    &mutations_efp,
+                                    &dom_efp,
+                                ));
                             }
                             Ok(JsValue::null())
                         });
@@ -3760,12 +3719,11 @@ fn create_element_object(
                 .unwrap_or_default();
             // 읽기 전용 snapshot에서 attribute 조회 (setAttribute가 snapshot에 반영됨)
             let dom = dom_snap_ga.read();
-            if let Some(ref snap) = *dom {
-                if let Some(n) = snap.nodes.get(&node_id_ga) {
-                    if let Some(val) = n.attributes.get(&name) {
-                        return Ok(JsValue::from(JsString::from(val.as_str())));
-                    }
-                }
+            if let Some(ref snap) = *dom
+                && let Some(n) = snap.nodes.get(&node_id_ga)
+                && let Some(val) = n.attributes.get(&name)
+            {
+                return Ok(JsValue::from(JsString::from(val.as_str())));
             }
             Ok(JsValue::null())
         })
@@ -3782,10 +3740,10 @@ fn create_element_object(
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let dom = dom_snap_ha.read();
-            if let Some(ref snap) = *dom {
-                if let Some(n) = snap.nodes.get(&node_id_ha) {
-                    return Ok(JsValue::from(n.attributes.contains_key(&name)));
-                }
+            if let Some(ref snap) = *dom
+                && let Some(n) = snap.nodes.get(&node_id_ha)
+            {
+                return Ok(JsValue::from(n.attributes.contains_key(&name)));
             }
             Ok(JsValue::from(false))
         })
@@ -3835,10 +3793,10 @@ fn create_element_object(
                 let _ = listeners_obj.set(arr_key.clone(), a, true, ctx);
             }
             let arr_val = listeners_obj.get(arr_key, ctx).unwrap_or(JsValue::Null);
-            if let Some(arr_obj) = arr_val.as_object() {
-                if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
-                    let _ = arr.push(callback, ctx);
-                }
+            if let Some(arr_obj) = arr_val.as_object()
+                && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+            {
+                let _ = arr.push(callback, ctx);
             }
 
             Ok(JsValue::undefined())
@@ -3857,15 +3815,15 @@ fn create_element_object(
 
             let this_obj = _this.as_object().unwrap();
             let listeners = this_obj.get(js_string!("__listeners"), ctx);
-            if let Ok(l_val) = listeners {
-                if let Some(l_obj) = l_val.as_object() {
-                    let _ = l_obj.set(
-                        JsString::from(event_type.as_str()),
-                        JsValue::Null,
-                        true,
-                        ctx,
-                    );
-                }
+            if let Ok(l_val) = listeners
+                && let Some(l_obj) = l_val.as_object()
+            {
+                let _ = l_obj.set(
+                    JsString::from(event_type.as_str()),
+                    JsValue::Null,
+                    true,
+                    ctx,
+                );
             }
 
             Ok(JsValue::undefined())
@@ -3892,25 +3850,23 @@ fn create_element_object(
 
             let this_obj = _this.as_object().unwrap();
             let listeners = this_obj.get(js_string!("__listeners"), ctx);
-            if let Ok(l_val) = listeners {
-                if let Some(l_obj) = l_val.as_object() {
-                    let arr_val = l_obj
-                        .get(JsString::from(event_type.as_str()), ctx)
-                        .unwrap_or(JsValue::Null);
-                    if let Some(arr_obj) = arr_val.as_object() {
-                        if let Ok(arr) = JsArray::from_object(arr_obj.clone()) {
-                            if let Ok(len) = arr.length(ctx) {
-                                for i in 0..len {
-                                    if let Ok(cb) = arr.at(i as i64, ctx) {
-                                        if let Some(cb_obj) = cb.as_object() {
-                                            if cb_obj.is_callable() {
-                                                let evt_arg = event.clone();
-                                                let _ = cb_obj.call(_this, &[evt_arg], ctx);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            if let Ok(l_val) = listeners
+                && let Some(l_obj) = l_val.as_object()
+            {
+                let arr_val = l_obj
+                    .get(JsString::from(event_type.as_str()), ctx)
+                    .unwrap_or(JsValue::Null);
+                if let Some(arr_obj) = arr_val.as_object()
+                    && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+                    && let Ok(len) = arr.length(ctx)
+                {
+                    for i in 0..len {
+                        if let Ok(cb) = arr.at(i as i64, ctx)
+                            && let Some(cb_obj) = cb.as_object()
+                            && cb_obj.is_callable()
+                        {
+                            let evt_arg = event.clone();
+                            let _ = cb_obj.call(_this, &[evt_arg], ctx);
                         }
                     }
                 }
@@ -3930,49 +3886,29 @@ fn create_element_object(
                 node_id: node_id_click,
             });
             // 2. __listeners에서 click 핸들러 찾아서 실행
-            if let Some(this_obj) = _this.as_object() {
-                if let Ok(listeners_val) = this_obj.get(js_string!("__listeners"), ctx) {
-                    if let Some(listeners_obj) = listeners_val.as_object() {
-                        if let Ok(arr_val) = listeners_obj.get(js_string!("click"), ctx) {
-                            if let Some(arr_js) = arr_val.as_object() {
-                                if let Ok(arr) = JsArray::from_object(arr_js.clone()) {
-                                    let len = arr.length(ctx).unwrap_or(0) as usize;
-                                    let event_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                                        .property(
-                                            js_string!("type"),
-                                            JsValue::from(JsString::from("click")),
-                                            Attribute::all(),
-                                        )
-                                        .property(
-                                            js_string!("target"),
-                                            _this.clone(),
-                                            Attribute::all(),
-                                        )
-                                        .property(
-                                            js_string!("currentTarget"),
-                                            _this.clone(),
-                                            Attribute::all(),
-                                        )
-                                        .property(
-                                            js_string!("bubbles"),
-                                            JsValue::from(true),
-                                            Attribute::all(),
-                                        )
-                                        .build();
-                                    for i in 0..len {
-                                        if let Ok(cb) = arr.get(i as u64, ctx) {
-                                            if let Some(cb_obj) = cb.as_object() {
-                                                let _ = cb_obj.call(
-                                                    _this,
-                                                    &[JsValue::from(event_obj.clone())],
-                                                    ctx,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            if let Some(this_obj) = _this.as_object()
+                && let Ok(listeners_val) = this_obj.get(js_string!("__listeners"), ctx)
+                && let Some(listeners_obj) = listeners_val.as_object()
+                && let Ok(arr_val) = listeners_obj.get(js_string!("click"), ctx)
+                && let Some(arr_js) = arr_val.as_object()
+                && let Ok(arr) = JsArray::from_object(arr_js.clone())
+            {
+                let len = arr.length(ctx).unwrap_or(0) as usize;
+                let event_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(
+                        js_string!("type"),
+                        JsValue::from(JsString::from("click")),
+                        Attribute::all(),
+                    )
+                    .property(js_string!("target"), _this.clone(), Attribute::all())
+                    .property(js_string!("currentTarget"), _this.clone(), Attribute::all())
+                    .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
+                    .build();
+                for i in 0..len {
+                    if let Ok(cb) = arr.get(i as u64, ctx)
+                        && let Some(cb_obj) = cb.as_object()
+                    {
+                        let _ = cb_obj.call(_this, &[JsValue::from(event_obj.clone())], ctx);
                     }
                 }
             }
@@ -3999,10 +3935,10 @@ fn create_element_object(
             // Sync to snapshot so querySelector can find the attribute
             {
                 let mut dom = dom_snap_sa.write();
-                if let Some(ref mut snap) = *dom {
-                    if let Some(node) = snap.nodes.get_mut(&node_id_sa) {
-                        node.attributes.insert(name.clone(), value.clone());
-                    }
+                if let Some(ref mut snap) = *dom
+                    && let Some(node) = snap.nodes.get_mut(&node_id_sa)
+                {
+                    node.attributes.insert(name.clone(), value.clone());
                 }
             }
             mutations_sa.write().push(DomMutation::SetAttribute {
@@ -4030,10 +3966,10 @@ fn create_element_object(
                 {
                     let mut dom = dom_snap_ac.write();
                     if let Some(ref mut snap) = *dom {
-                        if let Some(parent) = snap.nodes.get_mut(&node_id_ac) {
-                            if !parent.children.contains(&cid) {
-                                parent.children.push(cid);
-                            }
+                        if let Some(parent) = snap.nodes.get_mut(&node_id_ac)
+                            && !parent.children.contains(&cid)
+                        {
+                            parent.children.push(cid);
                         }
                         if let Some(child_node) = snap.nodes.get_mut(&cid) {
                             child_node.parent = Some(node_id_ac);
@@ -4099,18 +4035,17 @@ fn create_element_object(
                 .unwrap_or_default();
 
             let dom = qs_dom.read();
-            if let Some(ref snapshot) = *dom {
-                if let Some(match_id) = snapshot.query_selector_from(qs_root_id, &selector) {
-                    if let Some(match_node) = snapshot.nodes.get(&match_id) {
-                        return Ok(create_element_object(
-                            snapshot,
-                            match_node,
-                            ctx,
-                            &qs_mutations,
-                            &qs_dom,
-                        ));
-                    }
-                }
+            if let Some(ref snapshot) = *dom
+                && let Some(match_id) = snapshot.query_selector_from(qs_root_id, &selector)
+                && let Some(match_node) = snapshot.nodes.get(&match_id)
+            {
+                return Ok(create_element_object(
+                    snapshot,
+                    match_node,
+                    ctx,
+                    &qs_mutations,
+                    &qs_dom,
+                ));
             }
             Ok(JsValue::null())
         })
@@ -4155,12 +4090,11 @@ fn create_element_object(
     let first_child_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let dom = snap_fc.read();
-            if let Some(ref s) = *dom {
-                if let Some(fid) = s.first_child(nid_fc) {
-                    if let Some(c) = s.nodes.get(&fid) {
-                        return Ok(create_element_object(s, c, ctx, &mut_fc, &snap_fc));
-                    }
-                }
+            if let Some(ref s) = *dom
+                && let Some(fid) = s.first_child(nid_fc)
+                && let Some(c) = s.nodes.get(&fid)
+            {
+                return Ok(create_element_object(s, c, ctx, &mut_fc, &snap_fc));
             }
             Ok(JsValue::null())
         })
@@ -4175,12 +4109,11 @@ fn create_element_object(
     let last_child_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let dom = snap_lc.read();
-            if let Some(ref s) = *dom {
-                if let Some(lid) = s.last_child(nid_lc) {
-                    if let Some(c) = s.nodes.get(&lid) {
-                        return Ok(create_element_object(s, c, ctx, &mut_lc, &snap_lc));
-                    }
-                }
+            if let Some(ref s) = *dom
+                && let Some(lid) = s.last_child(nid_lc)
+                && let Some(c) = s.nodes.get(&lid)
+            {
+                return Ok(create_element_object(s, c, ctx, &mut_lc, &snap_lc));
             }
             Ok(JsValue::null())
         })
@@ -4195,12 +4128,11 @@ fn create_element_object(
     let next_sibling_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let dom = snap_ns.read();
-            if let Some(ref s) = *dom {
-                if let Some(nid) = s.next_sibling(nid_ns) {
-                    if let Some(c) = s.nodes.get(&nid) {
-                        return Ok(create_element_object(s, c, ctx, &mut_ns, &snap_ns));
-                    }
-                }
+            if let Some(ref s) = *dom
+                && let Some(nid) = s.next_sibling(nid_ns)
+                && let Some(c) = s.nodes.get(&nid)
+            {
+                return Ok(create_element_object(s, c, ctx, &mut_ns, &snap_ns));
             }
             Ok(JsValue::null())
         })
@@ -4215,12 +4147,11 @@ fn create_element_object(
     let prev_sibling_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let dom = snap_ps.read();
-            if let Some(ref s) = *dom {
-                if let Some(pid) = s.previous_sibling(nid_ps) {
-                    if let Some(c) = s.nodes.get(&pid) {
-                        return Ok(create_element_object(s, c, ctx, &mut_ps, &snap_ps));
-                    }
-                }
+            if let Some(ref s) = *dom
+                && let Some(pid) = s.previous_sibling(nid_ps)
+                && let Some(c) = s.nodes.get(&pid)
+            {
+                return Ok(create_element_object(s, c, ctx, &mut_ps, &snap_ps));
             }
             Ok(JsValue::null())
         })
@@ -4254,12 +4185,11 @@ fn create_element_object(
                 let mut dom = snap_ib.write();
                 if let Some(ref mut s) = *dom {
                     // 기존 부모에서 제거
-                    if let Some(old_parent) = s.nodes.get(&nid).and_then(|n| n.parent) {
-                        if old_parent != nid_ib {
-                            if let Some(p) = s.nodes.get_mut(&old_parent) {
-                                p.children.retain(|&c| c != nid);
-                            }
-                        }
+                    if let Some(old_parent) = s.nodes.get(&nid).and_then(|n| n.parent)
+                        && old_parent != nid_ib
+                        && let Some(p) = s.nodes.get_mut(&old_parent)
+                    {
+                        p.children.retain(|&c| c != nid);
                     }
                     // ref_id 위치에 삽입 또는 맨 뒤에 append
                     let children = s
@@ -4268,11 +4198,11 @@ fn create_element_object(
                         .map(|p| p.children.clone())
                         .unwrap_or_default();
                     if let Some(rid) = ref_id {
-                        if let Some(pos) = children.iter().position(|&c| c == rid) {
-                            if let Some(p) = s.nodes.get_mut(&nid_ib) {
-                                p.children.retain(|&c| c != nid);
-                                p.children.insert(pos, nid);
-                            }
+                        if let Some(pos) = children.iter().position(|&c| c == rid)
+                            && let Some(p) = s.nodes.get_mut(&nid_ib)
+                        {
+                            p.children.retain(|&c| c != nid);
+                            p.children.insert(pos, nid);
                         }
                     } else {
                         if let Some(p) = s.nodes.get_mut(&nid_ib) {
@@ -4351,10 +4281,10 @@ fn create_element_object(
                 .unwrap_or_default();
             if !name.is_empty() {
                 let mut dom = snap_ra.write();
-                if let Some(ref mut s) = *dom {
-                    if let Some(n) = s.nodes.get_mut(&nid_ra) {
-                        n.attributes.remove(&name);
-                    }
+                if let Some(ref mut s) = *dom
+                    && let Some(n) = s.nodes.get_mut(&nid_ra)
+                {
+                    n.attributes.remove(&name);
                 }
                 mut_ra.write().push(DomMutation::SetAttribute {
                     node_id: nid_ra,
@@ -4444,10 +4374,10 @@ fn create_element_object(
                 tag: tag.clone(),
             });
             let dom = snap_cl.read();
-            if let Some(ref s) = *dom {
-                if let Some(n) = s.nodes.get(&new_id) {
-                    return Ok(create_element_object(s, n, ctx, &mut_cl, &snap_cl));
-                }
+            if let Some(ref s) = *dom
+                && let Some(n) = s.nodes.get(&new_id)
+            {
+                return Ok(create_element_object(s, n, ctx, &mut_cl, &snap_cl));
             }
             Ok(JsValue::null())
         })
@@ -4476,10 +4406,10 @@ fn create_element_object(
                         .unwrap_or_default();
                     if !prop.is_empty() {
                         let mut dom = sp_arc.write();
-                        if let Some(ref mut s) = *dom {
-                            if let Some(n) = s.nodes.get_mut(&sp_id) {
-                                n.attributes.insert(format!("style:{}", prop), val);
-                            }
+                        if let Some(ref mut s) = *dom
+                            && let Some(n) = s.nodes.get_mut(&sp_id)
+                        {
+                            n.attributes.insert(format!("style:{}", prop), val);
                         }
                     }
                     Ok(JsValue::undefined())
@@ -4495,12 +4425,12 @@ fn create_element_object(
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_default();
                     let dom = gp_arc.read();
-                    if let Some(ref s) = *dom {
-                        if let Some(n) = s.nodes.get(&gp_id) {
-                            let key = format!("style:{}", prop);
-                            if let Some(v) = n.attributes.get(&key) {
-                                return Ok(JsValue::from(JsString::from(v.as_str())));
-                            }
+                    if let Some(ref s) = *dom
+                        && let Some(n) = s.nodes.get(&gp_id)
+                    {
+                        let key = format!("style:{}", prop);
+                        if let Some(v) = n.attributes.get(&key) {
+                            return Ok(JsValue::from(JsString::from(v.as_str())));
                         }
                     }
                     Ok(JsValue::from(JsString::from("")))
@@ -4517,11 +4447,11 @@ fn create_element_object(
                         .unwrap_or_default();
                     if !prop.is_empty() {
                         let mut dom = rp_arc.write();
-                        if let Some(ref mut s) = *dom {
-                            if let Some(n) = s.nodes.get_mut(&rp_id) {
-                                let key = format!("style:{}", prop);
-                                n.attributes.remove(&key);
-                            }
+                        if let Some(ref mut s) = *dom
+                            && let Some(n) = s.nodes.get_mut(&rp_id)
+                        {
+                            let key = format!("style:{}", prop);
+                            n.attributes.remove(&key);
                         }
                     }
                     Ok(JsValue::undefined())
@@ -4566,17 +4496,17 @@ fn create_element_object(
                         .unwrap_or_default();
                     if !cls.is_empty() {
                         let mut dom = ca_arc.write();
-                        if let Some(ref mut s) = *dom {
-                            if let Some(n) = s.nodes.get_mut(&ca_id) {
-                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                                if !cur.split_whitespace().any(|c| c == cls) {
-                                    let new_cls = if cur.is_empty() {
-                                        cls.clone()
-                                    } else {
-                                        format!("{} {}", cur, cls)
-                                    };
-                                    n.attributes.insert("class".to_string(), new_cls);
-                                }
+                        if let Some(ref mut s) = *dom
+                            && let Some(n) = s.nodes.get_mut(&ca_id)
+                        {
+                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                            if !cur.split_whitespace().any(|c| c == cls) {
+                                let new_cls = if cur.is_empty() {
+                                    cls.clone()
+                                } else {
+                                    format!("{} {}", cur, cls)
+                                };
+                                n.attributes.insert("class".to_string(), new_cls);
                             }
                         }
                     }
@@ -4595,16 +4525,16 @@ fn create_element_object(
                         .unwrap_or_default();
                     if !cls.is_empty() {
                         let mut dom = cr_arc.write();
-                        if let Some(ref mut s) = *dom {
-                            if let Some(n) = s.nodes.get_mut(&cr_id) {
-                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                                let new_cls = cur
-                                    .split_whitespace()
-                                    .filter(|c| *c != cls)
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                n.attributes.insert("class".to_string(), new_cls);
-                            }
+                        if let Some(ref mut s) = *dom
+                            && let Some(n) = s.nodes.get_mut(&cr_id)
+                        {
+                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                            let new_cls = cur
+                                .split_whitespace()
+                                .filter(|c| *c != cls)
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            n.attributes.insert("class".to_string(), new_cls);
                         }
                     }
                     Ok(JsValue::undefined())
@@ -4621,11 +4551,11 @@ fn create_element_object(
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_default();
                     let dom = ch_arc.read();
-                    if let Some(ref s) = *dom {
-                        if let Some(n) = s.nodes.get(&ch_id) {
-                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                            return Ok(JsValue::from(cur.split_whitespace().any(|c| c == cls)));
-                        }
+                    if let Some(ref s) = *dom
+                        && let Some(n) = s.nodes.get(&ch_id)
+                    {
+                        let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                        return Ok(JsValue::from(cur.split_whitespace().any(|c| c == cls)));
                     }
                     Ok(JsValue::from(false))
                 })
@@ -4642,32 +4572,32 @@ fn create_element_object(
                         .unwrap_or_default();
                     let dom = ct_arc.read();
                     let mut found = false;
-                    if let Some(ref s) = *dom {
-                        if let Some(n) = s.nodes.get(&ct_id) {
-                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                            found = cur.split_whitespace().any(|c| c == cls);
-                        }
+                    if let Some(ref s) = *dom
+                        && let Some(n) = s.nodes.get(&ct_id)
+                    {
+                        let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                        found = cur.split_whitespace().any(|c| c == cls);
                     }
                     drop(dom);
                     if !cls.is_empty() {
                         let mut dom2 = ct_arc.write();
-                        if let Some(ref mut s) = *dom2 {
-                            if let Some(n) = s.nodes.get_mut(&ct_id) {
-                                let cur = n.attributes.get("class").cloned().unwrap_or_default();
-                                let new_cls = if found {
-                                    cur.split_whitespace()
-                                        .filter(|c| *c != cls)
-                                        .collect::<Vec<_>>()
-                                        .join(" ")
+                        if let Some(ref mut s) = *dom2
+                            && let Some(n) = s.nodes.get_mut(&ct_id)
+                        {
+                            let cur = n.attributes.get("class").cloned().unwrap_or_default();
+                            let new_cls = if found {
+                                cur.split_whitespace()
+                                    .filter(|c| *c != cls)
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            } else {
+                                if cur.is_empty() {
+                                    cls.clone()
                                 } else {
-                                    if cur.is_empty() {
-                                        cls.clone()
-                                    } else {
-                                        format!("{} {}", cur, cls)
-                                    }
-                                };
-                                n.attributes.insert("class".to_string(), new_cls);
-                            }
+                                    format!("{} {}", cur, cls)
+                                }
+                            };
+                            n.attributes.insert("class".to_string(), new_cls);
                         }
                     }
                     Ok(JsValue::from(!found))
@@ -4787,12 +4717,12 @@ fn create_element_object(
     let value_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             let dom = dom_snap_vg.read();
-            if let Some(ref snap) = *dom {
-                if let Some(n) = snap.nodes.get(&node_id_vg) {
-                    return Ok(JsValue::from(JsString::from(
-                        n.attributes.get("value").map(|s| s.as_str()).unwrap_or(""),
-                    )));
-                }
+            if let Some(ref snap) = *dom
+                && let Some(n) = snap.nodes.get(&node_id_vg)
+            {
+                return Ok(JsValue::from(JsString::from(
+                    n.attributes.get("value").map(|s| s.as_str()).unwrap_or(""),
+                )));
             }
             Ok(JsValue::from(JsString::from("")))
         })
@@ -4815,10 +4745,10 @@ fn create_element_object(
             // snapshot에 value attribute 업데이트 (getter가 즉시 반영)
             {
                 let mut dom = dom_snap_vs.write();
-                if let Some(ref mut snap) = *dom {
-                    if let Some(n) = snap.nodes.get_mut(&node_id_vs) {
-                        n.attributes.insert("value".to_string(), val.clone());
-                    }
+                if let Some(ref mut snap) = *dom
+                    && let Some(n) = snap.nodes.get_mut(&node_id_vs)
+                {
+                    n.attributes.insert("value".to_string(), val.clone());
                 }
             }
             mutations_vs.write().push(DomMutation::InputElement {
@@ -4838,10 +4768,10 @@ fn create_element_object(
     let text_content_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             let dom = dom_snap_tcg.read();
-            if let Some(ref s) = *dom {
-                if let Some(n) = s.nodes.get(&nid_tcg) {
-                    return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
-                }
+            if let Some(ref s) = *dom
+                && let Some(n) = s.nodes.get(&nid_tcg)
+            {
+                return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
             }
             Ok(JsValue::from(JsString::from("")))
         })
@@ -4863,10 +4793,10 @@ fn create_element_object(
                 .unwrap_or_default();
             {
                 let mut dom = dom_snap_tcs.write();
-                if let Some(ref mut s) = *dom {
-                    if let Some(n) = s.nodes.get_mut(&nid_tcs) {
-                        n.text_content = text.clone();
-                    }
+                if let Some(ref mut s) = *dom
+                    && let Some(n) = s.nodes.get_mut(&nid_tcs)
+                {
+                    n.text_content = text.clone();
                 }
             }
             mut_tcs.write().push(DomMutation::SetTextContent {
@@ -4886,10 +4816,10 @@ fn create_element_object(
     let inner_html_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             let dom = dom_snap_ihg.read();
-            if let Some(ref s) = *dom {
-                if let Some(n) = s.nodes.get(&nid_ihg) {
-                    return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
-                }
+            if let Some(ref s) = *dom
+                && let Some(n) = s.nodes.get(&nid_ihg)
+            {
+                return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
             }
             Ok(JsValue::from(JsString::from("")))
         })
@@ -4911,10 +4841,10 @@ fn create_element_object(
                 .unwrap_or_default();
             {
                 let mut dom = dom_snap_ihs.write();
-                if let Some(ref mut s) = *dom {
-                    if let Some(n) = s.nodes.get_mut(&nid_ihs) {
-                        n.text_content = html.clone();
-                    }
+                if let Some(ref mut s) = *dom
+                    && let Some(n) = s.nodes.get_mut(&nid_ihs)
+                {
+                    n.text_content = html.clone();
                 }
             }
             mut_ihs.write().push(DomMutation::SetInnerHtml {
@@ -5003,12 +4933,12 @@ fn create_element_object(
         let getter = unsafe {
             NativeFunction::from_closure(move |_this, _args, _ctx| {
                 let dom = snap.read();
-                if let Some(ref s) = *dom {
-                    if let Some(n) = s.nodes.get(&nid) {
-                        return Ok(JsValue::from(JsString::from(
-                            n.attributes.get("id").map(|s| s.as_str()).unwrap_or(""),
-                        )));
-                    }
+                if let Some(ref s) = *dom
+                    && let Some(n) = s.nodes.get(&nid)
+                {
+                    return Ok(JsValue::from(JsString::from(
+                        n.attributes.get("id").map(|s| s.as_str()).unwrap_or(""),
+                    )));
                 }
                 Ok(JsValue::from(JsString::from("")))
             })
@@ -5030,10 +4960,10 @@ fn create_element_object(
                     .unwrap_or_default();
                 {
                     let mut dom = snap.write();
-                    if let Some(ref mut s) = *dom {
-                        if let Some(n) = s.nodes.get_mut(&nid) {
-                            n.attributes.insert("id".to_string(), value.clone());
-                        }
+                    if let Some(ref mut s) = *dom
+                        && let Some(n) = s.nodes.get_mut(&nid)
+                    {
+                        n.attributes.insert("id".to_string(), value.clone());
                     }
                 }
                 m.write().push(DomMutation::SetAttribute {
@@ -5059,12 +4989,12 @@ fn create_element_object(
         let getter = unsafe {
             NativeFunction::from_closure(move |_this, _args, _ctx| {
                 let dom = snap.read();
-                if let Some(ref s) = *dom {
-                    if let Some(n) = s.nodes.get(&nid) {
-                        return Ok(JsValue::from(JsString::from(
-                            n.attributes.get("class").map(|s| s.as_str()).unwrap_or(""),
-                        )));
-                    }
+                if let Some(ref s) = *dom
+                    && let Some(n) = s.nodes.get(&nid)
+                {
+                    return Ok(JsValue::from(JsString::from(
+                        n.attributes.get("class").map(|s| s.as_str()).unwrap_or(""),
+                    )));
                 }
                 Ok(JsValue::from(JsString::from("")))
             })
@@ -5086,10 +5016,10 @@ fn create_element_object(
                     .unwrap_or_default();
                 {
                     let mut dom = snap.write();
-                    if let Some(ref mut s) = *dom {
-                        if let Some(n) = s.nodes.get_mut(&nid) {
-                            n.attributes.insert("class".to_string(), value.clone());
-                        }
+                    if let Some(ref mut s) = *dom
+                        && let Some(n) = s.nodes.get_mut(&nid)
+                    {
+                        n.attributes.insert("class".to_string(), value.clone());
                     }
                 }
                 m.write().push(DomMutation::SetAttribute {
@@ -5174,19 +5104,19 @@ fn create_element_object(
                 unsafe {
                     NativeFunction::from_closure(move |_this, _args, ctx| {
                         let dom = snap_cn.read();
-                        if let Some(ref snap) = *dom {
-                            if let Some(cur) = snap.nodes.get(&nid_cn) {
-                                let items: Vec<JsValue> = cur
-                                    .children
-                                    .iter()
-                                    .filter_map(|&cid| snap.nodes.get(&cid))
-                                    .map(|child| {
-                                        create_element_object(snap, child, ctx, &mut_cn, &snap_cn)
-                                    })
-                                    .collect();
-                                let arr = JsArray::from_iter(items, ctx);
-                                return Ok(arr.into());
-                            }
+                        if let Some(ref snap) = *dom
+                            && let Some(cur) = snap.nodes.get(&nid_cn)
+                        {
+                            let items: Vec<JsValue> = cur
+                                .children
+                                .iter()
+                                .filter_map(|&cid| snap.nodes.get(&cid))
+                                .map(|child| {
+                                    create_element_object(snap, child, ctx, &mut_cn, &snap_cn)
+                                })
+                                .collect();
+                            let arr = JsArray::from_iter(items, ctx);
+                            return Ok(arr.into());
                         }
                         let arr = JsArray::new(ctx);
                         Ok(arr.into())
@@ -5267,10 +5197,10 @@ fn create_element_object(
                 unsafe {
                     NativeFunction::from_closure(move |_this, _args, _ctx| {
                         let dom = vis_dom.read();
-                        if let Some(ref snap) = *dom {
-                            if let Some(cs) = LayoutEngine::compute_style(snap, vis_id) {
-                                return Ok(JsValue::from(cs.visible));
-                            }
+                        if let Some(ref snap) = *dom
+                            && let Some(cs) = LayoutEngine::compute_style(snap, vis_id)
+                        {
+                            return Ok(JsValue::from(cs.visible));
                         }
                         Ok(JsValue::from(true))
                     })
@@ -5286,10 +5216,10 @@ fn create_element_object(
                 unsafe {
                     NativeFunction::from_closure(move |_this, _args, _ctx| {
                         let dom = int_dom.read();
-                        if let Some(ref snap) = *dom {
-                            if let Some(cs) = LayoutEngine::compute_style(snap, int_id) {
-                                return Ok(JsValue::from(cs.interactive));
-                            }
+                        if let Some(ref snap) = *dom
+                            && let Some(cs) = LayoutEngine::compute_style(snap, int_id)
+                        {
+                            return Ok(JsValue::from(cs.interactive));
                         }
                         Ok(JsValue::from(false))
                     })
@@ -5377,18 +5307,18 @@ fn js_value_to_json(value: &JsValue, context: &mut Context) -> Value {
             Value::String(s.to_std_string_escaped())
         }
         JsValue::Object(obj) => {
-            if obj.is_array() {
-                if let Ok(arr) = JsArray::from_object(obj.clone()) {
-                    let len = arr.length(context).unwrap_or(0) as usize;
-                    let mut vec = Vec::with_capacity(len);
-                    for i in 0..len {
-                        match arr.at(i as i64, context) {
-                            Ok(elem) => vec.push(js_value_to_json(&elem, context)),
-                            Err(_) => vec.push(Value::Null),
-                        }
+            if obj.is_array()
+                && let Ok(arr) = JsArray::from_object(obj.clone())
+            {
+                let len = arr.length(context).unwrap_or(0) as usize;
+                let mut vec = Vec::with_capacity(len);
+                for i in 0..len {
+                    match arr.at(i as i64, context) {
+                        Ok(elem) => vec.push(js_value_to_json(&elem, context)),
+                        Err(_) => vec.push(Value::Null),
                     }
-                    return Value::Array(vec);
                 }
+                return Value::Array(vec);
             }
             object_to_json_via_stringify(obj, context)
         }
@@ -5402,24 +5332,18 @@ fn object_to_json_via_stringify(obj: &boa_engine::JsObject, context: &mut Contex
         .get(js_string!("JSON"), context)
         .unwrap_or_else(|_| JsValue::undefined());
 
-    if let Some(json_obj) = json_global.as_object() {
-        if let Ok(stringify_fn) = json_obj.get(js_string!("stringify"), context) {
-            if stringify_fn.is_callable() {
-                if let Some(obj_inner) = stringify_fn.as_object() {
-                    if let Ok(result) =
-                        obj_inner.call(&JsValue::undefined(), &[obj.clone().into()], context)
-                    {
-                        if let Some(s) = result.as_string() {
-                            let json_str = s.to_std_string_escaped();
-                            if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
-                                return parsed;
-                            }
-                            return Value::String(json_str);
-                        }
-                    }
-                }
-            }
+    if let Some(json_obj) = json_global.as_object()
+        && let Ok(stringify_fn) = json_obj.get(js_string!("stringify"), context)
+        && stringify_fn.is_callable()
+        && let Some(obj_inner) = stringify_fn.as_object()
+        && let Ok(result) = obj_inner.call(&JsValue::undefined(), &[obj.clone().into()], context)
+        && let Some(s) = result.as_string()
+    {
+        let json_str = s.to_std_string_escaped();
+        if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
+            return parsed;
         }
+        return Value::String(json_str);
     }
 
     if let Ok(s) = JsValue::from(obj.clone()).to_string(context) {
@@ -5740,19 +5664,18 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
                 return s;
             }
         }
-        if let Some(obj) = opaque.as_object() {
-            if let Ok(msg_val) = obj.get(js_string!("message"), context) {
-                if let Some(msg) = msg_val.as_string() {
-                    let msg_str = msg.to_std_string_escaped();
-                    if !msg_str.is_empty() {
-                        if let Ok(name_val) = obj.get(js_string!("name"), context) {
-                            if let Some(name) = name_val.as_string() {
-                                return format!("{}: {}", name.to_std_string_escaped(), msg_str);
-                            }
-                        }
-                        return msg_str;
-                    }
+        if let Some(obj) = opaque.as_object()
+            && let Ok(msg_val) = obj.get(js_string!("message"), context)
+            && let Some(msg) = msg_val.as_string()
+        {
+            let msg_str = msg.to_std_string_escaped();
+            if !msg_str.is_empty() {
+                if let Ok(name_val) = obj.get(js_string!("name"), context)
+                    && let Some(name) = name_val.as_string()
+                {
+                    return format!("{}: {}", name.to_std_string_escaped(), msg_str);
                 }
+                return msg_str;
             }
         }
         return format!("Error: {:?}", opaque);
@@ -5791,18 +5714,17 @@ fn register_window_globals(
     let body_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let snap = snap_body.read();
-            if let Some(ref s) = *snap {
-                if let Some(bid) = s.body_id {
-                    if let Some(node) = s.nodes.get(&bid) {
-                        return Ok(create_element_object(
-                            s,
-                            node,
-                            ctx,
-                            &mutations_body,
-                            &snap_body,
-                        ));
-                    }
-                }
+            if let Some(ref s) = *snap
+                && let Some(bid) = s.body_id
+                && let Some(node) = s.nodes.get(&bid)
+            {
+                return Ok(create_element_object(
+                    s,
+                    node,
+                    ctx,
+                    &mutations_body,
+                    &snap_body,
+                ));
             }
             Ok(JsValue::null())
         })
@@ -5813,18 +5735,17 @@ fn register_window_globals(
     let head_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             let snap = snap_head.read();
-            if let Some(ref s) = *snap {
-                if let Some(hid) = s.head_id {
-                    if let Some(node) = s.nodes.get(&hid) {
-                        return Ok(create_element_object(
-                            s,
-                            node,
-                            ctx,
-                            &mutations_head,
-                            &snap_head,
-                        ));
-                    }
-                }
+            if let Some(ref s) = *snap
+                && let Some(hid) = s.head_id
+                && let Some(node) = s.nodes.get(&hid)
+            {
+                return Ok(create_element_object(
+                    s,
+                    node,
+                    ctx,
+                    &mutations_head,
+                    &snap_head,
+                ));
             }
             Ok(JsValue::null())
         })

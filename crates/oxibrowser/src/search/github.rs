@@ -8,7 +8,7 @@
 //! - Optional token increases rate limit from 60/hr to 5000/hr.
 //! - User-Agent header is required by GitHub API.
 
-use super::engine::{url_encode, GitHubExtra, SearchEngine, SearchError, SearchResult};
+use super::engine::{GitHubExtra, SearchEngine, SearchError, SearchResult, url_encode};
 
 /// GitHub search mode: repositories or issues.
 enum GitHubMode {

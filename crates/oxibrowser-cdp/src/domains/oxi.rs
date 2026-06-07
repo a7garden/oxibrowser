@@ -9,7 +9,7 @@
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Handle OXI domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
