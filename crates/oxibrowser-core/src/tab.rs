@@ -8,6 +8,83 @@
 //! - `click`/`type` are built-in — no JS assembly by the consumer.
 //!
 //! Created via `Browser::new_tab()`.
+//!
+use core::fmt;
+
+/// Wait until this condition is satisfied.
+///
+/// Each variant has its own resolution semantics — see the variant doc.
+/// Used with [`Tab::wait_for_condition`] and [`Tab::click_and_stabilize`].
+///
+/// `Visible(selector)` is the most common case: wait for a CSS selector
+/// to match at least one element in the current page's DOM. The legacy
+/// [`Tab::wait_for`] is a thin wrapper around this variant that emits the
+/// same `BrowserEvent::WaitingForSelector` telemetry.
+///
+/// `NetworkIdle` waits for the Session's in-flight HTTP request counter
+/// to reach zero and stay at zero for [`IdleOptions::quiet_window_ms`].
+/// The counter tracks navigates (`goto`, `back`, `forward`, `reload`,
+/// `post`), sub-resource loads, AND JS-issued fetches via the background
+/// `handle_fetch_requests` thread — so a click that triggers an XHR
+/// round-trip genuinely blocks until the XHR returns.
+///
+/// `DomContentLoaded` and `Load` resolve immediately for the current
+/// `goto` cycle because the synchronous HTTP fetch + DOM parse in
+/// `Session::navigate` already represents the document-parsed state by
+/// the time `Tab::goto` returns. They're useful in scripts that want to
+/// express intent (`wait_for_condition(DomContentLoaded, ...)`) without
+/// a behavioral difference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitCondition {
+    /// A CSS selector matches at least one element in the current DOM.
+    Visible(String),
+    /// In-flight HTTP request counter has been zero for the quiet window.
+    NetworkIdle,
+    /// `DOMContentLoaded` boundary has been crossed for the current page.
+    DomContentLoaded,
+    /// `load` boundary has been crossed for the current page.
+    Load,
+}
+
+impl WaitCondition {
+    /// Human-readable description for telemetry / error messages.
+    fn describe(&self) -> String {
+        match self {
+            Self::Visible(s) => format!("visible:{s}"),
+            Self::NetworkIdle => "networkidle".into(),
+            Self::DomContentLoaded => "domcontentloaded".into(),
+            Self::Load => "load".into(),
+        }
+    }
+}
+
+impl fmt::Display for WaitCondition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
+
+/// Tunable parameters for [`Tab::wait_for_condition`].
+///
+/// Defaults: 50ms poll interval, 500ms quiet window for `NetworkIdle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitOptions {
+    /// How long to wait between condition checks. Default 50ms.
+    pub poll_interval_ms: u64,
+    /// For `NetworkIdle`: how long the in-flight counter must remain at
+    /// zero before the condition resolves. Default 500ms. Ignored by
+    /// other variants.
+    pub quiet_window_ms: u64,
+}
+
+impl Default for WaitOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: 50,
+            quiet_window_ms: 500,
+        }
+    }
+}
 
 use crate::browse_result::BrowseResult;
 use crate::error::{CoreError, Result};
@@ -551,6 +628,167 @@ impl Tab {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
+    /// Wait until `cond` is satisfied.
+    ///
+    /// Polls every `options.poll_interval_ms` (default 50ms). Returns
+    /// `Err(CoreError::Timeout)` if `timeout_ms` elapses first. For
+    /// `NetworkIdle`, the in-flight counter must be zero AND stay at zero
+    /// for `options.quiet_window_ms` (default 500ms).
+    ///
+    /// Note: `Visible(...)` does NOT emit `BrowserEvent::WaitingForSelector`
+    /// — that's the legacy `wait_for` telemetry. Use [`Tab::wait_for`] when
+    /// you specifically want the existing event-stream contract; reach for
+    /// `wait_for_condition(Visible(...), ...)` when you want the richer
+    /// condition API and don't depend on event observers.
+    pub async fn wait_for_condition(&self, cond: WaitCondition, timeout_ms: u64) -> Result<()> {
+        self.wait_for_condition_with(cond, timeout_ms, WaitOptions::default())
+            .await
+    }
+
+    /// Same as [`Tab::wait_for_condition`] with explicit [`WaitOptions`].
+    ///
+    /// Lets callers tune the poll interval and (for `NetworkIdle`) the
+    /// quiet window without re-spelling the condition every call.
+    pub async fn wait_for_condition_with(
+        &self,
+        cond: WaitCondition,
+        timeout_ms: u64,
+        options: WaitOptions,
+    ) -> Result<()> {
+        let poll = std::time::Duration::from_millis(options.poll_interval_ms.max(1));
+        let quiet = std::time::Duration::from_millis(options.quiet_window_ms);
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(timeout_ms);
+
+        // For NetworkIdle, track when the counter first observed zero so we
+        // can require it to STAY at zero for `quiet_window_ms`. This matches
+        // the Playwright/Puppeteer semantic: "no requests for N ms".
+        let mut idle_since: Option<std::time::Instant> = None;
+
+        tracing::debug!(condition = %cond, timeout_ms, "wait_for_condition started");
+
+        loop {
+            // Check the condition under the session lock. We release the lock
+            // before sleeping so other tabs/observers don't see the tab as
+            // stalled while a wait is in flight.
+            let (satisfied, snapshot_in_flight) = {
+                let session = self.inner.lock().await;
+                match &cond {
+                    WaitCondition::Visible(selector) => {
+                        let ok = session
+                            .page()
+                            .and_then(|p| p.root_frame().query_selector(selector))
+                            .is_some();
+                        (ok, 0)
+                    }
+                    WaitCondition::NetworkIdle => {
+                        // Snapshot the counter under the lock to get a
+                        // consistent read; we don't hold the lock across
+                        // `tokio::time::sleep`.
+                        let n = session.in_flight_requests();
+                        (n == 0, n)
+                    }
+                    WaitCondition::DomContentLoaded | WaitCondition::Load => {
+                        // Document parse completes before Tab::goto returns,
+                        // so by the time anyone calls wait_for_condition the
+                        // page is already past these boundaries. If a page
+                        // isn't loaded yet (no active page), treat as not
+                        // satisfied and wait — the caller is racing goto.
+                        (session.page().is_some(), 0)
+                    }
+                }
+            };
+
+            if satisfied {
+                if let WaitCondition::NetworkIdle = cond {
+                    match idle_since {
+                        None => {
+                            idle_since = Some(std::time::Instant::now());
+                            // Don't return yet — require the quiet window.
+                        }
+                        Some(t) if t.elapsed() >= quiet => {
+                            tracing::debug!(
+                                condition = %cond,
+                                quiet_window_ms = options.quiet_window_ms,
+                                "wait_for_condition resolved"
+                            );
+                            return Ok(());
+                        }
+                        Some(_) => {
+                            // In the quiet window but not yet expired. Fall
+                            // through to the sleep + re-check below.
+                        }
+                    }
+                } else {
+                    tracing::debug!(condition = %cond, "wait_for_condition resolved");
+                    return Ok(());
+                }
+            } else if matches!(cond, WaitCondition::NetworkIdle) {
+                // A new request came in while we were waiting — reset the
+                // quiet window. Otherwise we could "remember" an idle streak
+                // from before a fetch started.
+                idle_since = None;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Err(CoreError::Timeout(format!(
+                    "wait_for_condition({cond}) timed out after {timeout_ms}ms \
+                     (in_flight={snapshot_in_flight})"
+                )));
+            }
+
+            tokio::time::sleep(poll).await;
+        }
+    }
+
+    /// Click an element matching `selector`, then wait for the page to
+    /// settle — i.e. wait until [`WaitCondition::NetworkIdle`] (with a
+    /// default 5s settle timeout) so XHRs triggered by the click have
+    /// completed before the next automation step runs.
+    ///
+    /// This is the fix for "clicked before the element rendered": instead
+    /// of issuing a click and immediately querying the DOM, the caller
+    /// waits for the resulting network activity to drain.
+    ///
+    /// The default settle timeout is 5000ms; pass `settle_timeout_ms`
+    /// to override. NetworkIdle uses a 500ms quiet window (the default
+    /// in [`WaitOptions`]) — a post-click XHR that finishes within that
+    /// window genuinely blocks; a slow request gets the full settle.
+    pub async fn click_and_stabilize(&self, selector: &str) -> Result<()> {
+        self.click_and_stabilize_with(selector, 5_000, WaitOptions::default())
+            .await
+    }
+
+    /// Same as [`Tab::click_and_stabilize`] with explicit settle timeout
+    /// and [`WaitOptions`] (e.g. custom quiet window).
+    pub async fn click_and_stabilize_with(
+        &self,
+        selector: &str,
+        settle_timeout_ms: u64,
+        options: WaitOptions,
+    ) -> Result<()> {
+        // Issue the click first — this enqueues any JS handler to run on
+        // the JS runtime thread (which then enqueues fetches via the mpsc
+        // channel into handle_fetch_requests).
+        self.click(selector).await?;
+
+        // Post-click settle: the click dispatched a MouseEvent that returns
+        // synchronously to us, but the JS click handler that issues fetch/XHR
+        // may not have started yet — there's a race between click() returning
+        // here and the JS runtime thread actually queuing the fetch message.
+        // Sleeping one poll tick before requiring NetworkIdle gives the JS
+        // handler time to run and the mpsc channel time to deliver the fetch
+        // request to the background thread (which increments the counter).
+        tokio::time::sleep(std::time::Duration::from_millis(
+            options.poll_interval_ms.max(1),
+        ))
+        .await;
+
+        // Now wait for NetworkIdle. We pass `settle_timeout_ms` as the upper
+        // bound; the quiet window is controlled by `options.quiet_window_ms`.
+        self.wait_for_condition_with(WaitCondition::NetworkIdle, settle_timeout_ms, options)
+            .await
+    }
 
     // -----------------------------------------------------------------------
     // Sub-resources
@@ -641,11 +879,19 @@ impl Tab {
             None => BrowseResult::empty(),
         }
     }
+
+    /// Test-only: clone the in-flight request counter handle so tests
+    /// can simulate request starts/completions without a real HTTP
+    /// round-trip. Wrapped in `cfg(test)` so it's invisible to consumers.
+    #[cfg(test)]
+    async fn in_flight_counter_for_test(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        let session = self.inner.lock().await;
+        session.in_flight_counter_handle_for_test()
+    }
 }
 
 // -----------------------------------------------------------------------
 // Key name → code mapping (for press_key)
-// -----------------------------------------------------------------------
 
 /// Map a human-readable key name to a DOM `KeyboardEvent.code` string.
 fn key_to_code(key: &str) -> String {
@@ -1012,5 +1258,206 @@ mod tests {
         let v = serde_json::json!(["ok", 42, true, "also ok"]);
         let result = parse_js_string_array(Some(&v));
         assert_eq!(result, vec!["ok", "also ok"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // WaitCondition / wait_for_condition / click_and_stabilize
+    // -----------------------------------------------------------------------
+
+    /// `Visible(...)` resolves immediately when the selector matches an
+    /// element in the current DOM.
+    #[tokio::test]
+    async fn test_wait_for_condition_visible_resolves() {
+        let html = "<!DOCTYPE html><html><body>\
+                    <button id=\"go\">Go</button>\
+                    </body></html>";
+        let tab = tab_with_html(html).await;
+
+        let started = std::time::Instant::now();
+        tab.wait_for_condition(WaitCondition::Visible("#go".into()), 1_000)
+            .await
+            .expect("should resolve immediately");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "visible condition should resolve quickly, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `Visible(...)` returns `Err(CoreError::Timeout)` when the selector
+    /// never matches.
+    #[tokio::test]
+    async fn test_wait_for_condition_visible_times_out() {
+        let html = "<!DOCTYPE html><html><body><p>nothing here</p></body></html>";
+        let tab = tab_with_html(html).await;
+
+        let err = tab
+            .wait_for_condition(WaitCondition::Visible(".missing".into()), 120)
+            .await
+            .expect_err("must time out");
+        match err {
+            CoreError::Timeout(msg) => {
+                assert!(msg.contains("wait_for_condition"), "msg={msg}");
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    /// `DomContentLoaded` resolves as soon as a page is loaded — the
+    /// document parse completes inside `Session::navigate`, so by the
+    /// time a Tab exists with an active page the boundary has been crossed.
+    #[tokio::test]
+    async fn test_wait_for_condition_dom_content_loaded_resolves() {
+        let html = "<!DOCTYPE html><html><body><p>hi</p></body></html>";
+        let tab = tab_with_html(html).await;
+
+        let started = std::time::Instant::now();
+        tab.wait_for_condition(WaitCondition::DomContentLoaded, 500)
+            .await
+            .expect("DCL should resolve immediately for a loaded page");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "DCL should resolve quickly, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `NetworkIdle` resolves after the in-flight counter is observed at
+    /// zero for the configured quiet window. The test starts with the
+    /// counter at 0 and asserts the wait honored the quiet window.
+    #[tokio::test]
+    async fn test_wait_for_condition_network_idle_resolves_when_quiet() {
+        let html = "<!DOCTYPE html><html><body><p>quiet</p></body></html>";
+        let tab = tab_with_html(html).await;
+
+        let counter = tab.in_flight_counter_for_test().await;
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let options = WaitOptions {
+            poll_interval_ms: 20,
+            quiet_window_ms: 100,
+        };
+        let started = std::time::Instant::now();
+        tab.wait_for_condition_with(WaitCondition::NetworkIdle, 2_000, options)
+            .await
+            .expect("NetworkIdle should resolve when counter is already zero");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "should wait at least the quiet window, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1_500),
+            "should not wait much longer than the quiet window, took {elapsed:?}"
+        );
+    }
+
+    /// `NetworkIdle` resets its quiet-window clock whenever the counter
+    /// goes back up after being zero — i.e. a request started during the
+    /// idle streak must restart the wait. This is the core correctness
+    /// property that prevents the "clicked before element rendered" bug.
+    #[tokio::test]
+    async fn test_wait_for_condition_network_idle_resets_on_new_request() {
+        let html = "<!DOCTYPE html><html><body><p>reset</p></body></html>";
+        let tab = tab_with_html(html).await;
+        let counter = tab.in_flight_counter_for_test().await;
+
+        let options = WaitOptions {
+            poll_interval_ms: 10,
+            quiet_window_ms: 80,
+        };
+
+        // Mimic a click-triggered fetch: keep counter > 0 for ~120ms
+        // (longer than the quiet window), then release. NetworkIdle
+        // must NOT resolve during the burst.
+        let burst = counter.clone();
+        let burst_handle = tokio::spawn(async move {
+            burst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            burst.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        tab.wait_for_condition_with(WaitCondition::NetworkIdle, 2_000, options)
+            .await
+            .expect("NetworkIdle should resolve after the burst drains");
+        let elapsed = started.elapsed();
+
+        burst_handle.await.expect("burst task should complete");
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(120),
+            "should not resolve during in-flight burst, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "should resolve shortly after burst drains, took {elapsed:?}"
+        );
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// `click_and_stabilize` clicks the element, then waits for
+    /// NetworkIdle. With no JS handler issuing fetches, the counter
+    /// stays at zero and the call returns after settle + quiet window.
+    #[tokio::test]
+    async fn test_click_and_stabilize_resolves() {
+        let html = "<!DOCTYPE html><html><body>\
+                    <a id=\"link\" href=\"#\">Click me</a>\
+                    </body></html>";
+        let tab = tab_with_html(html).await;
+
+        tab.click_and_stabilize_with(
+            "#link",
+            2_000,
+            WaitOptions {
+                poll_interval_ms: 20,
+                quiet_window_ms: 50,
+            },
+        )
+        .await
+        .expect("click_and_stabilize should resolve with no in-flight fetches");
+    }
+
+    /// `click_and_stabilize` errors with `DomError` when the selector
+    /// doesn't match — same contract as `click()`, surfaced before the
+    /// network-idle wait runs.
+    #[tokio::test]
+    async fn test_click_and_stabilize_selector_miss_errors() {
+        let html = "<!DOCTYPE html><html><body><p>nothing</p></body></html>";
+        let tab = tab_with_html(html).await;
+
+        let err = tab
+            .click_and_stabilize("#missing")
+            .await
+            .expect_err("must fail when selector misses");
+        match err {
+            CoreError::DomError(msg) => {
+                assert!(msg.contains("click"), "msg={msg}");
+            }
+            other => panic!("expected DomError, got {other:?}"),
+        }
+    }
+
+    /// `WaitCondition` round-trips through `Display` for telemetry.
+    #[test]
+    fn test_wait_condition_display() {
+        assert_eq!(
+            WaitCondition::Visible("#x".into()).to_string(),
+            "visible:#x"
+        );
+        assert_eq!(WaitCondition::NetworkIdle.to_string(), "networkidle");
+        assert_eq!(
+            WaitCondition::DomContentLoaded.to_string(),
+            "domcontentloaded"
+        );
+        assert_eq!(WaitCondition::Load.to_string(), "load");
+    }
+
+    /// `WaitOptions::default()` has the documented values.
+    #[test]
+    fn test_wait_options_default_values() {
+        let opts = WaitOptions::default();
+        assert_eq!(opts.poll_interval_ms, 50);
+        assert_eq!(opts.quiet_window_ms, 500);
     }
 }

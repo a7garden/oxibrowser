@@ -8,8 +8,8 @@ pub use crate::network::{InterceptedBody, InterceptedResponse};
 /// Either a real HTTP response or a synthetic intercepted response.
 #[derive(Debug)]
 pub enum FetchResult {
-    /// Real HTTP response from reqwest.
-    Real(reqwest::Response),
+    /// Real HTTP response from wreq.
+    Real(wreq::Response),
     /// Synthetic response from Fetch.fulfillRequest.
     Intercepted(InterceptedResponse),
 }
@@ -82,8 +82,8 @@ impl From<url::ParseError> for CoreError {
     }
 }
 
-impl From<reqwest::Error> for CoreError {
-    fn from(e: reqwest::Error) -> Self {
+impl From<wreq::Error> for CoreError {
+    fn from(e: wreq::Error) -> Self {
         if e.is_timeout() {
             return CoreError::ConnectionTimeout(e.to_string());
         }

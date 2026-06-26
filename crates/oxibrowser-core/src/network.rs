@@ -16,5 +16,5 @@ pub use intercept::{
 pub use ip_filter::IpFilter;
 pub use robots::RobotStore;
 
-// Re-export reqwest Response for use in HttpClient::fetch return type
-pub use reqwest::Response;
+// Re-export wreq Response for use in HttpClient::fetch return type
+pub use wreq::Response;

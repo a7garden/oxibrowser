@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tracing::info;
 use url::Url;
 
@@ -81,6 +81,16 @@ pub struct Session {
     local_storage_task: Option<std::thread::JoinHandle<()>>,
     /// Whether the session has been closed.
     closed: AtomicBool,
+    /// In-flight HTTP request counter shared with the fetch handler thread.
+    ///
+    /// Incremented when a request is dispatched (navigate / go_back /
+    /// go_forward / reload / post / load_sub_resources / JS-issued fetch)
+    /// and decremented when its response (or terminal error) is observed.
+    /// `wait_for_condition(NetworkIdle)` polls this counter on the Tab side.
+    /// Stored as `Arc<AtomicU64>` so the background `handle_fetch_requests`
+    /// thread can share the same counter without holding `&Session` — matches
+    /// the existing pattern for `local_storage` and `response_bodies`.
+    in_flight: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +99,18 @@ pub struct Session {
 
 /// Handle fetch requests from the JS thread.
 /// Spawns a minimal tokio runtime for async HTTP calls.
+///
+/// `in_flight` is incremented when a request is dequeued from `fetch_rx`
+/// and decremented exactly once per request after the response (or
+/// terminal error) has been pushed onto the response channel — every
+/// `continue` / `break` branch must decrement before exiting the match,
+/// or `wait_for_condition(NetworkIdle)` will hang waiting for a counter
+/// that never returns to zero.
 fn handle_fetch_requests(
     fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>,
     http_client: Arc<HttpClient>,
     _cookie_jar: Arc<RwLock<CookieJar>>,
+    in_flight: Arc<AtomicU64>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -110,6 +128,10 @@ fn handle_fetch_requests(
             // Use try_recv to avoid blocking
             match fetch_rx.try_recv() {
                 Ok(request) => {
+                    // Mark this request as in-flight before any await — the
+                    // wait_for_condition(NetworkIdle) consumer may observe
+                    // the counter at any moment.
+                    in_flight.fetch_add(1, Ordering::Relaxed);
                     // Process the fetch request
                     let url = match Url::parse(&request.url) {
                         Ok(u) => u,
@@ -122,6 +144,7 @@ fn handle_fetch_requests(
                                 body: String::new(),
                                 error: Some(format!("invalid URL: {}", e)),
                             });
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
                             continue;
                         }
                     };
@@ -135,7 +158,7 @@ fn handle_fetch_requests(
                                 .canonical_reason()
                                 .unwrap_or("")
                                 .to_string();
-                            let resp_url = response.url().to_string();
+                            let resp_url = response.uri().to_string();
                             let headers: Vec<(String, String)> = response
                                 .headers()
                                 .iter()
@@ -152,6 +175,7 @@ fn handle_fetch_requests(
                                         body: String::new(),
                                         error: Some(format!("failed to read body: {}", e)),
                                     });
+                                    in_flight.fetch_sub(1, Ordering::Relaxed);
                                     continue;
                                 }
                             };
@@ -164,6 +188,7 @@ fn handle_fetch_requests(
                                 body,
                                 error: None,
                             });
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
                         }
                         Err(e) => {
                             let _ = request.response_tx.send(FetchResponseMsg {
@@ -174,6 +199,7 @@ fn handle_fetch_requests(
                                 body: String::new(),
                                 error: Some(e.to_string()),
                             });
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -217,6 +243,29 @@ fn handle_local_storage_sync(
     }
 }
 
+/// RAII guard for the Session in-flight request counter.
+///
+/// Increments on construction; decrements on drop. Using a guard instead of
+/// manual `fetch_add` / `fetch_sub` pairs ensures the counter always returns
+/// to its correct value even when an awaited HTTP call returns `Err` and
+/// the caller early-returns via `?` — the guard's `Drop` runs regardless.
+struct InFlightGuard {
+    counter: Arc<AtomicU64>,
+}
+
+impl InFlightGuard {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl Session {
     /// Create a new session.
     #[tracing::instrument(skip(config, http_client, cookie_jar), err)]
@@ -242,8 +291,15 @@ impl Session {
         // Spawn fetch handler on a blocking thread
         let http_client_clone = http_client.clone();
         let cookie_jar_clone = cookie_jar.clone();
+        let in_flight = Arc::new(AtomicU64::new(0));
+        let in_flight_clone = in_flight.clone();
         let fetch_task = Some(std::thread::spawn(move || {
-            handle_fetch_requests(fetch_rx, http_client_clone, cookie_jar_clone);
+            handle_fetch_requests(
+                fetch_rx,
+                http_client_clone,
+                cookie_jar_clone,
+                in_flight_clone,
+            );
         }));
 
         // Spawn localStorage sync handler thread
@@ -273,6 +329,7 @@ impl Session {
             fetch_task,
             local_storage_task,
             closed: AtomicBool::new(false),
+            in_flight,
         })
     }
 
@@ -285,16 +342,20 @@ impl Session {
 
         let parsed = Url::parse(url)?;
 
-        info!(url = %parsed, "navigating");
-
+        // `data:` URLs are resolved locally (no HTTP fetch) so the stealth
+        // surface can be exercised fully offline.
         if parsed.scheme() == "data" {
             return self.navigate_data_url(&parsed).await;
         }
+
+        info!(url = %parsed, "navigating");
+
         // Fetch the document
         let start = std::time::Instant::now();
+        let _in_flight = InFlightGuard::new(self.in_flight.clone());
         let response = self.http_client.fetch(&parsed).await?;
         let status = response.status().as_u16();
-        let final_url = response.url().clone();
+        let final_url = Url::parse(&response.uri().to_string()).unwrap_or_else(|_| parsed.clone());
 
         // Check for HTTP errors
         if status >= 400 {
@@ -425,6 +486,7 @@ impl Session {
             let url = self.history[self.history_index].clone();
 
             // Re-fetch without adding to history
+            let _in_flight = InFlightGuard::new(self.in_flight.clone());
             let response = self.http_client.fetch(&url).await?;
             let ct_header = response
                 .headers()
@@ -454,6 +516,7 @@ impl Session {
             self.history_index += 1;
             let url = self.history[self.history_index].clone();
 
+            let _in_flight = InFlightGuard::new(self.in_flight.clone());
             let response = self.http_client.fetch(&url).await?;
             let ct_header = response
                 .headers()
@@ -480,6 +543,7 @@ impl Session {
             return Err(CoreError::SessionClosed);
         }
         if let Some(url) = self.current_url() {
+            let _in_flight = InFlightGuard::new(self.in_flight.clone());
             let response = self.http_client.fetch(url).await?;
             let ct_header = response
                 .headers()
@@ -515,6 +579,7 @@ impl Session {
 
         info!(url = %parsed, content_type, "POST request");
 
+        let _in_flight = InFlightGuard::new(self.in_flight.clone());
         let response = match content_type {
             "application/json" => {
                 let json_value = serde_json::from_str::<serde_json::Value>(body)
@@ -542,7 +607,7 @@ impl Session {
             .unwrap_or("text/html")
             .to_string();
 
-        let final_url = response.url().clone();
+        let final_url = Url::parse(&response.uri().to_string()).unwrap_or_else(|_| parsed.clone());
 
         let bytes = response
             .bytes()
@@ -603,12 +668,35 @@ impl Session {
             .evaluate_with_await(expression, await_promise)
             .await?;
 
-        // Collect and apply DOM mutations
-        let mutations = self.js_runtime.drain_mutations();
-        if !mutations.is_empty() {
-            tracing::debug!(mutations = mutations.len(), "DOM mutations applied");
-            self.apply_mutations(&mutations);
+        // Collect DOM mutations; separate async navigation from sync DOM edits.
+        let mut mutations = self.js_runtime.drain_mutations();
+        let mut navigation: Vec<DomMutation> = Vec::new();
+        let mut dom_edits: Vec<DomMutation> = Vec::new();
+        for m in mutations.drain(..) {
+            match m {
+                DomMutation::Navigate { .. } | DomMutation::Reload => navigation.push(m),
+                other => dom_edits.push(other),
+            }
+        }
+        if !dom_edits.is_empty() {
+            tracing::debug!(mutations = dom_edits.len(), "DOM mutations applied");
+            self.apply_mutations(&dom_edits);
             self.inject_dom_snapshot();
+        }
+        // JS-triggered navigation needs network I/O, so it runs asynchronously
+        // after the synchronous DOM mutations have been applied.
+        for m in navigation {
+            match m {
+                DomMutation::Navigate { url } => {
+                    tracing::debug!(url = %url, "JS-triggered navigation");
+                    self.navigate(&url).await?;
+                }
+                DomMutation::Reload => {
+                    tracing::debug!("JS-triggered reload");
+                    self.reload().await?;
+                }
+                _ => {}
+            }
         }
 
         Ok(result)
@@ -719,6 +807,10 @@ impl Session {
                         );
                     }
                 }
+                // Navigation mutations are executed asynchronously in
+                // `evaluate_js_with_await` (network I/O); they never reach this
+                // synchronous helper, but the match must stay exhaustive.
+                DomMutation::Navigate { .. } | DomMutation::Reload => {}
             }
         }
     }
@@ -795,6 +887,19 @@ impl Session {
         self.http_client.clone()
     }
 
+    /// Snapshot of currently in-flight HTTP requests (navigates + JS fetches).
+    ///
+    /// Returns the count of dispatched requests whose response (or terminal
+    /// error) has not yet been observed. `wait_for_condition(NetworkIdle)`
+    /// polls this value via the Tab layer; it is also useful for tests and
+    /// for surfacing load progress in higher layers. The counter is shared
+    /// with the background fetch handler thread via `Arc<AtomicU64>` and
+    /// updated under `Relaxed` ordering — fast to read, may briefly
+    /// straddle a request start/complete.
+    pub fn in_flight_requests(&self) -> u64 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
     /// Get navigation history.
     pub fn history(&self) -> &[Url] {
         &self.history
@@ -863,6 +968,14 @@ impl Session {
         self.inject_dom_snapshot();
     }
 
+    /// Test-only: clone the in-flight counter's `Arc` so tests can
+    /// simulate request starts/completions without driving a real
+    /// `Session::navigate` / `handle_fetch_requests` round-trip.
+    #[cfg(test)]
+    pub fn in_flight_counter_handle_for_test(&self) -> Arc<AtomicU64> {
+        self.in_flight.clone()
+    }
+
     /// Fetch sub-resources (JS, CSS, images) referenced by the current page.
     ///
     /// Extracts resource URLs from the DOM, fetches them over HTTP,
@@ -907,6 +1020,7 @@ impl Session {
                 }
             };
 
+            let _in_flight = InFlightGuard::new(self.in_flight.clone());
             match self.http_client.fetch_text(&full_url).await {
                 Ok(body) => {
                     let resource = crate::network::resource::Resource {

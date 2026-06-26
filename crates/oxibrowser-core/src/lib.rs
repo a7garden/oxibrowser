@@ -4,9 +4,11 @@
 
 pub mod browse_result;
 pub mod browser;
+pub mod challenge;
 pub mod config;
 pub mod css;
 pub mod event;
+pub mod extract;
 pub mod frame;
 pub mod page;
 pub mod script;

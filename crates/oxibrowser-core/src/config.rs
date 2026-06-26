@@ -26,7 +26,10 @@ mod duration_secs {
 // ---------------------------------------------------------------------------
 
 fn default_user_agent() -> String {
-    "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)".to_string()
+    // Chrome 149 macOS — must match the wreq Emulation::Chrome149 profile
+    // (sec-ch-ua v=149, sec-ch-ua-platform "macOS") so transport and JS
+    // navigator.userAgent agree. See network/client.rs emulation().
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36".to_string()
 }
 
 fn default_timeout_secs() -> Duration {
@@ -215,7 +218,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = BrowserConfig::default();
-        assert!(config.user_agent.contains("OxiBrowser"));
+        assert!(config.user_agent.contains("Chrome/149"));
         assert_eq!(config.default_timeout, Duration::from_secs(30));
         assert!(config.obey_robots, "default should obey robots.txt");
         assert_eq!(config.max_sessions, 10);
@@ -283,7 +286,7 @@ mod tests {
         assert!(!config.obey_robots);
         assert_eq!(config.js_timeout_ms, 9999);
         // Defaults preserved
-        assert!(config.user_agent.contains("OxiBrowser"));
+        assert!(config.user_agent.contains("Chrome/149"));
         assert_eq!(config.max_sessions, 10);
     }
 

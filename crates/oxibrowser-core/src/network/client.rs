@@ -5,15 +5,17 @@
 //! - `intercept` — fetch with an InterceptAction (continue/fail/fulfill)
 //! - `fetch_text`, `post`, `post_json` — convenience methods
 
+use crate::challenge;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::network::cookie::CookieJar;
 use crate::network::intercept::{InterceptAction, InterceptedBody, InterceptedResponse};
 use crate::network::ip_filter::IpFilter;
 use parking_lot::RwLock;
-use reqwest::{Client, Response};
 use std::sync::Arc;
 use url::Url;
+use wreq::{Client, Response};
+use wreq_util::Emulation;
 
 /// Check if a URL is allowed by the SSRF filter.
 /// This is a standalone function so it can be used both for initial requests
@@ -32,6 +34,17 @@ pub struct HttpClient {
     config: BrowserConfig,
     cookie_jar: Arc<RwLock<CookieJar>>,
     ip_filter: Arc<IpFilter>,
+}
+
+/// Outcome of [`HttpClient::fetch_with_challenge_retry`].
+#[derive(Debug, Clone)]
+pub struct ChallengeOutcome {
+    /// Final HTTP status code.
+    pub status: u16,
+    /// Response body of the final attempt.
+    pub body: String,
+    /// Challenge detected on the final attempt, if any.
+    pub challenge: Option<challenge::DetectedChallenge>,
 }
 
 impl HttpClient {
@@ -54,12 +67,16 @@ impl HttpClient {
         let redirect_filter = ip_filter.clone();
 
         let mut builder = Client::builder()
+            .emulation(Emulation::Chrome149)
             .user_agent(&config.user_agent)
             .pool_max_idle_per_host(config.connection_pool_size)
             .timeout(config.default_timeout)
-            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                let url = attempt.url();
-                if !check_url_ssrf(url, &redirect_filter) {
+            .redirect(wreq::redirect::Policy::custom(move |attempt| {
+                let url = match Url::parse(&attempt.uri.to_string()) {
+                    Ok(u) => u,
+                    Err(_) => return attempt.stop(),
+                };
+                if !check_url_ssrf(&url, &redirect_filter) {
                     tracing::warn!("SSRF blocked: redirect to {} rejected (blocked IP)", url);
                     return attempt.stop();
                 }
@@ -67,7 +84,7 @@ impl HttpClient {
             }));
 
         if config.accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
+            builder = builder.tls_cert_verification(false);
         }
 
         let client = builder
@@ -135,6 +152,87 @@ impl HttpClient {
         Ok(response)
     }
 
+    /// Fetch `url`, retrying while a bot-management challenge is detected.
+    ///
+    /// Each attempt runs [`HttpClient::fetch`], reads the body, and runs
+    /// [`challenge::detect`]. With no challenge the outcome is returned at
+    /// once. When a challenge is detected the client backs off and retries —
+    /// re-sending any clearance cookie the cookie jar captured from a prior
+    /// attempt's `Set-Cookie` — up to `max_attempts`, then returns the final
+    /// outcome with the detected challenge.
+    ///
+    /// **This does not auto-execute challenge JS** (see [`crate::challenge`]).
+    /// A retry only clears the challenge when the passive stealth tier already
+    /// satisfies it, or when a clearance cookie was injected into the cookie
+    /// jar out-of-band. `max_attempts` is clamped to ≥ 1.
+    pub async fn fetch_with_challenge_retry(
+        &self,
+        url: &Url,
+        max_attempts: u32,
+    ) -> Result<ChallengeOutcome> {
+        let max_attempts = max_attempts.max(1);
+        let mut outcome = ChallengeOutcome {
+            status: 0,
+            body: String::new(),
+            challenge: None,
+        };
+        for attempt in 1..=max_attempts {
+            let response = self.fetch(url).await?;
+            let status = response.status().as_u16();
+            let headers = Self::response_headers(&response);
+            let body = response
+                .text()
+                .await
+                .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let detected = challenge::detect(status, &headers, &body);
+            let is_challenge = detected.is_some();
+            outcome = ChallengeOutcome {
+                status,
+                body,
+                challenge: detected,
+            };
+            if !is_challenge {
+                return Ok(outcome);
+            }
+            // Interactive captchas (need a human) and hard blocks can't be
+            // cleared by retrying — return the detected challenge at once.
+            if let Some(ref c) = outcome.challenge
+                && matches!(
+                    c.kind,
+                    challenge::ChallengeKind::Interactive | challenge::ChallengeKind::Blocked
+                )
+            {
+                return Ok(outcome);
+            }
+            if let Some(ref c) = outcome.challenge {
+                tracing::warn!(
+                    url = %url, attempt,
+                    vendor = c.vendor.as_str(), kind = ?c.kind,
+                    clearance_cookie = c.clearance_cookie,
+                    "bot-management challenge detected; will retry",
+                );
+            }
+            if attempt < max_attempts {
+                let backoff = std::time::Duration::from_millis(
+                    250u64
+                        .saturating_mul(2u64.saturating_pow(attempt - 1))
+                        .min(2000),
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Collect response headers into a `(name, value)` slice for [`challenge::detect`].
+    fn response_headers(response: &Response) -> Vec<(String, String)> {
+        response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect()
+    }
+
     /// Fetch with an InterceptAction from the Fetch domain.
     ///
     /// - `Continue`: perform the actual HTTP request (with optional modifications)
@@ -149,7 +247,7 @@ impl HttpClient {
         _post_data: Option<&str>,
         action: InterceptAction,
     ) -> Result<Response> {
-        use reqwest::header::{HeaderName, HeaderValue};
+        use wreq::header::{HeaderName, HeaderValue};
 
         match action {
             InterceptAction::Continue {
@@ -243,7 +341,7 @@ impl HttpClient {
 
     /// Send a POST request with a raw body.
     #[tracing::instrument(skip(self, body), err)]
-    pub async fn post(&self, url: &Url, body: impl Into<reqwest::Body>) -> Result<Response> {
+    pub async fn post(&self, url: &Url, body: impl Into<wreq::Body>) -> Result<Response> {
         self.check_ssrf(url)?;
 
         let response = self

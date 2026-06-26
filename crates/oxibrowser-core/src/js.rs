@@ -9,6 +9,7 @@ pub mod input;
 pub mod job_queue;
 pub mod mouse;
 pub mod runtime;
+pub mod stealth;
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 

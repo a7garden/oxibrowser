@@ -41,6 +41,11 @@ pub enum DomMutation {
     RemoveChild { parent_id: u32, child_id: u32 },
     /// Set innerHTML of an element (parse + replace children).
     SetInnerHtml { node_id: u32, html: String },
+    /// Real navigation triggered from JS (`location.href`/`assign`/`replace`).
+    /// Handled asynchronously by `Session::evaluate_js_with_await` (network I/O).
+    Navigate { url: String },
+    /// Page reload triggered from JS (`location.reload`).
+    Reload,
 }
 
 /// Serializable DOM node.

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.16.0] - 2026-06-26
+
+### Added
+
+- **Stealth/bot-detection layer** — `ChallengeDetector` for Cloudflare, Turnstile, reCAPTCHA, hCaptcha challenge detection (`challenge.rs`). Automatic retry with clearance cookie detection. Classifies challenges as NonInteractive (solved by retry), Interactive (needs human), or Blocked.
+- **Extraction engine** (`extract.rs`) — structured HTML-to-markdown extraction with link collection, metadata parsing (`og:title`, `og:description`, `og:image`, `twitter:card`, canonical URL), and content normalization.
+- **JS V8 parity bootstrap** — 818-line bootstrap script in `runtime.rs` simulating real V8 browser globals: `window.navigator` (platform, languages, hardwareConcurrency, maxTouchPoints, deviceMemory, plugins), `MimeTypeArray`/`PluginArray`, consistent error stack traces, timezone/locale detection.
+- **Enhanced wait conditions** — `WaitOptions` with `poll_interval_ms`, `settle_timeout_ms`, `quiet_window_ms` for flexible NetworkIdle detection. `Tab::wait_for_condition_with()` for explicit options.
+- **Challenge-aware HTTP client** — network retry/backoff for cleared challenges, interactive/blocked challenge short-circuit.
+- **`DomSnapshot::extra_attr()`** — attribute content extraction for metadata parsing.
+
+### Changed
+
+- **Network client** — `HttpClient::request()` returned type updated to `FetchOutcome` with optional `Challenge` field. Interception-aware retry for non-interactive challenges.
+- **Session/tab state** — challenge clearance cookie passthrough, structured fetch outcome reporting.
+- **Config** — `stealth` flag added to `BrowserConfig` for stealth-mode opt-in.
+
+### Internal
+
+- **JS runtime boot sequence** — `register_window_globals()` replaced with a JS bootstrap script compiled from `V8_PARITY_BOOTSTRAP` template, avoiding native `ObjectInitializer` limitations (no getter/setter support in boa 0.20).
+- **wreq 6.0.0-rc** — added as HTTP client dependency alongside `reqwest` for stealth-mode emulation (Chrome JA4+ fingerprint).
+- **Code quality** — clippy warnings resolved (collapsible if, `contains_key`, `trim_split_whitespace`); formatting applied.
+
 ## [0.15.0] - 2026-06-07
 
 ### ⚠️ BREAKING CHANGES

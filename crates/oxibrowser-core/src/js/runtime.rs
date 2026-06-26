@@ -240,6 +240,9 @@ pub struct JsRuntimeConfig {
     pub viewport_width: u32,
     /// Viewport height (pixels, 0 = headless).
     pub viewport_height: u32,
+    /// User-Agent exposed to JS (navigator.userAgent). Drives the stealth
+    /// fingerprint profile — must match the UA sent over the wire.
+    pub user_agent: String,
 }
 
 impl Default for JsRuntimeConfig {
@@ -251,6 +254,8 @@ impl Default for JsRuntimeConfig {
             max_stack_size: 1024,
             viewport_width: 1280,
             viewport_height: 720,
+            user_agent: "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)"
+                .to_string(),
         }
     }
 }
@@ -264,6 +269,7 @@ impl From<&crate::config::BrowserConfig> for JsRuntimeConfig {
             max_stack_size: config.js_max_stack_size,
             viewport_width: config.viewport_width,
             viewport_height: config.viewport_height,
+            user_agent: config.user_agent.clone(),
         }
     }
 }
@@ -311,6 +317,7 @@ impl JsRuntime {
         let console_output_clone = console_output.clone();
         let mutations_clone = mutations.clone();
         let viewport = (config.viewport_width, config.viewport_height);
+        let user_agent = config.user_agent.clone();
         let _local_storage = Arc::new(RwLock::new(HashMap::<String, String>::new()));
         std::thread::Builder::new()
             .name("oxibrowser-js".into())
@@ -322,6 +329,7 @@ impl JsRuntime {
                     mutations_clone,
                     viewport,
                     None,
+                    user_agent,
                 );
             })
             .expect("failed to spawn JS thread");
@@ -623,6 +631,7 @@ fn js_thread_loop(
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
     _fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
+    user_agent: String,
 ) {
     let fetch_tx_arc: Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>> =
         Arc::new(RwLock::new(None));
@@ -636,7 +645,7 @@ fn js_thread_loop(
         &mutations,
         viewport,
         "",
-        "OxiBrowser/0.2",
+        &user_agent,
         &fetch_tx_arc,
         &cookie_jar_arc,
     );
@@ -692,7 +701,7 @@ fn js_thread_loop(
                         &mutations,
                         viewport,
                         "",
-                        "OxiBrowser/0.2",
+                        &user_agent,
                         &fetch_tx_arc,
                         &cookie_jar_arc,
                     );
@@ -788,7 +797,7 @@ fn js_thread_loop(
                     &mutations,
                     viewport,
                     &url,
-                    "OxiBrowser/0.2",
+                    &user_agent,
                     &fetch_tx_arc,
                 );
                 // Preserve localStorage across URL changes.
@@ -5809,6 +5818,10 @@ fn register_window_globals(
     )
     .into();
 
+    // `navigator.platform` — via the stealth profile so it always agrees with
+    // the WebGL renderer and userAgentData.platform (single source of truth).
+    let nav_platform = crate::js::stealth::ChromeProfile::platform_for(&ua_owned);
+
     // window.navigator
     let nav_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
@@ -5824,7 +5837,7 @@ fn register_window_globals(
         .property(js_string!("languages"), languages_arr, Attribute::all())
         .property(
             js_string!("platform"),
-            JsValue::from(js_string!("MacIntel")),
+            JsValue::from(js_string!(nav_platform)),
             Attribute::all(),
         )
         .property(
@@ -5842,7 +5855,62 @@ fn register_window_globals(
             JsValue::from(js_string!(ua_owned.as_str())),
             Attribute::all(),
         )
+        .property(
+            js_string!("webdriver"),
+            JsValue::from(false),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("hardwareConcurrency"),
+            JsValue::from(8),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("deviceMemory"),
+            JsValue::from(8),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("maxTouchPoints"),
+            JsValue::from(0),
+            Attribute::all(),
+        )
+        .property(js_string!("doNotTrack"), JsValue::null(), Attribute::all())
+        .property(
+            js_string!("cookieEnabled"),
+            JsValue::from(true),
+            Attribute::all(),
+        )
+        .property(js_string!("onLine"), JsValue::from(true), Attribute::all())
+        .property(
+            js_string!("pdfViewerEnabled"),
+            JsValue::from(true),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("product"),
+            JsValue::from(js_string!("Gecko")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("productSub"),
+            JsValue::from(js_string!("20030107")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("vendorSub"),
+            JsValue::from(js_string!("")),
+            Attribute::all(),
+        )
         .build();
+
+    // Level-1 stealth surface: navigator.plugins/mimeTypes/userAgentData/
+    // permissions/connection (attached here) plus window.chrome and WebGL
+    // constructors (wired into window_final / globals below). Attached before
+    // `nav_obj` is cloned to window.navigator + the global navigator, so both
+    // see the surface. See `js::stealth` for scope and limitations.
+    let stealth = crate::js::stealth::build(ctx, &ua_owned);
+    let _ = crate::js::stealth::attach_to_navigator(ctx, &nav_obj, &stealth);
 
     // window.location
     let parsed_url = url::Url::parse(&url_owned);
@@ -6062,6 +6130,11 @@ fn register_window_globals(
         .function(head_getter, js_string!("getHead"), 0)
         .function(document_element_getter, js_string!("getDocumentElement"), 0)
         .function(get_computed_style_fn, js_string!("getComputedStyle"), 1)
+        .property(
+            js_string!("chrome"),
+            stealth.chrome.clone(),
+            Attribute::all(),
+        )
         .build();
 
     let _ = ctx.register_global_property(
@@ -6112,6 +6185,406 @@ fn register_window_globals(
         JsValue::from(crypto_obj),
         Attribute::all(),
     );
+    // Stealth globals: real Chrome exposes `chrome`, `WebGLRenderingContext`,
+    // and `WebGL2RenderingContext` as top-level globals (not only on `window`).
+    let _ = ctx.register_global_property(
+        js_string!("chrome"),
+        stealth.chrome.clone(),
+        Attribute::all(),
+    );
+    let _ = ctx.register_global_property(
+        js_string!("WebGLRenderingContext"),
+        stealth.webgl1.clone(),
+        Attribute::all(),
+    );
+    let _ = ctx.register_global_property(
+        js_string!("WebGL2RenderingContext"),
+        stealth.webgl2.clone(),
+        Attribute::all(),
+    );
+    // ── SPA routing: history + location navigation ──
+    // Native triggers push `DomMutation::Navigate`/`Reload`, which `Session`
+    // drains and executes as real (async) navigations. The `history`/`location`
+    // surface itself is installed by a JS bootstrap below (real JS getters and
+    // closures), seeded idempotently so client-side routing survives navigation.
+    let nav_mut = mutations.clone();
+    let navigate_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(v) = args.first()
+                && let Some(s) = v.as_string()
+            {
+                let url = s.to_std_string_escaped();
+                if !url.is_empty() {
+                    nav_mut.write().push(DomMutation::Navigate { url });
+                }
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = ctx.register_global_callable(js_string!("__oxiNavigate"), 1, navigate_fn);
+    let rld_mut = mutations.clone();
+    let reload_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            rld_mut.write().push(DomMutation::Reload);
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = ctx.register_global_callable(js_string!("__oxiReload"), 0, reload_fn);
+
+    let page_url_json = serde_json::to_string(page_url).unwrap_or_else(|_| "\"\"".to_string());
+    let bootstrap = HISTORY_LOCATION_BOOTSTRAP.replace("/*PAGE_URL*/", &page_url_json);
+    if let Err(e) = ctx.eval(Source::from_bytes(&bootstrap)) {
+        tracing::warn!(error = %e, "history/location bootstrap failed");
+    }
+    if let Err(e) = ctx.eval(Source::from_bytes(OBSERVER_BOOTSTRAP)) {
+        tracing::warn!(error = %e, "observer bootstrap failed");
+    }
+    {
+        let tz = serde_json::to_string(&detect_system_timezone())
+            .unwrap_or_else(|_| "\"UTC\"".to_string());
+        let parity = V8_PARITY_BOOTSTRAP
+            .replace("/*TZ*/", &tz)
+            .replace("/*LOCALE*/", "\"en-US\"");
+        if let Err(e) = ctx.eval(Source::from_bytes(&parity)) {
+            tracing::warn!(error = %e, "v8 parity bootstrap failed");
+        }
+    }
+    fn detect_system_timezone() -> String {
+        if let Ok(tz) = std::env::var("TZ")
+            && tz.contains('/')
+        {
+            return tz;
+        }
+        if let Ok(target) = std::fs::read_link("/etc/localtime") {
+            let s = target.to_string_lossy().into_owned();
+            if let Some(idx) = s.rfind("zoneinfo/") {
+                let tail = &s[idx + "zoneinfo/".len()..];
+                if tail.contains('/') {
+                    return tail.to_string();
+                }
+            }
+        }
+        "UTC".to_string()
+    }
+    if let Err(e) = ctx.eval(Source::from_bytes(WEB_COMPONENTS_BOOTSTRAP)) {
+        tracing::warn!(error = %e, "web components bootstrap failed");
+    }
+
+    const OBSERVER_BOOTSTRAP: &str = r#"
+(function () {
+  // Headless: no layout-driven intersection, so use real-browser initial-fire
+  // semantics — observe() invokes the callback once with isIntersecting:true.
+  // This makes lazy-load + feature-detection code work while keeping the full
+  // API surface (observe/unobserve/disconnect/takeRecords) present.
+  function IO(cb, opts) {
+    if (!(this instanceof IO)) return new IO(cb, opts);
+    this.__cb = cb;
+    this.root = (opts && opts.root) || null;
+    this.rootMargin = (opts && opts.rootMargin) || '0px';
+    var th = opts && opts.threshold != null ? opts.threshold : 0;
+    this.thresholds = typeof th === 'number' ? [th] : [0];
+  }
+  IO.prototype.observe = function (t) {
+    try {
+      this.__cb([{
+        target: t, isIntersecting: true, isVisible: true, intersectionRatio: 1,
+        time: Date.now(), rootBounds: null,
+        intersectionRect: { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 1, height: 1 },
+        boundingClientRect: { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 1, height: 1 }
+      }], this);
+    } catch (e) {}
+    return this;
+  };
+  IO.prototype.unobserve = function () { return this; };
+  IO.prototype.disconnect = function () {};
+  IO.prototype.takeRecords = function () { return []; };
+  globalThis.IntersectionObserver = IO;
+
+  function RO(cb) {
+    if (!(this instanceof RO)) return new RO(cb);
+    this.__cb = cb;
+  }
+  RO.prototype.observe = function (t) {
+    try {
+      this.__cb([{
+        target: t,
+        contentRect: { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 1, height: 1 },
+        borderBoxSize: [{ inlineSize: 1, blockSize: 1 }],
+        contentBoxSize: [{ inlineSize: 1, blockSize: 1 }],
+        devicePixelContentBoxSize: [{ inlineSize: 1, blockSize: 1 }]
+      }], this);
+    } catch (e) {}
+    return this;
+  };
+  RO.prototype.unobserve = function () { return this; };
+  RO.prototype.disconnect = function () {};
+  globalThis.ResizeObserver = RO;
+
+  // Feature-detection code uses `'IntersectionObserver' in window`, so mirror
+  // the constructors onto the window object too (re-applied on every navigation).
+  if (globalThis.window) {
+    globalThis.window.IntersectionObserver = IO;
+    globalThis.window.ResizeObserver = RO;
+  }
+})();
+"#;
+    const V8_PARITY_BOOTSTRAP: &str = r#"
+(function () {
+  function def(g, name, value) {
+    try { if (typeof g[name] === 'undefined') g[name] = value; } catch (e) {}
+  }
+  // Intl: boa has none. Provide the fingerprint surface reads rely on —
+  // DateTimeFormat/NumberFormat .resolvedOptions().{locale,timeZone,calendar,
+  // numberingSystem} + Collator. Numeric/date formatting is best-effort.
+  if (typeof globalThis.Intl === 'undefined') {
+    var TZ = /*TZ*/;
+    var LOCALE = /*LOCALE*/;
+    function resolved(locale) {
+      return { locale: locale || LOCALE, timeZone: TZ, calendar: 'gregory', numberingSystem: 'latn' };
+    }
+    function normLocale(l) { return (typeof l === 'string') ? l : (l && l.length ? l[0] : LOCALE); }
+    function DT(locale, options) {
+      if (!(this instanceof DT)) return new DT(locale, options);
+      this.__l = normLocale(locale);
+      this.__opts = options || {};
+    }
+    DT.prototype.resolvedOptions = function () {
+      var o = resolved(this.__l);
+      // Honor an explicitly requested timeZone (real browsers do); otherwise
+      // resolvedOptions().timeZone is the system default TZ baked into `resolved`.
+      if (this.__opts.timeZone) o.timeZone = this.__opts.timeZone;
+      return o;
+    };
+    DT.prototype.format = function (d) {
+      var n = (d instanceof Date) ? d : new Date();
+      return n.getFullYear() + '/' + (n.getMonth() + 1) + '/' + n.getDate();
+    };
+    DT.supportedLocalesOf = function (l) { return (typeof l === 'string') ? [l] : (l && l.length ? [l[0]] : [LOCALE]); };
+    function NF(locale, options) {
+      if (!(this instanceof NF)) return new NF(locale, options);
+      this.__l = normLocale(locale);
+    }
+    NF.prototype.format = function (n) { return String(n); };
+    NF.prototype.resolvedOptions = function () { return { locale: this.__l, numberingSystem: 'latn' }; };
+    NF.supportedLocalesOf = DT.supportedLocalesOf;
+    function Col(locale) {
+      if (!(this instanceof Col)) return new Col(locale);
+      this.__l = (typeof locale === 'string') ? locale : LOCALE;
+    }
+    Col.prototype.compare = function (a, b) { a = String(a); b = String(b); return a < b ? -1 : (a > b ? 1 : 0); };
+    Col.prototype.resolvedOptions = function () { return resolved(this.__l); };
+    Col.supportedLocalesOf = DT.supportedLocalesOf;
+    var IntlObj = {
+      DateTimeFormat: DT, NumberFormat: NF, Collator: Col,
+      getCanonicalLocales: function (l) { return (typeof l === 'string') ? [l] : l; }
+    };
+    globalThis.Intl = IntlObj;
+  }
+  if (globalThis.window) globalThis.window.Intl = globalThis.Intl;
+  // Error.stack: boa leaves it undefined; give a V8-shaped trace so sandbox/
+  // headless detectors reading `new Error().stack` see a Chrome frame, not
+  // `undefined`. Exact line numbers are unknowable from JS — this passes the
+  // common "is .stack a non-empty string starting with the error name" check.
+  if (typeof Error.prototype.stack === 'undefined') {
+    Object.defineProperty(Error.prototype, 'stack', {
+      configurable: true,
+      get: function () {
+        var name = (this && this.constructor && this.constructor.name) ? this.constructor.name : 'Error';
+        var msg = (this && typeof this.message === 'string' && this.message.length) ? (': ' + this.message) : '';
+        return name + msg + '\n    at Object.<anonymous> (<anonymous>:1:1)';
+      }
+    });
+  }
+  // structuredClone: deep-clone plain data via JSON.
+  def(globalThis, 'structuredClone', function (v) {
+    if (v === null || typeof v !== 'object') return v;
+    try { return JSON.parse(JSON.stringify(v)); } catch (e) { return v; }
+  });
+  // queueMicrotask: schedule on the microtask queue via Promise.
+  def(globalThis, 'queueMicrotask', function (cb) { Promise.resolve().then(cb); });
+  // FinalizationRegistry presence stub (WeakRef is already present in boa).
+  if (typeof globalThis.FinalizationRegistry === 'undefined') {
+    function FR(cb) { this.__cb = cb; }
+    FR.prototype.register = function () { return this; };
+    FR.prototype.unregister = function () { return false; };
+    globalThis.FinalizationRegistry = FR;
+  }
+  if (globalThis.window) globalThis.window.FinalizationRegistry = globalThis.FinalizationRegistry;
+  // Page-context booleans real Chrome exposes.
+  def(globalThis, 'crossOriginIsolated', false);
+  def(globalThis, 'isSecureContext', true);
+  def(globalThis, 'originAgentCluster', false);
+  if (globalThis.window) {
+    def(globalThis.window, 'crossOriginIsolated', false);
+    def(globalThis.window, 'isSecureContext', true);
+  }
+})();
+"#;
+    const WEB_COMPONENTS_BOOTSTRAP: &str = r#"
+(function () {
+  // DOM constructor presence: Element/HTMLElement/Node/ShadowRoot/
+  // DocumentFragment/EventTarget. Real element objects here are plain object
+  // literals (createElement returns {}), NOT instances of these — parsed
+  // elements won't gain the prototype chain. These exist for feature-detection
+  // ('attachShadow' in Element.prototype, typeof HTMLElement) and so
+  // customElements.define can validate constructors.
+  function defCtor(name, parent) {
+    if (typeof globalThis[name] !== 'undefined') return;
+    var P = parent || function () {};
+    function C() { if (!(this instanceof C)) throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator"); }
+    C.prototype = Object.create(P.prototype);
+    C.prototype.constructor = C;
+    globalThis[name] = C;
+  }
+  defCtor('EventTarget');
+  defCtor('Node', globalThis.EventTarget);
+  defCtor('Element', globalThis.Node);
+  defCtor('HTMLElement', globalThis.Element);
+  defCtor('DocumentFragment', globalThis.Node);
+  defCtor('ShadowRoot', globalThis.DocumentFragment);
+  // attachShadow / getRootNode / shadowRoot on Element.prototype.
+  if (globalThis.Element && !globalThis.Element.prototype.attachShadow) {
+    globalThis.Element.prototype.attachShadow = function (init) {
+      if (this.__shadowRoot) throw new Error("Failed to execute 'attachShadow': Shadow root already attached");
+      var root = (typeof document !== 'undefined' && document.createDocumentFragment) ? document.createDocumentFragment() : {};
+      root.host = this; root.mode = (init && init.mode) || 'open';
+      this.__shadowRoot = root; return root;
+    };
+    Object.defineProperty(globalThis.Element.prototype, 'shadowRoot', {
+      configurable: true,
+      get: function () { return (this.__shadowRoot && this.__shadowRoot.mode === 'closed') ? null : (this.__shadowRoot || null); }
+    });
+    globalThis.Element.prototype.getRootNode = function () {
+      var n = this, g = 0;
+      while (n && n.parentNode && g < 100) { n = n.parentNode; g++; }
+      return n || this;
+    };
+  }
+  // customElements registry: define/get/whenDefined/upgrade. Full
+  // upgrade-on-parse needs a parser hook (unavailable from JS); presence +
+  // explicit registration + best-effort upgrade of existing matched nodes.
+  if (typeof globalThis.customElements === 'undefined') {
+    var registry = {}; var waiting = {};
+    function valid(name) { return typeof name === 'string' && name.indexOf('-') > 0 && name === name.toLowerCase(); }
+    var CE = {
+      define: function (name, ctor) {
+        if (!valid(name)) throw new TypeError("Failed to execute 'define': '" + name + "' is not a valid custom element name");
+        if (registry[name]) throw new Error("Failed to execute 'define': this name has already been used: '" + name + "'");
+        registry[name] = ctor;
+        try { var ex = document.querySelectorAll(name); for (var i = 0; ex && i < ex.length; i++) CE.upgrade(ex[i], ctor); } catch (e) {}
+        if (waiting[name]) { for (var j = 0; j < waiting[name].length; j++) { try { waiting[name][j](ctor); } catch (e) {} } delete waiting[name]; }
+      },
+      get: function (name) { return registry[name]; },
+      whenDefined: function (name) {
+        return new Promise(function (resolve) {
+          if (registry[name]) resolve(registry[name]);
+          else (waiting[name] = waiting[name] || []).push(resolve);
+        });
+      },
+      upgrade: function (node, ctor) {
+        ctor = ctor || (node && node.tagName && registry[node.tagName.toLowerCase()]);
+        if (!ctor) return;
+        try { if (ctor.prototype) Object.setPrototypeOf(node, ctor.prototype); } catch (e) {}
+        try { ctor.call(node); } catch (e) {}
+      }
+    };
+    globalThis.customElements = CE;
+  }
+  // window is rebuilt every navigation → sync unconditionally.
+  if (globalThis.window) {
+    var w = globalThis.window;
+    var names = ['EventTarget','Node','Element','HTMLElement','DocumentFragment','ShadowRoot'];
+    for (var k = 0; k < names.length; k++) { var nm = names[k]; if (globalThis[nm] && typeof w[nm] === 'undefined') w[nm] = globalThis[nm]; }
+    w.customElements = globalThis.customElements;
+  }
+})();
+"#;
+
+    const HISTORY_LOCATION_BOOTSTRAP: &str = r#"
+(function () {
+  var PAGE_URL = /*PAGE_URL*/;
+  function isAbs(u) { return /^(https?:|data:|blob:|file:|ftp:)/i.test(u) || u.indexOf('//') === 0; }
+  function originOf(u) { var m = /^(https?:\/\/[^\/#?]+)/i.exec(u); return m ? m[1] : ''; }
+  if (!globalThis.__oxiHistoryInit) {
+    globalThis.__oxiHistoryEntries = [{ url: PAGE_URL, state: null }];
+    globalThis.__oxiHistoryIndex = 0;
+    globalThis.__oxiPopstateListeners = [];
+    globalThis.__oxiHistoryInit = true;
+  } else {
+    var top = globalThis.__oxiHistoryEntries[globalThis.__oxiHistoryIndex];
+    if (PAGE_URL && (!top || top.url !== PAGE_URL)) {
+      globalThis.__oxiHistoryEntries = globalThis.__oxiHistoryEntries.slice(0, globalThis.__oxiHistoryIndex + 1);
+      globalThis.__oxiHistoryEntries.push({ url: PAGE_URL, state: null });
+      globalThis.__oxiHistoryIndex = globalThis.__oxiHistoryEntries.length - 1;
+    }
+  }
+  function cur() { return globalThis.__oxiHistoryEntries[globalThis.__oxiHistoryIndex] || { url: PAGE_URL, state: null }; }
+  function resolveUrl(url) {
+    if (!url) return cur().url;
+    url = String(url);
+    if (isAbs(url)) return url;
+    var base = cur().url || PAGE_URL;
+    if (url.charAt(0) === '#') return base.split('#')[0] + url;
+    if (url.charAt(0) === '/') return originOf(base) + url;
+    var b = base.split('#')[0].split('?')[0];
+    var i = b.lastIndexOf('/');
+    return (i >= 0 ? b.substring(0, i + 1) : b + '/') + url;
+  }
+  function firePopstate() {
+    var ev = { type: 'popstate', state: cur().state };
+    (globalThis.__oxiPopstateListeners || []).forEach(function (cb) { try { cb(ev); } catch (e) {} });
+  }
+  globalThis.history = {
+    get length() { return globalThis.__oxiHistoryEntries.length; },
+    get state() { var e = cur(); return e ? e.state : null; },
+    scrollRestoration: 'auto',
+    pushState: function (state, unused, url) {
+      var abs = url ? resolveUrl(url) : cur().url;
+      globalThis.__oxiHistoryEntries = globalThis.__oxiHistoryEntries.slice(0, globalThis.__oxiHistoryIndex + 1);
+      globalThis.__oxiHistoryEntries.push({ url: abs, state: state });
+      globalThis.__oxiHistoryIndex = globalThis.__oxiHistoryEntries.length - 1;
+    },
+    replaceState: function (state, unused, url) {
+      var abs = url ? resolveUrl(url) : cur().url;
+      globalThis.__oxiHistoryEntries[globalThis.__oxiHistoryIndex] = { url: abs, state: state };
+    },
+    back: function () { globalThis.history.go(-1); },
+    forward: function () { globalThis.history.go(1); },
+    go: function (delta) {
+      delta = (typeof delta === 'number') ? delta : 0;
+      var ni = globalThis.__oxiHistoryIndex + delta;
+      if (ni < 0) ni = 0;
+      if (ni >= globalThis.__oxiHistoryEntries.length) ni = globalThis.__oxiHistoryEntries.length - 1;
+      if (ni === globalThis.__oxiHistoryIndex) return;
+      globalThis.__oxiHistoryIndex = ni;
+      firePopstate();
+    },
+  };
+  globalThis.addEventListener = globalThis.addEventListener || function (type, cb) {
+    if (type === 'popstate') (globalThis.__oxiPopstateListeners = globalThis.__oxiPopstateListeners || []).push(cb);
+  };
+  globalThis.removeEventListener = globalThis.removeEventListener || function (type, cb) {
+    if (type === 'popstate' && globalThis.__oxiPopstateListeners) {
+      globalThis.__oxiPopstateListeners = globalThis.__oxiPopstateListeners.filter(function (x) { return x !== cb; });
+    }
+  };
+  function augment(loc) {
+    if (!loc) return;
+    try {
+      loc.assign = function (url) { __oxiNavigate(resolveUrl(url)); };
+      loc.replace = function (url) { __oxiNavigate(resolveUrl(url)); };
+      loc.reload = function () { __oxiReload(); };
+      Object.defineProperty(loc, 'href', {
+        configurable: true, enumerable: true,
+        get: function () { return cur().url; },
+        set: function (v) { __oxiNavigate(resolveUrl(v)); },
+      });
+    } catch (e) {}
+  }
+  augment(globalThis.location);
+  if (globalThis.window && globalThis.window.location) augment(globalThis.window.location);
+})();
+"#;
 }
 
 /// Simple time helper for performance.now().
@@ -6985,6 +7458,7 @@ mod tests {
             max_stack_size: 256,
             viewport_width: 1280,
             viewport_height: 720,
+            user_agent: "Test/1.0".to_string(),
         };
         let mut rt = JsRuntime::with_config(config);
 
@@ -7182,6 +7656,342 @@ mod tests {
             DomMutation::ClickElement { .. } => {}
             _ => panic!("Expected ClickElement, got {:?}", mutations[0]),
         }
+    }
+    #[tokio::test]
+    async fn test_history_pushstate_updates_length_and_location() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+        let before = rt
+            .evaluate("history.length")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        rt.evaluate("history.pushState({ page: 2 }, '', '/p2')")
+            .await
+            .unwrap();
+        let after = rt
+            .evaluate("history.length")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        assert_eq!(after, before + 1, "pushState must grow history.length");
+        let href = rt
+            .evaluate("location.href")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            href.contains("/p2"),
+            "location.href must reflect pushState, got {href}"
+        );
+        // pushState is pure client-side routing — it must not trigger navigation.
+        let muts = rt.drain_mutations();
+        assert!(
+            !muts
+                .iter()
+                .any(|m| matches!(m, DomMutation::Navigate { .. })),
+            "pushState must not push a Navigate mutation, got {muts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_location_assign_triggers_navigation() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+        rt.evaluate("location.assign('https://example.com/next')")
+            .await
+            .unwrap();
+        let muts = rt.drain_mutations();
+        assert!(
+            muts.iter().any(
+                |m| matches!(m, DomMutation::Navigate { url } if url == "https://example.com/next")
+            ),
+            "location.assign must queue a Navigate mutation, got {muts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_history_back_dispatches_popstate() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+        rt.evaluate(
+            "globalThis.__pcount = 0;\
+             addEventListener('popstate', function () { globalThis.__pcount++; });\
+             history.pushState({}, '', '/a');\
+             history.pushState({}, '', '/b');\
+             history.back();",
+        )
+        .await
+        .unwrap();
+        let count = rt
+            .evaluate("globalThis.__pcount")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        assert_eq!(count, 1, "history.back() must dispatch one popstate event");
+    }
+    #[tokio::test]
+    async fn test_intersection_and_resize_observers() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+        rt.evaluate(
+            "globalThis.__ioFired = false;\
+             globalThis.__roFired = false;\
+             new IntersectionObserver(function (entries) {\
+               globalThis.__ioFired = entries[0] && entries[0].isIntersecting === true;\
+             }).observe({});\
+             new ResizeObserver(function (entries) {\
+               globalThis.__roFired = entries.length === 1 && entries[0].target !== undefined;\
+             }).observe({});",
+        )
+        .await
+        .unwrap();
+        let io = rt
+            .evaluate("globalThis.__ioFired")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(io, "IntersectionObserver callback must fire on observe");
+        let ro = rt
+            .evaluate("globalThis.__roFired")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(ro, "ResizeObserver callback must fire on observe");
+        // Feature detection — the #1 stealth-relevant check.
+        let detect = rt
+            .evaluate("'IntersectionObserver' in window && 'ResizeObserver' in window")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(detect, "observers must be detectable via 'in window'");
+    }
+    #[tokio::test]
+    async fn test_v8_parity_js_surface() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+
+        // Intl present + timezone is a valid IANA zone (contains '/').
+        let tz = rt
+            .evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        assert!(
+            tz.contains('/') || tz == "UTC",
+            "Intl timeZone must be IANA or UTC (got {:?})",
+            tz
+        );
+        // An explicitly requested timeZone is honored (real browsers do); this
+        // is the #1 Intl fingerprint cross-check, so it must not leak system TZ.
+        let req_tz = rt
+            .evaluate(
+                "new Intl.DateTimeFormat('en', { timeZone: 'UTC' }).resolvedOptions().timeZone",
+            )
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        assert_eq!(
+            req_tz, "UTC",
+            "Intl must honor an explicitly requested timeZone"
+        );
+        let loc = rt
+            .evaluate("Intl.DateTimeFormat().resolvedOptions().locale")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        assert!(!loc.is_empty(), "Intl locale must be non-empty");
+
+        // Error.stack: V8-shaped, non-empty, starts with the error name.
+        let stack = rt
+            .evaluate("(function(){ try { throw new Error('boom') } catch(e){ return String(e.stack) } })()")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        assert!(
+            stack.starts_with("Error"),
+            "Error.stack must start with error name (got {:?})",
+            stack
+        );
+        assert!(stack.contains("at "), "Error.stack must contain a frame");
+
+        // structuredClone deep-copies plain data.
+        let cloned = rt
+            .evaluate("(function(){ var o = {a:1,b:{c:2}}; var c = structuredClone(o); o.b.c = 99; return c.b.c })()")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        assert_eq!(cloned, 2, "structuredClone must deep-clone");
+
+        // queueMicrotask callback fires before evaluate returns (it runs jobs).
+        rt.evaluate("queueMicrotask(function(){ globalThis.__qm = 'fired' })")
+            .await
+            .unwrap();
+        let qm = rt
+            .evaluate("globalThis.__qm")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        assert_eq!(qm, "fired", "queueMicrotask callback must execute");
+
+        // FinalizationRegistry present + constructible.
+        let fr = rt
+            .evaluate("typeof FinalizationRegistry === 'function' && typeof new FinalizationRegistry(function(){}) === 'object'")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(fr, "FinalizationRegistry must be constructible");
+
+        // crossOriginIsolated is a boolean (false on a normal page).
+        let coi = rt
+            .evaluate("typeof crossOriginIsolated === 'boolean'")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(coi, "crossOriginIsolated must be a boolean");
+
+        // Feature-detection: Intl + FinalizationRegistry detectable via 'in window'.
+        let detect = rt
+            .evaluate("'Intl' in window && 'FinalizationRegistry' in window")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(
+            detect,
+            "Intl and FinalizationRegistry must be detectable on window"
+        );
+    }
+    #[tokio::test]
+    async fn test_custom_elements_registry_and_shadow_dom() {
+        let mut rt = JsRuntime::new();
+        rt.set_page_url("https://example.com/");
+
+        // customElements registry: define stores, get retrieves.
+        rt.evaluate(
+            "class FooBar extends HTMLElement {}\
+             customElements.define('foo-bar', FooBar);\
+             globalThis.__got = (customElements.get('foo-bar') === FooBar);",
+        )
+        .await
+        .unwrap();
+        let got = rt
+            .evaluate("globalThis.__got")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(got, "customElements.define + get must round-trip");
+
+        // whenDefined resolves for an already-defined element (microtask fires
+        // after the scheduling evaluate returns — read in a follow-up eval).
+        rt.evaluate("customElements.whenDefined('foo-bar').then(function(c){ globalThis.__wd = (c === FooBar); })")
+            .await
+            .unwrap();
+        let wd = rt
+            .evaluate("globalThis.__wd")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(
+            wd,
+            "customElements.whenDefined must resolve to the constructor"
+        );
+
+        // Invalid name throws.
+        let bad = rt
+            .evaluate("(function(){ try { customElements.define('NoHyphen', function(){}); return false } catch(e){ return true } })()")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(
+            bad,
+            "customElements.define must reject names without a hyphen"
+        );
+
+        // attachShadow returns a root with .host + .mode; shadowRoot getter.
+        rt.evaluate(
+            "var host = Object.create(Element.prototype);\
+             var sr = Element.prototype.attachShadow.call(host, { mode: 'open' });\
+             globalThis.__srHost = (sr.host === host);\
+             globalThis.__srMode = (sr.mode === 'open');\
+             globalThis.__sRoot = (host.shadowRoot === sr);",
+        )
+        .await
+        .unwrap();
+        let sr_host = rt
+            .evaluate("globalThis.__srHost")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let sr_mode = rt
+            .evaluate("globalThis.__srMode")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let s_root = rt
+            .evaluate("globalThis.__sRoot")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(sr_host, "attachShadow root must reference host");
+        assert!(sr_mode, "attachShadow root must carry mode");
+        assert!(
+            s_root,
+            "element.shadowRoot must return the attached open root"
+        );
+
+        // Feature-detection surface.
+        let detect = rt
+            .evaluate("'customElements' in window && 'attachShadow' in Element.prototype && typeof HTMLElement === 'function' && typeof ShadowRoot === 'function'")
+            .await
+            .unwrap()
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(detect, "web component surface must be feature-detectable");
     }
 
     #[tokio::test]

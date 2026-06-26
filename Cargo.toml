@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 license = "MIT"
 authors = ["Oxios Team"]
@@ -30,6 +30,8 @@ thiserror = "2"
 tracing = { version = "0.1", features = ["attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+wreq = { version = "6.0.0-rc", features = ["json", "form"] }
+wreq-util = "3.0.0-rc"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
