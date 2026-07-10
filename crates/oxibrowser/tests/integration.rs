@@ -108,16 +108,16 @@ async fn test_markdown_conversion() {
 #[tokio::test]
 #[ignore]
 async fn test_httpbin_get() {
-    // httpbin.org/get returns JSON with request info
+    // api.github.com returns JSON with API metadata — reliable, unlike httpbin.org
     let browser = Browser::new(BrowserConfig::headless()).await.unwrap();
-    let session = browser.new_page("https://httpbin.org/get").await.unwrap();
+    let session = browser.new_page("https://api.github.com").await.unwrap();
 
     let guard = session.read().await;
     let page = guard.page().expect("page should be loaded");
     let content = page.content();
     assert!(
-        content.contains("origin") || content.contains("url"),
-        "httpbin /get should return JSON, got: {}",
+        content.contains("url") && content.contains("current_user_url"),
+        "api.github.com should return JSON with URL fields, got: {}",
         content.chars().take(200).collect::<String>()
     );
     drop(guard);
