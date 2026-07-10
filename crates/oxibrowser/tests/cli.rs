@@ -1,15 +1,14 @@
 //! CLI integration tests — exercise the `oxibrowser` binary directly.
 //!
 //! Run with: `cargo test --test cli -- --ignored`
-//! (requires internet connection and release build)
+//! (requires internet connection for #[ignore] tests)
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Path to the release binary.
+/// Path to the built binary (works in any profile — debug or release).
 fn oxibrowser() -> String {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    format!("{}/../../target/release/oxibrowser", manifest_dir)
+    env!("CARGO_BIN_EXE_oxibrowser").to_string()
 }
 
 // ---------------------------------------------------------------------------

@@ -529,10 +529,7 @@ fn normalize_lines(s: &str) -> String {
             }
         } else {
             blank = 0;
-            let collapsed: String = line
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let collapsed: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
             out.push_str(&collapsed);
             out.push('\n');
         }
