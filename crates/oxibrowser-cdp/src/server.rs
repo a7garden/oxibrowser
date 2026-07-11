@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tracing::{error, info, warn};
 
 /// Type alias for HTTP response body.
@@ -59,6 +59,9 @@ pub struct CdpServer {
     shutdown_tx: broadcast::Sender<()>,
     /// Active connection count.
     connection_count: Arc<AtomicUsize>,
+    /// Optional authentication token for WebSocket connections.
+    /// When set, clients must provide it via `?token=` query parameter.
+    auth_token: Option<String>,
 }
 
 impl CdpServer {
@@ -70,7 +73,14 @@ impl CdpServer {
             browser,
             shutdown_tx,
             connection_count: Arc::new(AtomicUsize::new(0)),
+            auth_token: None,
         }
+    }
+
+    /// Set an authentication token that WebSocket clients must provide.
+    pub fn with_auth(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
     }
 
     /// Start the CDP server.
@@ -141,13 +151,15 @@ impl CdpServer {
     ) -> anyhow::Result<()> {
         let ws_url = format!("ws://{}/ws", self.addr);
         let browser = self.browser.clone();
+        let auth_token = self.auth_token.clone();
 
         let io = TokioIo::new(stream);
 
         let service = service_fn(move |req: Request<hyper::body::Incoming>| {
             let ws_url = ws_url.clone();
             let browser = browser.clone();
-            async move { Self::handle_http_request(req, &ws_url, browser).await }
+            let auth_token = auth_token.clone();
+            async move { Self::handle_http_request(req, &ws_url, browser, &auth_token).await }
         });
 
         http1::Builder::new()
@@ -163,6 +175,7 @@ impl CdpServer {
         req: Request<hyper::body::Incoming>,
         ws_url: &str,
         browser: Arc<Browser>,
+        auth_token: &Option<String>,
     ) -> anyhow::Result<Response<HttpBody>> {
         match req.uri().path() {
             "/health" => {
@@ -195,6 +208,38 @@ impl CdpServer {
                     .body(Full::new(Bytes::from(body)))?)
             }
             "/ws" => {
+                // Origin validation — prevent Cross-Site WebSocket Hijacking
+                if let Some(origin) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
+                    let is_allowed = {
+                        let o = origin.to_ascii_lowercase();
+                        o == "http://localhost"
+                            || o.starts_with("http://localhost:")
+                            || o.starts_with("http://localhost/")
+                            || o.starts_with("http://127.0.0.1:")
+                            || o.starts_with("http://127.0.0.1/")
+                            || o.starts_with("devtools://")
+                    };
+                    if !is_allowed {
+                        return Ok(Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Full::new(Bytes::from("Origin not allowed")))?);
+                    }
+                }
+
+                // Token validation if auth is configured
+                if let Some(expected) = auth_token {
+                    let provided = req
+                        .uri()
+                        .query()
+                        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
+                        .unwrap_or("");
+                    if provided != expected.as_str() {
+                        return Ok(Response::builder()
+                            .status(StatusCode::UNAUTHORIZED)
+                            .body(Full::new(Bytes::from("Missing or invalid auth token")))?);
+                    }
+                }
+
                 // Check for WebSocket upgrade
                 let is_ws_upgrade = req
                     .headers()
@@ -229,7 +274,10 @@ impl CdpServer {
                             // Wrap hyper's Upgraded IO with TokioIo to get
                             // tokio AsyncRead/AsyncWrite traits.
                             let io = TokioIo::new(upgraded);
-                            let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+                            let mut ws_config = WebSocketConfig::default();
+                            ws_config.max_frame_size = Some(MAX_CDP_MESSAGE_SIZE);
+                            ws_config.max_message_size = Some(MAX_CDP_MESSAGE_SIZE);
+                            let ws = WebSocketStream::from_raw_socket(io, Role::Server, Some(ws_config)).await;
 
                             match CdpSession::new(ws, browser).await {
                                 Ok(session) => {
