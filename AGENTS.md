@@ -7,9 +7,9 @@
 ## WHAT
 
 OxiBrowser is a **headless browser built in pure Rust**, designed for AI agents and automation.
-No Chromium, no V8, no C dependencies — single static binary.
+No Chromium, no V8. Single static binary (C toolchain needed for TLS backend build).
 
-- **Pure Rust** — `boa_engine` (JS), `rustls` (TLS), `html5ever` (HTML). Zero C deps.
+- **Rust-First** — `boa_engine` (JS), `html5ever` (HTML) are pure Rust. TLS via `btls` (BoringSSL C binding) + `ring` (C/asm crypto). Build requires C compiler + cmake.
 - **CDP-compatible** — Puppeteer and Playwright connect without knowing they're talking to OxiBrowser.
 - **AI-agent extensions** — `OXI.getMarkdown`, `OXI.getPageInfo` via CDP.
 - **Agent-first CLI** — `--json` opt-in, `describe` for schema, `skill` for prompts, `session` for multi-step.
@@ -30,7 +30,7 @@ OxiBrowser provides the same CDP interface at a fraction of the cost, purpose-bu
 workflows: scraping, automation, screenshot capture, Markdown extraction.
 
 OxiBrowser is a **headless browser built in pure Rust**, designed for AI agents and automation.
-No Chromium, no V8, no C dependencies — single static binary.
+No Chromium, no V8. Single static binary (C toolchain needed for TLS backend build).
 
 ## HOW
 

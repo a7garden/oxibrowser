@@ -30,8 +30,8 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <td align="center"><strong>24 MB</strong><br><sub>Single static binary</sub></td>
 <td align="center"><strong>~50 ms</strong><br><sub>Cold start time</sub></td>
 <td align="center"><strong>~8 MB</strong><br><sub>Base memory</sub></td>
-<td align="center"><strong>408 tests</strong><br><sub>Full coverage</sub></td>
-<td align="center"><strong>Zero C deps</strong><br><sub>Pure Rust</sub></td>
+<td align="center"><strong>544 tests</strong><br><sub>Full coverage</sub></td>
+<td align="center"><strong>Rust-first</strong><br><sub>C toolchain for TLS only</sub></td>
 </tr>
 </table>
 
@@ -79,7 +79,7 @@ OxiBrowser is built for exactly that use case:
 
 - 🤖 **AI-Agent First** — CLI designed for agents: `--json` output, `describe` for schema, `skill` for prompts, `session` for multi-step
 - ⚡ **Blazing Fast** — Cold starts in ~50ms, no Chromium overhead, no Node.js required
-- 🦀 **Pure Rust** — Zero C dependencies. `boa_engine` for JS (no V8). Single static binary. Memory-safe.
+- 🦀 **Rust-First** — `boa_engine` (JS, no V8), `html5ever` (HTML) are pure Rust. TLS uses `btls` (BoringSSL C binding) for stealth fingerprint emulation. Single static binary.
 - 🔌 **CDP Compatible** — Puppeteer, Playwright, and any Chrome DevTools Protocol client works out of the box
 - 🛡️ **Secure by Default** — SSRF protection with CIDR blocking, `robots.txt` respect, no sandbox escape surface
 - 📦 **Tiny Footprint** — 24 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat

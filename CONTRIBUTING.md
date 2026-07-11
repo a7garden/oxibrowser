@@ -30,7 +30,7 @@ git checkout -b feat/my-feature
 - **Git**
 - **Internet access** (for integration tests)
 
-No C/C++ compiler, Node.js, or other language toolchains required.
+Build requires: Rust 1.96+, a C compiler (for btls/ring), and cmake. No Node.js required.
 
 ## Project Structure
 
