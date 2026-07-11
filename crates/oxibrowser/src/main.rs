@@ -147,6 +147,15 @@ enum Commands {
         /// Cookie persistence file.
         #[arg(long)]
         cookie_file: Option<String>,
+        /// Allow navigation to private/internal IP ranges (disables SSRF filter).
+        /// Use for local development only.
+        #[arg(long)]
+        allow_private_ips: bool,
+        /// Authentication token for WebSocket connections.
+        /// Required when binding to non-loopback addresses (0.0.0.0).
+        /// Clients connect with ws://host:port/ws?token=<TOKEN>.
+        #[arg(long)]
+        auth_token: Option<String>,
     },
 
     /// Print CLI schema as JSON (for agents).
@@ -303,7 +312,9 @@ async fn main() {
             host,
             port,
             cookie_file,
-        } => run_serve(&host, port, cookie_file.as_deref()).await,
+            allow_private_ips,
+            auth_token,
+        } => run_serve(&host, port, cookie_file.as_deref(), allow_private_ips, auth_token).await,
         Commands::Search {
             query,
             source,
@@ -1103,8 +1114,7 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
         }
     };
 
-    let mut browser_config = oxibrowser_core::BrowserConfig::headless();
-    browser_config.enable_ssrf_filter = false;
+    let browser_config = oxibrowser_core::BrowserConfig::headless();
     let browser = match oxibrowser_core::Browser::new(browser_config).await {
         Ok(b) => b,
         Err(e) => {
@@ -1154,8 +1164,7 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
 // ---------------------------------------------------------------------------
 // serve (CDP server)
 // ---------------------------------------------------------------------------
-
-async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> i32 {
+async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>, allow_private_ips: bool, auth_token: Option<String>) -> i32 {
     let addr: SocketAddr = match format!("{host}:{port}").parse() {
         Ok(a) => a,
         Err(e) => {
@@ -1164,13 +1173,22 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> i32 {
         }
     };
 
+    // Warn on non-loopback bind without auth token
+    if !addr.ip().is_loopback() && auth_token.is_none() {
+        eprintln!("⚠ WARNING: binding to non-loopback address {addr} without --auth-token.");
+        eprintln!("  Any network client can control the browser. Use --auth-token <TOKEN>.");
+    }
+
     info!(addr = %addr, "starting CDP server");
 
     let mut config = oxibrowser_core::BrowserConfig::headless();
     if let Some(path) = cookie_file {
         config.cookie_file = Some(std::path::PathBuf::from(path));
     }
-    config.enable_ssrf_filter = false;
+    if allow_private_ips {
+        config.enable_ssrf_filter = false;
+        eprintln!("⚠ SSRF filter disabled: private/internal IP ranges accessible.");
+    }
 
     let browser = match oxibrowser_core::Browser::new(config).await {
         Ok(b) => b,
@@ -1181,7 +1199,11 @@ async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>) -> i32 {
     };
     let browser = Arc::new(browser);
 
-    let server = Arc::new(oxibrowser_cdp::CdpServer::new(addr, browser.clone()));
+    let mut cdp_server = oxibrowser_cdp::CdpServer::new(addr, browser.clone());
+    if let Some(token) = &auth_token {
+        cdp_server = cdp_server.with_auth(token.clone());
+    }
+    let server = Arc::new(cdp_server);
     let bound_addr = match server.start().await {
         Ok(a) => a,
         Err(e) => {

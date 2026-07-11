@@ -396,6 +396,142 @@ pub fn core_exit_code(error: &oxibrowser_core::error::CoreError) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Unified CliError enum
+// ---------------------------------------------------------------------------
+//
+// Additive: pre-existing error handling in main.rs / executor.rs is left
+// untouched. New code can construct or convert into CliError to get a
+// uniform {exit_code, code_str, message} surface. The `From<CoreError>`
+// impl is heuristic — it inspects Display output for known markers. When
+// callers have richer context (e.g. an HTTP status), they should build
+// the matching variant directly instead of going through this From.
+
+/// Unified classification of CLI errors, mapping directly to exit codes
+/// and machine-readable error codes.
+///
+/// This enum is additive: existing error-handling call sites in
+/// `main.rs` / `executor.rs` continue to format their own messages and
+/// exit codes. New code that wants a uniform surface can construct a
+/// [`CliError`] (or convert from a [`oxibrowser_core::error::CoreError`])
+/// and use [`CliError::exit_code`] / [`CliError::code_str`].
+#[derive(Debug)]
+pub enum CliError {
+    /// URL failed parsing or scheme/host validation (e.g. unsupported
+    /// scheme, control characters in URL).
+    InvalidUrl(String),
+    /// CSS selector failed to parse or matched no elements in strict mode.
+    InvalidSelector(String),
+    /// Generic user-input validation failure (length, charset, etc.).
+    InputValidation(String),
+    /// Resolved output path would escape its expected root.
+    PathTraversal(String),
+    /// Request was blocked by the SSRF filter (private/loopback IP, etc.).
+    SsrfBlocked(String),
+    /// Operation exceeded its timeout. `timeout_ms` is `0` when the
+ /// caller didn't track the configured budget.
+    Timeout { timeout_ms: u64 },
+    /// Network-level failure (DNS, connect, TLS handshake).
+    Network(String),
+    /// HTTP non-success status. `url` is the URL that produced it.
+    Http { status: u16, url: String },
+    /// JavaScript evaluation failed (syntax error, thrown exception,
+ /// recursion / loop / stack budget exceeded).
+    JsError(String),
+    /// Catch-all for browser runtime errors not covered by a more
+ /// specific variant.
+    Runtime(String),
+    /// Search-engine / search-result error (engine unreachable, empty
+ /// result set, etc.).
+    Search(String),
+}
+
+impl CliError {
+    /// Exit code for this error class. Mirrors the [`exit_code`] module's
+ /// constants but adds INPUT (`2`) for the four validation variants.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::InvalidUrl(_)
+            | Self::InvalidSelector(_)
+            | Self::InputValidation(_)
+            | Self::PathTraversal(_)
+            | Self::SsrfBlocked(_) => 2,
+            Self::Timeout { .. } => 3,
+            Self::Network(_) | Self::Http { .. } => 4,
+            Self::JsError(_) | Self::Runtime(_) | Self::Search(_) => 1,
+        }
+    }
+
+    /// Stable, machine-readable code for this error class.
+    pub fn code_str(&self) -> &str {
+        match self {
+            Self::InvalidUrl(_) => "INVALID_URL",
+            Self::InvalidSelector(_) => "INVALID_SELECTOR",
+            Self::InputValidation(_) => "INPUT_VALIDATION",
+            Self::PathTraversal(_) => "PATH_TRAVERSAL",
+            Self::SsrfBlocked(_) => "SSRF_BLOCKED",
+            Self::Timeout { .. } => "TIMEOUT",
+            Self::Network(_) => "NETWORK_ERROR",
+            Self::Http { .. } => "HTTP_ERROR",
+            Self::JsError(_) => "JS_ERROR",
+            Self::Runtime(_) => "RUNTIME_ERROR",
+            Self::Search(_) => "SEARCH_ERROR",
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUrl(m)
+            | Self::InvalidSelector(m)
+            | Self::InputValidation(m)
+            | Self::PathTraversal(m)
+            | Self::SsrfBlocked(m)
+            | Self::Network(m)
+            | Self::JsError(m)
+            | Self::Runtime(m)
+            | Self::Search(m) => f.write_str(m),
+            Self::Timeout { timeout_ms } => {
+                write!(f, "operation timed out after {timeout_ms} ms")
+            }
+            Self::Http { status, url } => {
+                write!(f, "HTTP {status} for {url}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
+impl From<oxibrowser_core::error::CoreError> for CliError {
+    fn from(e: oxibrowser_core::error::CoreError) -> Self {
+        let msg = e.to_string();
+        if msg.contains("SSRF") || msg.contains("ssrf") {
+            Self::SsrfBlocked(msg)
+        } else if msg.contains("timeout") || msg.contains("Timeout") || msg.contains("timed out") {
+            Self::Timeout { timeout_ms: 0 }
+        } else if msg.contains("network")
+            || msg.contains("Network")
+            || msg.contains("dns")
+            || msg.contains("connect")
+        {
+            Self::Network(msg)
+        } else if msg.contains("HTTP") || msg.contains("status") {
+            // Heuristic; callers with a real status should build Http { .. }.
+            Self::Runtime(msg)
+        } else if msg.contains("JsError")
+            || msg.contains("JS")
+            || msg.contains("javascript")
+            || msg.contains("JavaScript")
+        {
+            Self::JsError(msg)
+        } else {
+            Self::Runtime(msg)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Print helpers for non-JSON mode
 // ---------------------------------------------------------------------------
 
@@ -478,5 +614,155 @@ mod tests {
     fn test_parse_fields() {
         let fields = parse_fields("url, title, status");
         assert_eq!(fields, vec!["url", "title", "status"]);
+    }
+
+    // -- CliError -----------------------------------------------------------
+
+    #[test]
+    fn cli_error_exit_codes_match_existing_module() {
+        // Validation class (2) must match exit_code::INPUT.
+        assert_eq!(CliError::InvalidUrl("x".into()).exit_code(), exit_code::INPUT);
+        assert_eq!(
+            CliError::InvalidSelector("x".into()).exit_code(),
+            exit_code::INPUT
+        );
+        assert_eq!(
+            CliError::InputValidation("x".into()).exit_code(),
+            exit_code::INPUT
+        );
+        assert_eq!(
+            CliError::PathTraversal("x".into()).exit_code(),
+            exit_code::INPUT
+        );
+        assert_eq!(
+            CliError::SsrfBlocked("x".into()).exit_code(),
+            exit_code::INPUT
+        );
+        // Timeout class.
+        assert_eq!(
+            CliError::Timeout { timeout_ms: 5_000 }.exit_code(),
+            exit_code::TIMEOUT
+        );
+        // Network class.
+        assert_eq!(
+            CliError::Network("x".into()).exit_code(),
+            exit_code::NETWORK
+        );
+        assert_eq!(
+            CliError::Http {
+                status: 503,
+                url: "https://x".into()
+            }
+            .exit_code(),
+            exit_code::NETWORK
+        );
+        // Runtime class (1).
+        assert_eq!(CliError::JsError("x".into()).exit_code(), exit_code::RUNTIME);
+        assert_eq!(CliError::Runtime("x".into()).exit_code(), exit_code::RUNTIME);
+        assert_eq!(CliError::Search("x".into()).exit_code(), exit_code::RUNTIME);
+    }
+
+    #[test]
+    fn cli_error_code_strs_are_stable() {
+        assert_eq!(CliError::InvalidUrl("x".into()).code_str(), "INVALID_URL");
+        assert_eq!(
+            CliError::InvalidSelector("x".into()).code_str(),
+            "INVALID_SELECTOR"
+        );
+        assert_eq!(
+            CliError::InputValidation("x".into()).code_str(),
+            "INPUT_VALIDATION"
+        );
+        assert_eq!(
+            CliError::PathTraversal("x".into()).code_str(),
+            "PATH_TRAVERSAL"
+        );
+        assert_eq!(CliError::SsrfBlocked("x".into()).code_str(), "SSRF_BLOCKED");
+        assert_eq!(CliError::Timeout { timeout_ms: 0 }.code_str(), "TIMEOUT");
+        assert_eq!(CliError::Network("x".into()).code_str(), "NETWORK_ERROR");
+        assert_eq!(
+            CliError::Http {
+                status: 404,
+                url: "u".into()
+            }
+            .code_str(),
+            "HTTP_ERROR"
+        );
+        assert_eq!(CliError::JsError("x".into()).code_str(), "JS_ERROR");
+        assert_eq!(CliError::Runtime("x".into()).code_str(), "RUNTIME_ERROR");
+        assert_eq!(CliError::Search("x".into()).code_str(), "SEARCH_ERROR");
+    }
+
+    #[test]
+    fn cli_error_from_core_error_classifies_ssrf() {
+        // A network error mentioning a private/loopback address still has
+        // no dedicated SSRF marker in the Display form of CoreError; the
+        // builder is meant for direct construction in the SSRF path.
+        // This test ensures the From impl does NOT silently misclassify
+        // an arbitrary error as SSRF — only SSRF substring-bearing
+        // messages should qualify.
+        let e = oxibrowser_core::error::CoreError::NetworkError("127.0.0.1".into());
+        let cli: CliError = e.into();
+        // Falls through to Network (substring SSRF not present).
+        assert_eq!(cli.code_str(), "NETWORK_ERROR");
+    }
+
+    #[test]
+    fn cli_error_from_core_error_classifies_timeout() {
+        // CoreError::Timeout displays as "timeout: ..." → Timeout.
+        let e = oxibrowser_core::error::CoreError::Timeout("page load".into());
+        let cli: CliError = e.into();
+        assert_eq!(cli.code_str(), "TIMEOUT");
+        assert_eq!(cli.exit_code(), exit_code::TIMEOUT);
+
+        // ConnectionTimeout also contains "timeout".
+        let e2 = oxibrowser_core::error::CoreError::ConnectionTimeout("connect".into());
+        let cli2: CliError = e2.into();
+        assert_eq!(cli2.code_str(), "TIMEOUT");
+    }
+
+    #[test]
+    fn cli_error_from_core_error_classifies_network() {
+        let e = oxibrowser_core::error::CoreError::NetworkError("connection refused".into());
+        let cli: CliError = e.into();
+        assert_eq!(cli.code_str(), "NETWORK_ERROR");
+        assert_eq!(cli.exit_code(), exit_code::NETWORK);
+    }
+
+    #[test]
+    fn cli_error_from_core_error_classifies_js() {
+        let e = oxibrowser_core::error::CoreError::JsError("ReferenceError: x".into());
+        let cli: CliError = e.into();
+        assert_eq!(cli.code_str(), "JS_ERROR");
+        assert_eq!(cli.exit_code(), exit_code::RUNTIME);
+    }
+
+    #[test]
+    fn cli_error_from_core_error_classifies_invalid_url() {
+        let e = oxibrowser_core::error::CoreError::InvalidUrl("parse fail".into());
+        let cli: CliError = e.into();
+        // Display message contains "URL" → falls into Runtime per the
+        // current heuristic. The intent is for callers to construct
+        // InvalidUrl directly when they know the cause, while keeping
+        // the From impl conservative.
+        assert_eq!(cli.code_str(), "RUNTIME_ERROR");
+    }
+
+    #[test]
+    fn cli_error_from_core_error_falls_back_to_runtime() {
+        // CoreError with no known marker maps to Runtime.
+        let e = oxibrowser_core::error::CoreError::SessionError("closed".into());
+        let cli: CliError = e.into();
+        assert_eq!(cli.code_str(), "RUNTIME_ERROR");
+        assert_eq!(cli.exit_code(), exit_code::RUNTIME);
+    }
+
+    #[test]
+    fn cli_error_display_messages_remain_accessible() {
+        // Quick sanity that Display round-trips a message and Debug is
+        // available for log output without panicking.
+        let err = CliError::InvalidSelector("bad selector".into());
+        assert_eq!(format!("{err}"), "bad selector");
+        let _ = format!("{err:?}");
     }
 }
