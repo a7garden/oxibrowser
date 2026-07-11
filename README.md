@@ -30,7 +30,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <td align="center"><strong>24 MB</strong><br><sub>Single static binary</sub></td>
 <td align="center"><strong>~50 ms</strong><br><sub>Cold start time</sub></td>
 <td align="center"><strong>~8 MB</strong><br><sub>Base memory</sub></td>
-<td align="center"><strong>544 tests</strong><br><sub>Full coverage</sub></td>
+<td align="center"><strong>554 tests</strong><br><sub>Full coverage</sub></td>
 <td align="center"><strong>Rust-first</strong><br><sub>C toolchain for TLS only</sub></td>
 </tr>
 </table>
@@ -83,6 +83,30 @@ OxiBrowser is built for exactly that use case:
 - 🔌 **CDP Compatible** — Puppeteer, Playwright, and any Chrome DevTools Protocol client works out of the box
 - 🛡️ **Secure by Default** — SSRF protection with CIDR blocking, `robots.txt` respect, no sandbox escape surface
 - 📦 **Tiny Footprint** — 24 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat
+
+---
+
+
+## 🆕 What's New in 0.17.0
+
+This release closes most of the gap between "HTML fetcher" and "real headless browser" — events now behave like a browser, `innerHTML` works for SPA-style DOM injection, and `fetch` returns a spec-compliant `Response` with `arrayBuffer()`.
+
+**Events & DOM**
+- Event constructors honor the init dict — `new MouseEvent('click', { clientX, clientY, ctrlKey, ... })` now actually carries those fields. Covers `MouseEvent`, `KeyboardEvent`, `FocusEvent`, `Event`, and a new `DragEvent`.
+- `dispatchEvent` sets `event.target` / `event.currentTarget` and returns `!defaultPrevented`. `preventDefault` / `stopPropagation` / `stopImmediatePropagation` work on every event.
+- **Event bubbling** walks the parent chain. Listeners are stored in a thread-local registry keyed by `nodeId`, so they survive across element-object re-queries (the bug that made `parent.addEventListener` invisible to `child.dispatchEvent`).
+- `requestAnimationFrame` / `cancelAnimationFrame` now schedule properly with a 16 ms deadline and pass a `DOMHighResTimeStamp` to the callback.
+- `innerText` getter and standalone `performance` global (`window.performance === performance`).
+
+**HTML & `innerHTML`**
+- `innerHTML` setter parses the fragment via `html5ever` and inserts child nodes into the snapshot. `outerHTML` getter serializes the node back. A new `dom_serializer` module handles the round-trip with proper void-element / attribute-escape handling (12 unit tests).
+
+**Network**
+- `Response.text()` / `json()` / `arrayBuffer()` all return spec-shaped Promises that resolve to the actual response body. `fetch` options `headers` (content-type, accept, authorization, user-agent, cookie) are now forwarded.
+- SSRF filter is now scheme-aware: only `http`/`https` go through DNS/host checks. `about:blank` is supported (Puppeteer/Playwright's default target URL now works).
+
+**CDP**
+- `Input.dispatchMouseEvent` emits a real sequence: `mousePressed` → `mousedown`; `mouseReleased` → `mouseup` + `click`; `mouseMoved` → `mousemove`. `Input.dispatchDragEvent` is wired to a `DragEvent` on the element at the point.
 
 ---
 
@@ -169,6 +193,7 @@ COMMANDS:
   run        Run a YAML automation script
   session    Interactive stdin/stdout JSON REPL (22 commands)
   serve      Start CDP WebSocket server
+  search     Web / GitHub / GitHub-issues search (no browser needed)
   describe   Print CLI schema as JSON (for agents)
   skill      Print agent skill guide
   version    Print version information
@@ -234,7 +259,21 @@ oxibrowser describe fetch
 oxibrowser describe session
 ```
 
+
+### search — Web / GitHub search (no browser needed)
+
+```bash
+# Web search (DuckDuckGo)
+oxibrowser search "rust async" --engine ddg --max-results 5 --json
+
+# GitHub search
+oxibrowser search "memory pool" --source github --json
+
+# GitHub issues for a specific repo
+oxibrowser search "panic on shutdown" --source github-issues --repo a7garden/oxibrowser --json
+```
 ### run — YAML automation
+
 
 ```yaml
 name: example
