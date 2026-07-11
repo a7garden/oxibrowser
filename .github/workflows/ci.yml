@@ -55,10 +55,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit
+      - run: cargo audit --deny warnings
+      - run: cargo install cargo-deny
+      - run: cargo deny check advisories licenses bans sources
+
   build-release:
     name: Release Build
     runs-on: ubuntu-latest
-    needs: [check, test, clippy, fmt]
+    needs: [check, test, clippy, fmt, audit]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
