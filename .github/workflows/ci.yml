@@ -59,10 +59,10 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: check advisories licenses bans sources
+          command: check
+          arguments: advisories licenses bans sources
       # `cargo audit` is intentionally NOT used — same RUSTSEC DB as
       # cargo-deny and lacks a config file. deny.toml's `ignore` is the
       # single source of truth for known-accepted advisories.
