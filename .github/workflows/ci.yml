@@ -62,9 +62,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
-          arguments: advisories licenses bans sources
-      # `cargo audit` is intentionally NOT used — same RUSTSEC DB as
+          command-arguments: advisories licenses bans sources
       # cargo-deny and lacks a config file. deny.toml's `ignore` is the
       # single source of truth for known-accepted advisories.
   build-release:
