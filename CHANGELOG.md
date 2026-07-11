@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-11
+
+### Added
+
+- **HTML serializer** (`crates/oxibrowser-core/src/js/dom_serializer.rs`) — pure-Rust DOM-to-HTML serialization. Void elements self-close, attributes are HTML-escaped, text/comment nodes handled. `serialize_node` and `serialize_children` are the public API; 12 unit tests cover elements/text/comments/void/attrs/document/unknown types.
+- **`Element.outerHTML` getter** — reads the serialized tag + attributes + children. Read-only per spec.
+- **`innerHTML` setter rewires to a real parser** — assignments now go through `DomSnapshot::set_inner_html`, which calls `oxibrowser_webapi::Document::parse` to parse the fragment, removes the target's old children via `remove_subtree`, and inserts the new subtree via `insert_subtree` (DFS pre-order, fresh node ids, proper parent links). `rebuild_indices` is called after so id/class/tag indices pick up the new nodes and `querySelector` / `getElementById` can find them on the next read.
+- **Event constructor init dictionaries** — `new MouseEvent('click', { clientX, clientY, button, ctrlKey, ... })` now copies the init dict onto the event object. Same for `KeyboardEvent`, `FocusEvent`, `Event`, and `DragEvent` (extends MouseEvent + `dataTransfer`).
+- **`Event.prototype` methods on every event instance** — `preventDefault`, `stopPropagation`, `stopImmediatePropagation` are set as own properties on each event object so they resolve without depending on the JS class hierarchy.
+- **`dispatchEvent` sets `event.target` and `event.currentTarget`** before firing listeners; returns `!defaultPrevented`; respects `stopImmediatePropagation` between callbacks.
+- **Event bubbling** — when `event.bubbles === true` and `stopPropagation` wasn't called, dispatch walks the DomSnapshot parent chain and fires ancestor listeners found via the new thread-local `LISTENER_REGISTRY` (keyed by `node_id` so listeners registered through any element-object instance are reached). `event.currentTarget` is updated to the current ancestor.
+- **`requestAnimationFrame` / `cancelAnimationFrame`** — proper implementation via `TokioJobQueue::schedule_timer` with a 16 ms deadline. The callback receives a `DOMHighResTimeStamp` (ms since `UNIX_EPOCH`); `cancelAnimationFrame` uses the timer's handle id and `cancel_timer`.
+- **`Element.innerText`** — read-only alias for `textContent`.
+- **`performance` global** — registered as a standalone global (`window.performance === performance`) alongside the existing `window.performance` accessor. Provides `now()` returning `ms since UNIX_EPOCH`.
+- **`Response` improvements** — `__body` is stored as a hidden property on the Response object. `text()`, `json()`, and `arrayBuffer()` all read from `this.__body` (not from a captured closure) and return `Promise.resolve(...)`. `arrayBuffer()` returns a `Uint8Array`. `bodyUsed` is exposed as a property (still hardcoded to `false`).
+- **`fetch` options `headers`** — common header keys (`content-type`, `accept`, `authorization`, `user-agent`, `cookie`) from the init dict are now read and forwarded to the HTTP client. Previously silently dropped.
+- **CDP `Input.dispatchMouseEvent` multi-event sequence** — `mousePressed` fires `mousedown`; `mouseReleased` fires `mouseup` + `click` (left button only); `mouseMoved` fires `mousemove`. Matches real-browser behavior.
+- **CDP `Input.dispatchDragEvent`** — real implementation that evaluates `js_dispatch_drag_event(x, y, event_type)` and dispatches a `DragEvent` on the element at the point. Previously a no-op.
+- **`js_dispatch_drag_event` JS code generator** — used by both the CDP handler and the Tab drag API.
+
+### Fixed
+
+- **SSRF filter now scheme-aware** — `check_url_ssrf` short-circuits to `allow` for any non-`http`/`https` scheme (`about:`, `data:`, etc.). Previously, `about:blank` was rejected because the filter tried to resolve the hostname "blank".
+- **`about:blank` navigation support** — `Session::navigate` routes `about:` URLs to a new `navigate_about` that builds an empty page from a minimal HTML template. The CDP server's default URL is `about:blank` and now works.
+
 ## [Unreleased]
 
 ## [0.16.0] - 2026-06-26
