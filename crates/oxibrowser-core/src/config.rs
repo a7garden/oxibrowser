@@ -176,7 +176,6 @@ pub struct BrowserConfig {
     pub max_response_body_bytes: usize,
 }
 
-
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
@@ -220,7 +219,6 @@ impl BrowserConfig {
             ..Self::default()
         }
     }
-
 
     /// Return a fluent [`BrowserConfigBuilder`] seeded with
     /// `BrowserConfig::default()`.
@@ -304,7 +302,6 @@ impl BrowserConfigBuilder {
         self.inner
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -427,9 +424,7 @@ mod tests {
 
     #[test]
     fn test_builder_user_agent() {
-        let cfg = BrowserConfig::builder()
-            .user_agent("MyBot/1.0")
-            .build();
+        let cfg = BrowserConfig::builder().user_agent("MyBot/1.0").build();
         assert_eq!(cfg.user_agent, "MyBot/1.0");
     }
 

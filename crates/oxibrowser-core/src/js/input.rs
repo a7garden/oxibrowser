@@ -131,7 +131,6 @@ pub fn js_insert_text(text: &str) -> String {
     )
 }
 
-
 /// Generate JS to dispatch a drag event at viewport coordinates.
 pub fn js_dispatch_drag_event(x: f64, y: f64, event_type: &str) -> String {
     let event_type_json = serde_json::to_string(event_type).unwrap_or_default();

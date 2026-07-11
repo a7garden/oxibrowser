@@ -414,6 +414,10 @@ pub fn core_exit_code(error: &oxibrowser_core::error::CoreError) -> i32 {
 /// exit codes. New code that wants a uniform surface can construct a
 /// [`CliError`] (or convert from a [`oxibrowser_core::error::CoreError`])
 /// and use [`CliError::exit_code`] / [`CliError::code_str`].
+// Additive public API — the surface mirrors `CoreError` for callers that
+// want a single error type. Not all variants are constructed internally yet,
+// hence the allow until downstream code starts using them.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum CliError {
     /// URL failed parsing or scheme/host validation (e.g. unsupported
@@ -428,26 +432,27 @@ pub enum CliError {
     /// Request was blocked by the SSRF filter (private/loopback IP, etc.).
     SsrfBlocked(String),
     /// Operation exceeded its timeout. `timeout_ms` is `0` when the
- /// caller didn't track the configured budget.
+    /// caller didn't track the configured budget.
     Timeout { timeout_ms: u64 },
     /// Network-level failure (DNS, connect, TLS handshake).
     Network(String),
     /// HTTP non-success status. `url` is the URL that produced it.
     Http { status: u16, url: String },
     /// JavaScript evaluation failed (syntax error, thrown exception,
- /// recursion / loop / stack budget exceeded).
+    /// recursion / loop / stack budget exceeded).
     JsError(String),
     /// Catch-all for browser runtime errors not covered by a more
- /// specific variant.
+    /// specific variant.
     Runtime(String),
     /// Search-engine / search-result error (engine unreachable, empty
- /// result set, etc.).
+    /// result set, etc.).
     Search(String),
 }
 
+#[allow(dead_code)]
 impl CliError {
     /// Exit code for this error class. Mirrors the [`exit_code`] module's
- /// constants but adds INPUT (`2`) for the four validation variants.
+    /// constants but adds INPUT (`2`) for the four validation variants.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidUrl(_)
@@ -621,7 +626,10 @@ mod tests {
     #[test]
     fn cli_error_exit_codes_match_existing_module() {
         // Validation class (2) must match exit_code::INPUT.
-        assert_eq!(CliError::InvalidUrl("x".into()).exit_code(), exit_code::INPUT);
+        assert_eq!(
+            CliError::InvalidUrl("x".into()).exit_code(),
+            exit_code::INPUT
+        );
         assert_eq!(
             CliError::InvalidSelector("x".into()).exit_code(),
             exit_code::INPUT
@@ -657,8 +665,14 @@ mod tests {
             exit_code::NETWORK
         );
         // Runtime class (1).
-        assert_eq!(CliError::JsError("x".into()).exit_code(), exit_code::RUNTIME);
-        assert_eq!(CliError::Runtime("x".into()).exit_code(), exit_code::RUNTIME);
+        assert_eq!(
+            CliError::JsError("x".into()).exit_code(),
+            exit_code::RUNTIME
+        );
+        assert_eq!(
+            CliError::Runtime("x".into()).exit_code(),
+            exit_code::RUNTIME
+        );
         assert_eq!(CliError::Search("x".into()).exit_code(), exit_code::RUNTIME);
     }
 

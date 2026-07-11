@@ -277,7 +277,9 @@ impl CdpServer {
                             let mut ws_config = WebSocketConfig::default();
                             ws_config.max_frame_size = Some(MAX_CDP_MESSAGE_SIZE);
                             ws_config.max_message_size = Some(MAX_CDP_MESSAGE_SIZE);
-                            let ws = WebSocketStream::from_raw_socket(io, Role::Server, Some(ws_config)).await;
+                            let ws =
+                                WebSocketStream::from_raw_socket(io, Role::Server, Some(ws_config))
+                                    .await;
 
                             match CdpSession::new(ws, browser).await {
                                 Ok(session) => {

@@ -10,10 +10,10 @@
 //! JS: document.querySelector('a') → DomSnapshot::query_selector() → result
 //! ```
 
-use std::sync::Mutex;
+use crate::css::ComputedStyle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::css::ComputedStyle;
+use std::sync::Mutex;
 
 /// DOM 변경 사항
 ///
@@ -169,7 +169,15 @@ impl DomSnapshot {
 
         // Walk all nodes via DFS from root, capturing document order for the indices.
         if let Some(root) = tree.root() {
-            collect_nodes(root, doc, tree, &mut nodes, &mut order, &mut body_id, &mut head_id);
+            collect_nodes(
+                root,
+                doc,
+                tree,
+                &mut nodes,
+                &mut order,
+                &mut body_id,
+                &mut head_id,
+            );
         }
 
         let root_id = tree.root().map(|id| id.0 as u32).unwrap_or(0);
@@ -267,9 +275,22 @@ impl DomSnapshot {
             return self.class_index.get(class).and_then(|v| v.first().copied());
         }
         if !selector.is_empty()
-            && !selector
-                .bytes()
-                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'.' | b'#' | b'[' | b',' | b'>' | b'+' | b'~' | b':' | b'*'))
+            && !selector.bytes().any(|b| {
+                matches!(
+                    b,
+                    b' ' | b'\t'
+                        | b'\n'
+                        | b'.'
+                        | b'#'
+                        | b'['
+                        | b','
+                        | b'>'
+                        | b'+'
+                        | b'~'
+                        | b':'
+                        | b'*'
+                )
+            })
         {
             return self
                 .tag_index
@@ -301,9 +322,22 @@ impl DomSnapshot {
             return self.class_index.get(class).cloned();
         }
         if !selector.is_empty()
-            && !selector
-                .bytes()
-                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'.' | b'#' | b'[' | b',' | b'>' | b'+' | b'~' | b':' | b'*'))
+            && !selector.bytes().any(|b| {
+                matches!(
+                    b,
+                    b' ' | b'\t'
+                        | b'\n'
+                        | b'.'
+                        | b'#'
+                        | b'['
+                        | b','
+                        | b'>'
+                        | b'+'
+                        | b'~'
+                        | b':'
+                        | b'*'
+                )
+            })
         {
             return self.tag_index.get(&selector.to_lowercase()).cloned();
         }
@@ -767,8 +801,7 @@ impl DomSnapshot {
             return;
         };
         // Snapshot the body-children NodeIds up front.
-        let new_children: Vec<oxibrowser_webapi::dom::NodeId> =
-            tree.children(body_id).to_vec();
+        let new_children: Vec<oxibrowser_webapi::dom::NodeId> = tree.children(body_id).to_vec();
 
         // Bail if the target doesn't exist in this snapshot.
         if !self.nodes.contains_key(&node_id) {
@@ -786,22 +819,9 @@ impl DomSnapshot {
         }
 
         // Compute next id once so the first inserted subtree gets a stable base.
-        let mut next_id = self
-            .nodes
-            .keys()
-            .max()
-            .copied()
-            .map(|m| m + 1)
-            .unwrap_or(0);
+        let mut next_id = self.nodes.keys().max().copied().map(|m| m + 1).unwrap_or(0);
         for src_id in new_children {
-            self.insert_subtree(
-                src_id,
-                &parsed,
-                tree,
-                node_id,
-                None,
-                &mut next_id,
-            );
+            self.insert_subtree(src_id, &parsed, tree, node_id, None, &mut next_id);
         }
         self.bump_revision();
     }
@@ -1056,7 +1076,6 @@ fn collect_text_recursive(
 /// initial snapshot. After any in-place mutation, indices are not refreshed
 /// eagerly; the `&self` read methods on `DomSnapshot` detect staleness via
 /// `index_revision != revision` and fall back to a tree walk.
-
 impl DomSnapshot {
     /// Rebuild id/class/tag indices from the current `nodes` HashMap by
     /// performing a DFS pre-order walk starting at `root_id`. Called after
@@ -1075,18 +1094,19 @@ impl DomSnapshot {
                 }
             }
         }
-        let (id_index, class_index, tag_index) =
-            build_indices(&self.nodes, &order);
+        let (id_index, class_index, tag_index) = build_indices(&self.nodes, &order);
         self.id_index = id_index;
         self.class_index = class_index;
         self.tag_index = tag_index;
         self.index_revision = self.revision;
     }
 }
-fn build_indices(
-    nodes: &HashMap<u32, DomNode>,
-    order: &[u32],
-) -> (HashMap<String, u32>, HashMap<String, Vec<u32>>, HashMap<String, Vec<u32>>) {
+type DomIndices = (
+    HashMap<String, u32>,
+    HashMap<String, Vec<u32>>,
+    HashMap<String, Vec<u32>>,
+);
+fn build_indices(nodes: &HashMap<u32, DomNode>, order: &[u32]) -> DomIndices {
     let mut id_index: HashMap<String, u32> = HashMap::new();
     let mut class_index: HashMap<String, Vec<u32>> = HashMap::new();
     let mut tag_index: HashMap<String, Vec<u32>> = HashMap::new();
@@ -1509,11 +1529,7 @@ mod tests {
             }
             found.expect("body element")
         };
-        let b_src = tree
-            .children(body_node)
-            .first()
-            .copied()
-            .expect("b source");
+        let b_src = tree.children(body_node).first().copied().expect("b source");
 
         let max_existing = *snapshot.nodes.keys().max().unwrap();
         let mut counter = max_existing + 1;
@@ -1529,5 +1545,4 @@ mod tests {
         assert_eq!(inserted.tag, "b");
         assert_eq!(inserted.node_type, 1u8);
     }
-
 }

@@ -24,11 +24,11 @@
 //! evaluate() calls** — exactly like a real browser.
 
 use parking_lot::RwLock;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
 
 use base64::Engine;
 use boa_engine::object::builtins::JsArray;
@@ -50,11 +50,11 @@ use std::time::{Duration, Instant};
 static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1_000_000);
 
 // ── Thread-local listener registry ─────────────────────────────────────────
-/// Event listeners keyed by node_id → event_type → callbacks.
-/// Thread-local because boa `Context` is !Send — every closure runs on the
-/// same JS thread. This lets the bubbling walk find listeners registered via
-/// any element object, regardless of object identity (each DOM query mints a
-/// fresh JS object, so `__listeners` on one instance is invisible to another).
+// Event listeners keyed by node_id → event_type → callbacks.
+// Thread-local because boa `Context` is !Send — every closure runs on the
+// same JS thread. This lets the bubbling walk find listeners registered via
+// any element object, regardless of object identity (each DOM query mints a
+// fresh JS object, so `__listeners` on one instance is invisible to another).
 thread_local! {
     static LISTENER_REGISTRY: RefCell<HashMap<u32, HashMap<String, Vec<JsObject>>>> =
         RefCell::new(HashMap::new());
@@ -177,11 +177,21 @@ enum JsCommand {
         response_tx: Sender<JsResponse>,
     },
     /// Set a global variable in the persistent Context.
-    SetGlobal { name: String, value: Value, response_tx: Sender<JsResponse> },
+    SetGlobal {
+        name: String,
+        value: Value,
+        response_tx: Sender<JsResponse>,
+    },
     /// Update the DOM snapshot available to `document` object.
-    SetDom { snapshot: Option<DomSnapshot>, response_tx: Sender<JsResponse> },
+    SetDom {
+        snapshot: Box<Option<DomSnapshot>>,
+        response_tx: Sender<JsResponse>,
+    },
     /// Update the page URL (for window.location).
-    SetPageUrl { url: String, response_tx: Sender<JsResponse> },
+    SetPageUrl {
+        url: String,
+        response_tx: Sender<JsResponse>,
+    },
     /// Set the fetch channel so JS can make real HTTP requests.
     SetFetchChannel {
         tx: std::sync::mpsc::Sender<FetchRequestMsg>,
@@ -193,7 +203,10 @@ enum JsCommand {
         response_tx: Sender<JsResponse>,
     },
     /// Set the CookieJar so document.cookie can read/write real cookies.
-    SetCookieJar { jar: Arc<RwLock<CookieJar>>, response_tx: Sender<JsResponse> },
+    SetCookieJar {
+        jar: Arc<RwLock<CookieJar>>,
+        response_tx: Sender<JsResponse>,
+    },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -525,10 +538,10 @@ impl JsRuntime {
     pub fn set_dom_snapshot(&mut self, snapshot: Option<DomSnapshot>) {
         self.mutations.write().clear();
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
-        if let Err(e) = self
-            .cmd_tx
-            .send(JsCommand::SetDom { snapshot, response_tx })
-        {
+        if let Err(e) = self.cmd_tx.send(JsCommand::SetDom {
+            snapshot: Box::new(snapshot),
+            response_tx,
+        }) {
             tracing::error!(error = %e, "failed to send SetDom: JS thread has died");
             return;
         }
@@ -553,10 +566,10 @@ impl JsRuntime {
     /// Update the page URL (used for window.location).
     pub fn set_page_url(&mut self, url: &str) {
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
-        if let Err(e) = self
-            .cmd_tx
-            .send(JsCommand::SetPageUrl { url: url.to_string(), response_tx })
-        {
+        if let Err(e) = self.cmd_tx.send(JsCommand::SetPageUrl {
+            url: url.to_string(),
+            response_tx,
+        }) {
             tracing::error!(error = %e, "failed to send SetPageUrl: JS thread has died");
             return;
         }
@@ -720,7 +733,11 @@ fn js_thread_loop(
                     }
                 }
             }
-            JsCommand::SetGlobal { name, value, response_tx } => {
+            JsCommand::SetGlobal {
+                name,
+                value,
+                response_tx,
+            } => {
                 let js_val = json_to_js_value(&value, &mut ctx);
                 let _ = ctx.register_global_property(
                     JsString::from(name.as_str()),
@@ -729,8 +746,11 @@ fn js_thread_loop(
                 );
                 let _ = response_tx.send(JsResponse::Done);
             }
-            JsCommand::SetDom { snapshot, response_tx } => {
-                *dom_snapshot.write() = snapshot;
+            JsCommand::SetDom {
+                snapshot,
+                response_tx,
+            } => {
+                *dom_snapshot.write() = *snapshot;
                 // Update document title/URL in the JS context
                 let snap = dom_snapshot.read();
                 if let Some(ref s) = *snap {
@@ -793,20 +813,16 @@ fn js_thread_loop(
             JsCommand::SetLocalStorageChannel { tx, response_tx } => {
                 *local_storage_tx_arc.write() = Some(tx);
                 let _ = response_tx.send(JsResponse::Done);
-                
             }
             JsCommand::SetFetchChannel { tx, response_tx } => {
                 *fetch_tx_arc.write() = Some(tx);
                 let _ = response_tx.send(JsResponse::Done);
-                
             }
             JsCommand::SetCookieJar { jar, response_tx } => {
                 *cookie_jar_arc.write() = Some(jar);
                 let _ = response_tx.send(JsResponse::Done);
-                
             }
             JsCommand::Shutdown => {
-                
                 break;
             }
         }
@@ -1154,7 +1170,13 @@ fn create_context(
                 && let Ok(hdrs) = opts.get(js_string!("headers"), ctx)
                 && let Some(hdr_obj) = hdrs.as_object()
             {
-                for &key in &["content-type", "accept", "authorization", "user-agent", "cookie"] {
+                for &key in &[
+                    "content-type",
+                    "accept",
+                    "authorization",
+                    "user-agent",
+                    "cookie",
+                ] {
                     if let Ok(val) = hdr_obj.get(js_string!(key), ctx)
                         && !val.is_undefined()
                         && !val.is_null()
@@ -1302,14 +1324,10 @@ fn create_context(
                                         String::new()
                                     }
                                 };
-                                let bytes_json = serde_json::to_string(
-                                    body_owned.as_bytes(),
-                                )
-                                .unwrap_or_else(|_| String::from("[]"));
-                                let code = format!(
-                                    "Promise.resolve(new Uint8Array({}))",
-                                    bytes_json
-                                );
+                                let bytes_json = serde_json::to_string(body_owned.as_bytes())
+                                    .unwrap_or_else(|_| String::from("[]"));
+                                let code =
+                                    format!("Promise.resolve(new Uint8Array({}))", bytes_json);
                                 ctx.eval(Source::from_bytes(code.trim()))
                             })
                         };
@@ -2627,94 +2645,137 @@ fn create_context(
 
     // --- Event constructor ---
 
-// ── Event init-dict helpers ──────────────────────────────────────────────
-/// Copy known properties from args[1] (init dict) onto a freshly-built event object.
-/// Keys that exist in the init dict override the default; keys missing from the
-/// dict keep the default. This is used by every built-in event constructor
-/// because boa_engine's ObjectInitializer doesn't support dynamic property
-/// injection at build time.
-fn apply_init_dict(args: &[JsValue], obj: &JsObject, ctx: &mut Context, keys: &[&str]) {
-    let Some(init) = args.get(1).and_then(|v| v.as_object()) else { return };
-    for &key in keys {
-        if let Ok(val) = init.get(js_string!(key), ctx) {
-            if !val.is_undefined() {
+    // ── Event init-dict helpers ──────────────────────────────────────────────
+    /// Copy known properties from args[1] (init dict) onto a freshly-built event object.
+    /// Keys that exist in the init dict override the default; keys missing from the
+    /// dict keep the default. This is used by every built-in event constructor
+    /// because boa_engine's ObjectInitializer doesn't support dynamic property
+    /// injection at build time.
+    fn apply_init_dict(args: &[JsValue], obj: &JsObject, ctx: &mut Context, keys: &[&str]) {
+        let Some(init) = args.get(1).and_then(|v| v.as_object()) else {
+            return;
+        };
+        for &key in keys {
+            if let Ok(val) = init.get(js_string!(key), ctx)
+                && !val.is_undefined()
+            {
                 let _ = obj.set(js_string!(key), val, true, ctx);
             }
         }
     }
-}
 
+    /// Add Event.prototype methods as own properties on every event object.
+    /// This is needed because boa_engine's register_global_callable does not
+    /// create a .prototype property on the constructor, making prototype-based
+    /// inheritance unavailable.
+    fn setup_event_object(obj: &JsObject, ctx: &mut Context) {
+        // preventDefault
+        let prevent_fn = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                if let Some(o) = _this.as_object() {
+                    let _ = o.set(
+                        js_string!("defaultPrevented"),
+                        JsValue::from(true),
+                        true,
+                        ctx,
+                    );
+                }
+                Ok(JsValue::undefined())
+            })
+        };
+        let _ = obj.set(
+            js_string!("preventDefault"),
+            FunctionObjectBuilder::new(ctx.realm(), prevent_fn)
+                .name(js_string!("preventDefault"))
+                .build(),
+            true,
+            ctx,
+        );
 
-/// Add Event.prototype methods as own properties on every event object.
-/// This is needed because boa_engine's register_global_callable does not
-/// create a .prototype property on the constructor, making prototype-based
-/// inheritance unavailable.
-fn setup_event_object(obj: &JsObject, ctx: &mut Context) {
-    // preventDefault
-    let prevent_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
-            if let Some(o) = _this.as_object() {
-                let _ = o.set(js_string!("defaultPrevented"), JsValue::from(true), true, ctx);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ = obj.set(
-        js_string!("preventDefault"),
-        FunctionObjectBuilder::new(ctx.realm(), prevent_fn)
-            .name(js_string!("preventDefault"))
-            .build(),
-        true,
-        ctx,
-    );
+        // stopPropagation
+        let stop_fn = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                if let Some(o) = _this.as_object() {
+                    let _ = o.set(
+                        js_string!("__stopPropagation"),
+                        JsValue::from(true),
+                        true,
+                        ctx,
+                    );
+                }
+                Ok(JsValue::undefined())
+            })
+        };
+        let _ = obj.set(
+            js_string!("stopPropagation"),
+            FunctionObjectBuilder::new(ctx.realm(), stop_fn)
+                .name(js_string!("stopPropagation"))
+                .build(),
+            true,
+            ctx,
+        );
 
-    // stopPropagation
-    let stop_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
-            if let Some(o) = _this.as_object() {
-                let _ = o.set(js_string!("__stopPropagation"), JsValue::from(true), true, ctx);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ = obj.set(
-        js_string!("stopPropagation"),
-        FunctionObjectBuilder::new(ctx.realm(), stop_fn)
-            .name(js_string!("stopPropagation"))
-            .build(),
-        true,
-        ctx,
-    );
-
-    let stop_imm_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, ctx| {
-            if let Some(o) = _this.as_object() {
-                let _ = o.set(js_string!("__stopPropagation"), JsValue::from(true), true, ctx);
-                let _ = o.set(js_string!("__stopImmediatePropagation"), JsValue::from(true), true, ctx);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ = obj.set(
-        js_string!("stopImmediatePropagation"),
-        FunctionObjectBuilder::new(ctx.realm(), stop_imm_fn)
-            .name(js_string!("stopImmediatePropagation"))
-            .build(),
-        true,
-        ctx,
-    );
-}
-const EVENT_INIT_KEYS: &[&str] = &["bubbles", "cancelable"];
-const MOUSE_INIT_KEYS: &[&str] = &[
-    "bubbles", "cancelable", "clientX", "clientY", "button", "buttons",
-    "screenX", "screenY", "ctrlKey", "shiftKey", "altKey", "metaKey",
-    "relatedTarget", "view", "detail",
-];
-const KEYBOARD_INIT_KEYS: &[&str] = &[
-    "key", "code", "keyCode", "charCode", "which", "location",
-    "ctrlKey", "shiftKey", "altKey", "metaKey", "repeat", "isComposing",
-];
-const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
+        let stop_imm_fn = unsafe {
+            NativeFunction::from_closure(move |_this, _args, ctx| {
+                if let Some(o) = _this.as_object() {
+                    let _ = o.set(
+                        js_string!("__stopPropagation"),
+                        JsValue::from(true),
+                        true,
+                        ctx,
+                    );
+                    let _ = o.set(
+                        js_string!("__stopImmediatePropagation"),
+                        JsValue::from(true),
+                        true,
+                        ctx,
+                    );
+                }
+                Ok(JsValue::undefined())
+            })
+        };
+        let _ = obj.set(
+            js_string!("stopImmediatePropagation"),
+            FunctionObjectBuilder::new(ctx.realm(), stop_imm_fn)
+                .name(js_string!("stopImmediatePropagation"))
+                .build(),
+            true,
+            ctx,
+        );
+    }
+    const EVENT_INIT_KEYS: &[&str] = &["bubbles", "cancelable"];
+    const MOUSE_INIT_KEYS: &[&str] = &[
+        "bubbles",
+        "cancelable",
+        "clientX",
+        "clientY",
+        "button",
+        "buttons",
+        "screenX",
+        "screenY",
+        "ctrlKey",
+        "shiftKey",
+        "altKey",
+        "metaKey",
+        "relatedTarget",
+        "view",
+        "detail",
+    ];
+    const KEYBOARD_INIT_KEYS: &[&str] = &[
+        "key",
+        "code",
+        "keyCode",
+        "charCode",
+        "which",
+        "location",
+        "ctrlKey",
+        "shiftKey",
+        "altKey",
+        "metaKey",
+        "repeat",
+        "isComposing",
+    ];
+    const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
     let event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event_type = args
@@ -2800,11 +2861,27 @@ const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
                 .property(js_string!("buttons"), JsValue::from(0), Attribute::all())
                 .property(js_string!("screenX"), JsValue::from(0), Attribute::all())
                 .property(js_string!("screenY"), JsValue::from(0), Attribute::all())
-                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("ctrlKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("shiftKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("relatedTarget"), JsValue::null(), Attribute::all())
+                .property(
+                    js_string!("metaKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("relatedTarget"),
+                    JsValue::null(),
+                    Attribute::all(),
+                )
                 .property(js_string!("view"), JsValue::null(), Attribute::all())
                 .property(js_string!("detail"), JsValue::from(0), Attribute::all())
                 .build();
@@ -2843,12 +2920,28 @@ const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
                 .property(js_string!("charCode"), JsValue::from(0), Attribute::all())
                 .property(js_string!("which"), JsValue::from(0), Attribute::all())
                 .property(js_string!("location"), JsValue::from(0), Attribute::all())
-                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("ctrlKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("shiftKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("metaKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .property(js_string!("repeat"), JsValue::from(false), Attribute::all())
-                .property(js_string!("isComposing"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("isComposing"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .build();
             apply_init_dict(args, &obj, ctx, KEYBOARD_INIT_KEYS);
             setup_event_object(&obj, ctx);
@@ -2879,7 +2972,11 @@ const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
                     JsValue::from(false),
                     Attribute::all(),
                 )
-                .property(js_string!("relatedTarget"), JsValue::null(), Attribute::all())
+                .property(
+                    js_string!("relatedTarget"),
+                    JsValue::null(),
+                    Attribute::all(),
+                )
                 .build();
             apply_init_dict(args, &obj, ctx, FOCUS_INIT_KEYS);
             setup_event_object(&obj, ctx);
@@ -2914,11 +3011,27 @@ const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
                 .property(js_string!("buttons"), JsValue::from(0), Attribute::all())
                 .property(js_string!("screenX"), JsValue::from(0), Attribute::all())
                 .property(js_string!("screenY"), JsValue::from(0), Attribute::all())
-                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(
+                    js_string!("ctrlKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("shiftKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
                 .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
-                .property(js_string!("dataTransfer"), JsValue::null(), Attribute::all())
+                .property(
+                    js_string!("metaKey"),
+                    JsValue::from(false),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("dataTransfer"),
+                    JsValue::null(),
+                    Attribute::all(),
+                )
                 .build();
             apply_init_dict(args, &obj, ctx, MOUSE_INIT_KEYS);
             setup_event_object(&obj, ctx);
@@ -4141,8 +4254,7 @@ fn create_element_object(
                 let mut ancestor_ids: Vec<u32> = Vec::new();
                 let snap = snap_disp.read();
                 if let Some(ref s) = *snap {
-                    let mut current = s.nodes.get(&node_id_disp)
-                        .and_then(|n| n.parent);
+                    let mut current = s.nodes.get(&node_id_disp).and_then(|n| n.parent);
                     while let Some(pid) = current {
                         // Stop at document nodes (type 9) — they use a
                         // separate listener system on the document object.
@@ -4196,7 +4308,7 @@ fn create_element_object(
                         {
                             break;
                         }
-                        let _ = cb.call(&ancestor_val, &[event.clone()], ctx);
+                        let _ = cb.call(&ancestor_val, std::slice::from_ref(&event), ctx);
                     }
                 }
             }
@@ -7691,7 +7803,9 @@ mod tests {
         rt.set_dom_snapshot(Some(snapshot));
 
         let result = rt
-            .evaluate("var p = document.querySelector('p'); p.innerText === p.textContent && p.innerText")
+            .evaluate(
+                "var p = document.querySelector('p'); p.innerText === p.textContent && p.innerText",
+            )
             .await
             .unwrap();
         assert!(result.is_ok());

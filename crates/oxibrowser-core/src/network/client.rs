@@ -51,9 +51,7 @@ pub struct ChallengeOutcome {
     pub challenge: Option<challenge::DetectedChallenge>,
 }
 
-
 impl HttpClient {
-
     /// Read a response body with a streaming byte cap.
     ///
     /// Avoids loading the entire body into memory: keeps at most `max_bytes`
@@ -77,14 +75,13 @@ impl HttpClient {
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<usize>().ok())
+            && len > max_bytes
         {
-            if len > max_bytes {
-                tracing::warn!(
-                    content_length = len,
-                    max_bytes,
-                    "response body exceeds size limit (Content-Length pre-check)"
-                );
-            }
+            tracing::warn!(
+                content_length = len,
+                max_bytes,
+                "response body exceeds size limit (Content-Length pre-check)"
+            );
         }
         let bytes = response
             .bytes()
@@ -385,10 +382,7 @@ impl HttpClient {
             tracing::warn!(url = %url, max_bytes = max, "response body truncated at size limit");
         }
 
-        Ok(crate::encoding::decode_html(
-            &buf,
-            content_type.as_deref(),
-        ))
+        Ok(crate::encoding::decode_html(&buf, content_type.as_deref()))
     }
 
     /// Send a POST request with a raw body.

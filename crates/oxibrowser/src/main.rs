@@ -314,7 +314,16 @@ async fn main() {
             cookie_file,
             allow_private_ips,
             auth_token,
-        } => run_serve(&host, port, cookie_file.as_deref(), allow_private_ips, auth_token).await,
+        } => {
+            run_serve(
+                &host,
+                port,
+                cookie_file.as_deref(),
+                allow_private_ips,
+                auth_token,
+            )
+            .await
+        }
         Commands::Search {
             query,
             source,
@@ -1164,7 +1173,13 @@ async fn run_script(script_path_or_yaml: &str, timeout: u64) -> i32 {
 // ---------------------------------------------------------------------------
 // serve (CDP server)
 // ---------------------------------------------------------------------------
-async fn run_serve(host: &str, port: u16, cookie_file: Option<&str>, allow_private_ips: bool, auth_token: Option<String>) -> i32 {
+async fn run_serve(
+    host: &str,
+    port: u16,
+    cookie_file: Option<&str>,
+    allow_private_ips: bool,
+    auth_token: Option<String>,
+) -> i32 {
     let addr: SocketAddr = match format!("{host}:{port}").parse() {
         Ok(a) => a,
         Err(e) => {
