@@ -11,7 +11,7 @@
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
-use oxibrowser_core::js::{js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
+use oxibrowser_core::js::{js_dispatch_drag_event, js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -124,9 +124,12 @@ async fn ime_set_composition(params: Option<Value>, _ctx: &DispatchContext) -> D
 // Mouse events
 // ---------------------------------------------------------------------------
 
-/// Input.dispatchMouseEvent — simulate mouse events.
+/// Input.dispatchMouseEvent — simulate mouse events with browser-like sequences.
 ///
-/// Dispatches a real `MouseEvent` on the element at (x, y) via JS.
+/// Fires realistic event sequences:
+/// - mousePressed → mousedown
+/// - mouseReleased → mouseup + click (left button only)
+/// - mouseMoved → mousemove
 async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let p = params.ok_or_else(|| CdpError {
         code: -32602,
@@ -151,27 +154,47 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
         "Input.dispatchMouseEvent"
     );
 
-    // Generate JS to dispatch the mouse event
-    let js = js_dispatch_mouse_event(x, y, event_type, button, click_count);
-    let mut session_guard = ctx.session.write().await;
-    let result = session_guard.evaluate_js(&js).await;
-
-    match result {
-        Ok(val) => {
-            tracing::trace!(?val, "dispatchMouseEvent result");
-            ctx.events.send_page_event(
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": event_type,
-                    "x": x,
-                    "y": y,
-                    "button": button,
-                    "clickCount": click_count,
-                }),
-            );
+    // Determine event sequence based on CDP event type
+    let mut events: Vec<&str> = Vec::new();
+    match event_type {
+        "mousePressed" => {
+            events.push("mousedown");
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "dispatchMouseEvent JS eval failed");
+        "mouseReleased" => {
+            events.push("mouseup");
+            // Click only fires for left-button primary clicks
+            if button == "none" || button == "left" {
+                events.push("click");
+            }
+        }
+        "mouseMoved" => {
+            events.push("mousemove");
+        }
+        _ => {
+            events.push(event_type);
+        }
+    }
+
+    let mut session_guard = ctx.session.write().await;
+    for &evt in &events {
+        let js = js_dispatch_mouse_event(x, y, evt, button, click_count);
+        match session_guard.evaluate_js(&js).await {
+            Ok(val) => {
+                tracing::trace!(event = evt, ?val, "dispatchMouseEvent event");
+                ctx.events.send_page_event(
+                    "Input.dispatchMouseEvent",
+                    json!({
+                        "type": evt,
+                        "x": x,
+                        "y": y,
+                        "button": button,
+                        "clickCount": click_count,
+                    }),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(event = evt, error = %e, "dispatchMouseEvent JS eval failed");
+            }
         }
     }
 
@@ -179,7 +202,7 @@ async fn dispatch_mouse_event(params: Option<Value>, ctx: &DispatchContext) -> D
 }
 
 /// Input.dispatchDragEvent — simulate drag events.
-async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
+async fn dispatch_drag_event(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let p = params.ok_or_else(|| CdpError {
         code: -32602,
         message: "dispatchDragEvent requires parameters".to_string(),
@@ -190,6 +213,10 @@ async fn dispatch_drag_event(params: Option<Value>, _ctx: &DispatchContext) -> D
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     tracing::debug!(event_type, x, y, "Input.dispatchDragEvent");
+
+    let js = js_dispatch_drag_event(x, y, event_type);
+    let mut session_guard = ctx.session.write().await;
+    let _result = session_guard.evaluate_js(&js).await;
 
     Ok(Some(json!({})))
 }

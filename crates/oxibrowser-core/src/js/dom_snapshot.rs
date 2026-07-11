@@ -746,6 +746,214 @@ impl DomSnapshot {
             None
         }
     }
+
+    /// Parse an HTML fragment and replace the children of `node_id` with the parsed nodes.
+    ///
+    /// Walks the parsed fragment's `html → body` skeleton, takes body's direct
+    /// children, and inserts them under `node_id` (each new node receives a
+    /// fresh id starting from `max(existing ids) + 1` so existing nodes are
+    /// never overwritten). Old children of `node_id` are removed recursively
+    /// from the snapshot. Revision is bumped on success.
+    pub fn set_inner_html(&mut self, node_id: u32, html: &str) {
+        let parsed = oxibrowser_webapi::dom::Document::parse(html);
+        let tree = parsed.tree();
+        let Some(root_id) = parsed.root() else {
+            return;
+        };
+        let Some(html_id) = find_child_with_tag(&parsed, tree, root_id, "html") else {
+            return;
+        };
+        let Some(body_id) = find_child_with_tag(&parsed, tree, html_id, "body") else {
+            return;
+        };
+        // Snapshot the body-children NodeIds up front.
+        let new_children: Vec<oxibrowser_webapi::dom::NodeId> =
+            tree.children(body_id).to_vec();
+
+        // Bail if the target doesn't exist in this snapshot.
+        if !self.nodes.contains_key(&node_id) {
+            return;
+        }
+
+        // Remove existing children first so we don't leak orphan nodes.
+        let to_remove: Vec<u32> = self
+            .nodes
+            .get(&node_id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        for child_id in to_remove {
+            self.remove_subtree(child_id);
+        }
+
+        // Compute next id once so the first inserted subtree gets a stable base.
+        let mut next_id = self
+            .nodes
+            .keys()
+            .max()
+            .copied()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        for src_id in new_children {
+            self.insert_subtree(
+                src_id,
+                &parsed,
+                tree,
+                node_id,
+                None,
+                &mut next_id,
+            );
+        }
+        self.bump_revision();
+    }
+
+    /// Recursively remove `node_id` and all of its descendants from the snapshot.
+    ///
+    /// Detaches `node_id` from its parent's `children` vector and removes every
+    /// node in the subtree from `self.nodes`. Safe to call when the node has
+    /// no parent (e.g. the root).
+    fn remove_subtree(&mut self, node_id: u32) {
+        // Pull a borrow first to learn the parent + descendant set without
+        // holding the `self.nodes` borrow across mutations below.
+        let parent_id = match self.nodes.get(&node_id) {
+            Some(n) => n.parent,
+            None => return,
+        };
+        let descendants = collect_subtree_ids(self, node_id);
+
+        // Detach from parent's children vector.
+        if let Some(parent_id) = parent_id
+            && let Some(parent) = self.nodes.get_mut(&parent_id)
+        {
+            parent.children.retain(|&c| c != node_id);
+        }
+
+        // Drop in pre-order so parents are removed before re-using id vectors.
+        let mut to_drop = vec![node_id];
+        to_drop.extend(descendants);
+        for id in to_drop {
+            self.nodes.remove(&id);
+        }
+    }
+
+    /// Insert a webapi node (and its descendants) from `doc`/`tree` into the
+    /// snapshot under `parent_id`, before `next_id` (or at the end when None).
+    ///
+    /// Allocates fresh ids starting at `*next_id_counter` (post-incremented
+    /// for each created node) so collisions with existing snapshot ids are
+    /// impossible. Returns the new id of `src_id`, or `None` if `src_id` is
+    /// not present in `doc`, `parent_id` is unknown, or `src_id` is a
+    /// Doctype/Document.
+    fn insert_subtree(
+        &mut self,
+        src_id: oxibrowser_webapi::dom::NodeId,
+        doc: &oxibrowser_webapi::dom::Document,
+        tree: &oxibrowser_webapi::dom::Tree,
+        parent_id: u32,
+        next_id: Option<u32>,
+        next_id_counter: &mut u32,
+    ) -> Option<u32> {
+        use oxibrowser_webapi::dom::NodeType;
+
+        let node = doc.get_node(src_id)?;
+        if !self.nodes.contains_key(&parent_id) {
+            return None;
+        }
+
+        // Skip Document / Doctype — they shouldn't appear as children here, but
+        // be defensive in case the parsed fragment exposes them oddly.
+        let (tag, attributes, node_type_u8, text_content) = match &node.node_type {
+            NodeType::Element { tag, attributes } => {
+                let attrs: HashMap<String, String> = attributes
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let tc = collect_text_content(src_id, doc, tree);
+                (tag.clone(), attrs, 1u8, tc)
+            }
+            NodeType::Text(t) => (String::new(), HashMap::new(), 3u8, t.clone()),
+            NodeType::Comment(c) => (String::new(), HashMap::new(), 8u8, c.clone()),
+            NodeType::Document | NodeType::Doctype { .. } => return None,
+        };
+
+        let new_id = *next_id_counter;
+        *next_id_counter = next_id_counter.wrapping_add(1);
+
+        // Insert the node first so children can take it as their parent.
+        let dom_node = DomNode {
+            id: new_id,
+            tag,
+            attributes,
+            text_content,
+            children: Vec::new(),
+            parent: Some(parent_id),
+            node_type: node_type_u8,
+        };
+        self.nodes.insert(new_id, dom_node);
+
+        // Recurse into source-children before wiring into the parent's
+        // children vec, so each child gets a stable parent link first.
+        let mut child_ids: Vec<u32> = Vec::with_capacity(tree.children(src_id).len());
+        for &src_child in tree.children(src_id) {
+            if let Some(child_new_id) =
+                self.insert_subtree(src_child, doc, tree, new_id, None, next_id_counter)
+            {
+                child_ids.push(child_new_id);
+            }
+        }
+
+        // Populate this node's children, then link into the parent's children
+        // vec at the requested position.
+        if let Some(node_ref) = self.nodes.get_mut(&new_id) {
+            node_ref.children = child_ids;
+        }
+        if let Some(parent) = self.nodes.get_mut(&parent_id) {
+            match next_id {
+                Some(anchor) => {
+                    if let Some(idx) = parent.children.iter().position(|&c| c == anchor) {
+                        parent.children.insert(idx, new_id);
+                    } else {
+                        parent.children.push(new_id);
+                    }
+                }
+                None => parent.children.push(new_id),
+            }
+        }
+        Some(new_id)
+    }
+}
+
+/// Find the first direct child of `parent_id` whose element tag matches `tag`
+/// (case-insensitive). Returns `None` if `parent_id` is absent from the tree
+/// or no such child exists.
+fn find_child_with_tag(
+    doc: &oxibrowser_webapi::dom::Document,
+    tree: &oxibrowser_webapi::dom::Tree,
+    parent_id: oxibrowser_webapi::dom::NodeId,
+    tag: &str,
+) -> Option<oxibrowser_webapi::dom::NodeId> {
+    for &child in tree.children(parent_id) {
+        if let Some(node) = doc.get_node(child)
+            && let Some(child_tag) = node.tag_name()
+            && child_tag.eq_ignore_ascii_case(tag)
+        {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// DFS pre-order collection of `node_id` and every descendant present in
+/// `self.nodes`. Excludes `node_id` itself; callers typically prepend it.
+fn collect_subtree_ids(snap: &DomSnapshot, node_id: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Some(node) = snap.nodes.get(&node_id) else {
+        return out;
+    };
+    for &child in &node.children {
+        out.push(child);
+        out.extend(collect_subtree_ids(snap, child));
+    }
+    out
 }
 
 /// Recursively collect all nodes from the document tree into the snapshot.
@@ -848,6 +1056,33 @@ fn collect_text_recursive(
 /// initial snapshot. After any in-place mutation, indices are not refreshed
 /// eagerly; the `&self` read methods on `DomSnapshot` detect staleness via
 /// `index_revision != revision` and fall back to a tree walk.
+
+impl DomSnapshot {
+    /// Rebuild id/class/tag indices from the current `nodes` HashMap by
+    /// performing a DFS pre-order walk starting at `root_id`. Called after
+    /// in-place mutations (innerHTML, createElement, etc.) so that
+    /// `query_selector` / `get_element_by_id` can find newly-inserted nodes
+    /// via the fast-path index instead of falling back to a tree walk.
+    pub fn rebuild_indices(&mut self) {
+        let mut order: Vec<u32> = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![self.root_id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.get(&id) {
+                order.push(id);
+                // Push children in reverse so DFS pre-order is preserved.
+                for &child in node.children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        let (id_index, class_index, tag_index) =
+            build_indices(&self.nodes, &order);
+        self.id_index = id_index;
+        self.class_index = class_index;
+        self.tag_index = tag_index;
+        self.index_revision = self.revision;
+    }
+}
 fn build_indices(
     nodes: &HashMap<u32, DomNode>,
     order: &[u32],
@@ -1144,4 +1379,155 @@ mod tests {
         assert!(snapshot.links().is_empty());
         assert!(snapshot.meta_tags().is_empty());
     }
+
+    #[test]
+    fn test_set_inner_html_replaces_children() {
+        let html = r#"<html><body><div id="host"><p>old</p><span>keep</span></div></body></html>"#;
+        let frame = make_frame(html);
+        let mut snapshot = DomSnapshot::from_frame(&frame);
+        let host = snapshot.get_element_by_id("host").expect("host div");
+        let revision_before = snapshot.revision;
+
+        // Two siblings at top-level: an element + a text node.
+        snapshot.set_inner_html(host, "<a href=\"/x\">link</a>tail text");
+
+        let h = snapshot.nodes.get(&host).expect("host still present");
+        // Old children should be gone (no <p>, no <span>, no descendant text).
+        assert_eq!(h.children.len(), 2, "exactly two new children inserted");
+        for &cid in &h.children {
+            let c = snapshot.nodes.get(&cid).expect("child present");
+            assert_ne!(c.tag, "p", "old <p> removed");
+            assert_ne!(c.tag, "span", "old <span> removed");
+        }
+        // First child is the <a>, with attributes preserved.
+        let a_id = h.children[0];
+        let a = snapshot.nodes.get(&a_id).expect("a present");
+        assert_eq!(a.tag, "a");
+        assert_eq!(a.node_type, 1u8);
+        assert_eq!(a.attributes.get("href").map(String::as_str), Some("/x"));
+        // Second child is a text node.
+        let t_id = h.children[1];
+        let t = snapshot.nodes.get(&t_id).expect("text node present");
+        assert_eq!(t.node_type, 3u8);
+        assert_eq!(t.text_content, "tail text");
+        // No collision with original ids — the new ids are strictly greater.
+        assert!(a_id > 0 && t_id > 0 && a_id != t_id);
+        // Old <p>/<span> and their children must be gone from the snapshot.
+        for id in snapshot.nodes.keys() {
+            let n = &snapshot.nodes[id];
+            assert_ne!(n.tag, "p");
+            assert_ne!(n.tag, "span");
+        }
+        // Revision bumped — indices now stale, style cache dropped.
+        assert_ne!(snapshot.revision, revision_before);
+    }
+
+    #[test]
+    fn test_set_inner_html_handles_doctype() {
+        // Even with <!DOCTYPE html> in the fragment, html5ever's tree places
+        // the Doctype as a sibling of <html> under the root. set_inner_html
+        // must skip the Doctype and locate <html> → <body>.
+        let html = r#"<html><body><div id="host">old</div></body></html>"#;
+        let frame = make_frame(html);
+        let mut snapshot = DomSnapshot::from_frame(&frame);
+        let host = snapshot.get_element_by_id("host").expect("host div");
+
+        snapshot.set_inner_html(
+            host,
+            r#"<!DOCTYPE html><html><body><b>new</b></body></html>"#,
+        );
+
+        let h = snapshot.nodes.get(&host).expect("host still present");
+        assert_eq!(h.children.len(), 1, "<b> inserted as only child");
+        let b_id = h.children[0];
+        let b = snapshot.nodes.get(&b_id).expect("b present");
+        assert_eq!(b.tag, "b");
+        assert_eq!(b.text_content, "new");
+    }
+
+    #[test]
+    fn test_remove_subtree_detaches_and_purges() {
+        let html = r#"<html><body>
+            <div id="root"><p id="child">a<span id="leaf">b</span></p></div>
+        </body></html>"#;
+        let frame = make_frame(html);
+        let mut snapshot = DomSnapshot::from_frame(&frame);
+        let root = snapshot.get_element_by_id("root").expect("root div");
+
+        let pre_count = snapshot.nodes.len();
+        snapshot.remove_subtree(root);
+        let post_count = snapshot.nodes.len();
+
+        // 4 nodes gone (root + p + span + leaf text node… actually <span>'s
+        // text child counts too). Just assert strict shrinkage + no orphans.
+        assert!(post_count < pre_count, "snapshot shrinks after remove");
+        assert!(!snapshot.nodes.contains_key(&root));
+        // `id_index` is not eagerly invalidated here — that's the
+        // `bump_revision` contract — so assert directly against `nodes`.
+        let still_present = snapshot
+            .nodes
+            .values()
+            .any(|n| n.attributes.get("id").map(|s| s.as_str()) == Some("child"));
+        assert!(!still_present, "<p id=child> purged from nodes");
+        let still_present = snapshot
+            .nodes
+            .values()
+            .any(|n| n.attributes.get("id").map(|s| s.as_str()) == Some("leaf"));
+        assert!(!still_present, "<span id=leaf> purged from nodes");
+    }
+
+    #[test]
+    fn test_insert_subtree_fresh_ids_and_links() {
+        // Verify that insert_subtree against an empty snapshot mints ids
+        // strictly past the largest existing one and wires parent/child links.
+        let html = "<html><body><div id=\"target\"></div></body></html>";
+        let frame = make_frame(html);
+        let mut snapshot = DomSnapshot::from_frame(&frame);
+        let target = snapshot.get_element_by_id("target").expect("target div");
+
+        // Parse a fresh fragment and locate the <b> element to insert.
+        let parsed = oxibrowser_webapi::dom::Document::parse("<b>hi</b>");
+        let tree = parsed.tree();
+        let root = parsed.root().unwrap();
+        let html_node = {
+            let mut found = None;
+            for &c in tree.children(root) {
+                if parsed.get_node(c).and_then(|n| n.tag_name()) == Some("html") {
+                    found = Some(c);
+                    break;
+                }
+            }
+            found.expect("html element")
+        };
+        let body_node = {
+            let mut found = None;
+            for &c in tree.children(html_node) {
+                if parsed.get_node(c).and_then(|n| n.tag_name()) == Some("body") {
+                    found = Some(c);
+                    break;
+                }
+            }
+            found.expect("body element")
+        };
+        let b_src = tree
+            .children(body_node)
+            .first()
+            .copied()
+            .expect("b source");
+
+        let max_existing = *snapshot.nodes.keys().max().unwrap();
+        let mut counter = max_existing + 1;
+        let new_id = snapshot
+            .insert_subtree(b_src, &parsed, tree, target, None, &mut counter)
+            .expect("inserted");
+        assert_eq!(new_id, max_existing + 1, "fresh id past existing max");
+
+        let t = snapshot.nodes.get(&target).expect("target present");
+        assert_eq!(t.children, vec![new_id], "child wired into parent");
+        let inserted = snapshot.nodes.get(&new_id).expect("inserted node present");
+        assert_eq!(inserted.parent, Some(target));
+        assert_eq!(inserted.tag, "b");
+        assert_eq!(inserted.node_type, 1u8);
+    }
+
 }

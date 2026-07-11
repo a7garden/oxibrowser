@@ -28,10 +28,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 
 use base64::Engine;
-use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::object::builtins::JsArray;
+use boa_engine::object::{FunctionObjectBuilder, JsObject};
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Source, js_string};
 use serde_json::Value;
@@ -47,6 +48,50 @@ use std::time::{Duration, Instant};
 /// Global counter for unique node IDs, avoids collisions in tight loops.
 /// Starts at 1_000_000 to stay above any parsed DOM snapshot IDs.
 static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1_000_000);
+
+// ── Thread-local listener registry ─────────────────────────────────────────
+/// Event listeners keyed by node_id → event_type → callbacks.
+/// Thread-local because boa `Context` is !Send — every closure runs on the
+/// same JS thread. This lets the bubbling walk find listeners registered via
+/// any element object, regardless of object identity (each DOM query mints a
+/// fresh JS object, so `__listeners` on one instance is invisible to another).
+thread_local! {
+    static LISTENER_REGISTRY: RefCell<HashMap<u32, HashMap<String, Vec<JsObject>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Register a listener callback for a node in the thread-local registry.
+fn registry_add(node_id: u32, event_type: &str, callback: JsObject) {
+    LISTENER_REGISTRY.with(|r| {
+        r.borrow_mut()
+            .entry(node_id)
+            .or_default()
+            .entry(event_type.to_string())
+            .or_default()
+            .push(callback);
+    });
+}
+
+/// Get all callbacks for a node + event type (cloned out to release the borrow
+/// before calling them — callbacks may themselves call addEventListener).
+fn registry_get(node_id: u32, event_type: &str) -> Vec<JsObject> {
+    LISTENER_REGISTRY.with(|r| {
+        r.borrow()
+            .get(&node_id)
+            .and_then(|m| m.get(event_type))
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// Remove all callbacks for a node + event type.
+fn registry_remove(node_id: u32, event_type: &str) {
+    LISTENER_REGISTRY.with(|r| {
+        if let Some(m) = r.borrow_mut().get_mut(&node_id) {
+            m.remove(event_type);
+        }
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1104,7 +1149,22 @@ fn create_context(
 
             // Extract method and options from second argument
             let mut method = String::from("GET");
-            let headers: Vec<(String, String)> = Vec::new();
+            let mut headers: Vec<(String, String)> = Vec::new();
+            if let Some(opts) = args.get(1).and_then(|v| v.as_object())
+                && let Ok(hdrs) = opts.get(js_string!("headers"), ctx)
+                && let Some(hdr_obj) = hdrs.as_object()
+            {
+                for &key in &["content-type", "accept", "authorization", "user-agent", "cookie"] {
+                    if let Ok(val) = hdr_obj.get(js_string!(key), ctx)
+                        && !val.is_undefined()
+                        && !val.is_null()
+                        && let Some(s) = val.as_string()
+                    {
+                        headers.push((key.to_string(), s.to_std_string_escaped()));
+                    }
+                }
+            }
+
             let mut body: Option<String> = None;
             let mut _timeout_ms: Option<u64> = None;
 
@@ -1191,22 +1251,65 @@ fn create_context(
                     if let Some(err) = resp.error {
                         resp_error = Some(err);
                     } else {
-                        let text_fn_body = resp.body.clone();
+                        // text() / json() — stash __body as a global prop and let the
+                        // eval'd IIFE grab it by reference. Avoids re-stringifying the
+                        // body on every call. The body value itself is a GC-tracked
+                        // JsValue (JsString), not a serialized copy.
                         let text_fn = {
-                            NativeFunction::from_closure(move |_this, _args, ctx| {
-                                let body_json = serde_json::to_string(&text_fn_body)
-                                    .unwrap_or_else(|_| String::from("\"\""));
-                                let code = format!("Promise.resolve({})", body_json);
-                                ctx.eval(Source::from_bytes(code.trim()))
+                            NativeFunction::from_closure(move |this, _args, ctx| {
+                                let body = this
+                                    .as_object()
+                                    .and_then(|o| o.get(js_string!("__body"), ctx).ok())
+                                    .unwrap_or(JsValue::undefined());
+                                let _ = ctx.register_global_property(
+                                    js_string!("__text_body"),
+                                    body,
+                                    Attribute::all(),
+                                );
+                                ctx.eval(Source::from_bytes(
+                                    "(() => { const v = __text_body; delete globalThis.__text_body; return Promise.resolve(v); })()",
+                                ))
                             })
                         };
 
-                        let json_fn_body = resp.body.clone();
                         let json_fn = {
-                            NativeFunction::from_closure(move |_this, _args, ctx| {
-                                let body_json = serde_json::to_string(&json_fn_body)
-                                    .unwrap_or_else(|_| String::from("null"));
-                                let code = format!("Promise.resolve(JSON.parse({}))", body_json);
+                            NativeFunction::from_closure(move |this, _args, ctx| {
+                                let body = this
+                                    .as_object()
+                                    .and_then(|o| o.get(js_string!("__body"), ctx).ok())
+                                    .unwrap_or(JsValue::undefined());
+                                let _ = ctx.register_global_property(
+                                    js_string!("__json_body"),
+                                    body,
+                                    Attribute::all(),
+                                );
+                                ctx.eval(Source::from_bytes(
+                                    "(() => { const v = __json_body; delete globalThis.__json_body; return Promise.resolve(JSON.parse(v)); })()",
+                                ))
+                            })
+                        };
+
+                        // arrayBuffer() — reads body from this.__body, returns Uint8Array
+                        let array_buffer_fn = {
+                            NativeFunction::from_closure(move |this, _args, ctx| {
+                                let body_owned = {
+                                    if let Some(obj) = this.as_object()
+                                        && let Ok(v) = obj.get(js_string!("__body"), ctx)
+                                        && let Some(s) = v.as_string()
+                                    {
+                                        s.to_std_string_escaped()
+                                    } else {
+                                        String::new()
+                                    }
+                                };
+                                let bytes_json = serde_json::to_string(
+                                    body_owned.as_bytes(),
+                                )
+                                .unwrap_or_else(|_| String::from("[]"));
+                                let code = format!(
+                                    "Promise.resolve(new Uint8Array({}))",
+                                    bytes_json
+                                );
                                 ctx.eval(Source::from_bytes(code.trim()))
                             })
                         };
@@ -1253,12 +1356,18 @@ fn create_context(
                                 Attribute::all(),
                             )
                             .property(
+                                js_string!("__body"),
+                                JsValue::from(JsString::from(resp.body.as_str())),
+                                Attribute::all(),
+                            )
+                            .property(
                                 js_string!("headers"),
                                 JsValue::from(headers_obj),
                                 Attribute::all(),
                             )
                             .function(text_fn, js_string!("text"), 0)
                             .function(json_fn, js_string!("json"), 0)
+                            .function(array_buffer_fn, js_string!("arrayBuffer"), 0)
                             .build();
 
                         let _ = ctx.register_global_property(
@@ -2475,25 +2584,137 @@ fn create_context(
     ));
 
     // --- requestAnimationFrame ---
+    //
+    // Mirrors setTimeout's schedule_timer pattern: clone the job_queue into the closure,
+    // pick the callback from args[0], fire after ~16ms (~60fps), and pass a
+    // DOMHighResTimeStamp (ms since Unix epoch) as the callback's argument.
+    let raf_queue = job_queue.clone();
     let raf_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, _ctx| {
-            let callback = args.first().cloned().unwrap_or(JsValue::undefined());
-            static RAF_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let raf_id = RAF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as f64;
-            if let Some(cb) = callback.as_object() {
-                let _ = cb.call(&JsValue::Undefined, &[JsValue::from(raf_id)], _ctx);
+            let Some(callback) = args.first().cloned() else {
+                return Ok(JsValue::undefined());
+            };
+            if let Some(func) = callback.as_object().cloned()
+                && func.is_callable()
+            {
+                let deadline = Instant::now() + Duration::from_millis(16);
+                let timestamp_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                let cb_args: Vec<JsValue> = vec![JsValue::from(timestamp_ms)];
+                let id = raf_queue.schedule_timer(deadline, func, cb_args, false, None);
+                return Ok(JsValue::from(id as f64));
             }
-            Ok(JsValue::from(raf_id))
+            Ok(JsValue::undefined())
         })
     };
     let _ = context.register_global_callable(js_string!("requestAnimationFrame"), 1, raf_fn);
 
     // --- cancelAnimationFrame ---
-    let cancel_raf_fn =
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    //
+    // Cancels a previously scheduled rAF by its handle ID — same shape as clearTimeout.
+    let cancel_raf_queue = job_queue.clone();
+    let cancel_raf_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            if let Some(id) = args.first().and_then(|v| v.as_number()) {
+                cancel_raf_queue.cancel_timer(id as u64);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
     let _ = context.register_global_callable(js_string!("cancelAnimationFrame"), 1, cancel_raf_fn);
 
     // --- Event constructor ---
+
+// ── Event init-dict helpers ──────────────────────────────────────────────
+/// Copy known properties from args[1] (init dict) onto a freshly-built event object.
+/// Keys that exist in the init dict override the default; keys missing from the
+/// dict keep the default. This is used by every built-in event constructor
+/// because boa_engine's ObjectInitializer doesn't support dynamic property
+/// injection at build time.
+fn apply_init_dict(args: &[JsValue], obj: &JsObject, ctx: &mut Context, keys: &[&str]) {
+    let Some(init) = args.get(1).and_then(|v| v.as_object()) else { return };
+    for &key in keys {
+        if let Ok(val) = init.get(js_string!(key), ctx) {
+            if !val.is_undefined() {
+                let _ = obj.set(js_string!(key), val, true, ctx);
+            }
+        }
+    }
+}
+
+
+/// Add Event.prototype methods as own properties on every event object.
+/// This is needed because boa_engine's register_global_callable does not
+/// create a .prototype property on the constructor, making prototype-based
+/// inheritance unavailable.
+fn setup_event_object(obj: &JsObject, ctx: &mut Context) {
+    // preventDefault
+    let prevent_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            if let Some(o) = _this.as_object() {
+                let _ = o.set(js_string!("defaultPrevented"), JsValue::from(true), true, ctx);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = obj.set(
+        js_string!("preventDefault"),
+        FunctionObjectBuilder::new(ctx.realm(), prevent_fn)
+            .name(js_string!("preventDefault"))
+            .build(),
+        true,
+        ctx,
+    );
+
+    // stopPropagation
+    let stop_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            if let Some(o) = _this.as_object() {
+                let _ = o.set(js_string!("__stopPropagation"), JsValue::from(true), true, ctx);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = obj.set(
+        js_string!("stopPropagation"),
+        FunctionObjectBuilder::new(ctx.realm(), stop_fn)
+            .name(js_string!("stopPropagation"))
+            .build(),
+        true,
+        ctx,
+    );
+
+    let stop_imm_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            if let Some(o) = _this.as_object() {
+                let _ = o.set(js_string!("__stopPropagation"), JsValue::from(true), true, ctx);
+                let _ = o.set(js_string!("__stopImmediatePropagation"), JsValue::from(true), true, ctx);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = obj.set(
+        js_string!("stopImmediatePropagation"),
+        FunctionObjectBuilder::new(ctx.realm(), stop_imm_fn)
+            .name(js_string!("stopImmediatePropagation"))
+            .build(),
+        true,
+        ctx,
+    );
+}
+const EVENT_INIT_KEYS: &[&str] = &["bubbles", "cancelable"];
+const MOUSE_INIT_KEYS: &[&str] = &[
+    "bubbles", "cancelable", "clientX", "clientY", "button", "buttons",
+    "screenX", "screenY", "ctrlKey", "shiftKey", "altKey", "metaKey",
+    "relatedTarget", "view", "detail",
+];
+const KEYBOARD_INIT_KEYS: &[&str] = &[
+    "key", "code", "keyCode", "charCode", "which", "location",
+    "ctrlKey", "shiftKey", "altKey", "metaKey", "repeat", "isComposing",
+];
+const FOCUS_INIT_KEYS: &[&str] = &["bubbles", "cancelable", "relatedTarget"];
     let event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event_type = args
@@ -2530,10 +2751,28 @@ fn create_context(
                 )
                 .property(js_string!("eventPhase"), JsValue::from(0), Attribute::all())
                 .build();
+            apply_init_dict(args, &obj, ctx, EVENT_INIT_KEYS);
+            setup_event_object(&obj, ctx);
             Ok(JsValue::from(obj))
         })
     };
     let _ = context.register_global_callable(js_string!("Event"), 1, event_ctor);
+
+    // Event.prototype methods — needed by dispatchEvent logic
+    let _ = context.eval(Source::from_bytes(
+        r#"
+        Event.prototype.preventDefault = function() {
+            this.defaultPrevented = true;
+        };
+        Event.prototype.stopPropagation = function() {
+            this.__stopPropagation = true;
+        };
+        Event.prototype.stopImmediatePropagation = function() {
+            this.__stopImmediatePropagation = true;
+            this.__stopPropagation = true;
+        };
+    "#,
+    ));
 
     // --- MouseEvent constructor ---
     let mouse_event_ctor = unsafe {
@@ -2558,7 +2797,19 @@ fn create_context(
                 .property(js_string!("clientX"), JsValue::from(0), Attribute::all())
                 .property(js_string!("clientY"), JsValue::from(0), Attribute::all())
                 .property(js_string!("button"), JsValue::from(0), Attribute::all())
+                .property(js_string!("buttons"), JsValue::from(0), Attribute::all())
+                .property(js_string!("screenX"), JsValue::from(0), Attribute::all())
+                .property(js_string!("screenY"), JsValue::from(0), Attribute::all())
+                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("relatedTarget"), JsValue::null(), Attribute::all())
+                .property(js_string!("view"), JsValue::null(), Attribute::all())
+                .property(js_string!("detail"), JsValue::from(0), Attribute::all())
                 .build();
+            apply_init_dict(args, &obj, ctx, MOUSE_INIT_KEYS);
+            setup_event_object(&obj, ctx);
             Ok(JsValue::from(obj))
         })
     };
@@ -2589,13 +2840,22 @@ fn create_context(
                     Attribute::all(),
                 )
                 .property(js_string!("keyCode"), JsValue::from(0), Attribute::all())
+                .property(js_string!("charCode"), JsValue::from(0), Attribute::all())
+                .property(js_string!("which"), JsValue::from(0), Attribute::all())
+                .property(js_string!("location"), JsValue::from(0), Attribute::all())
+                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("repeat"), JsValue::from(false), Attribute::all())
+                .property(js_string!("isComposing"), JsValue::from(false), Attribute::all())
                 .build();
+            apply_init_dict(args, &obj, ctx, KEYBOARD_INIT_KEYS);
+            setup_event_object(&obj, ctx);
             Ok(JsValue::from(obj))
         })
     };
     let _ = context.register_global_callable(js_string!("KeyboardEvent"), 1, keyboard_event_ctor);
-
-    // --- FocusEvent constructor ---
     let focus_event_ctor = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event_type = args
@@ -2619,11 +2879,53 @@ fn create_context(
                     JsValue::from(false),
                     Attribute::all(),
                 )
+                .property(js_string!("relatedTarget"), JsValue::null(), Attribute::all())
                 .build();
+            apply_init_dict(args, &obj, ctx, FOCUS_INIT_KEYS);
+            setup_event_object(&obj, ctx);
             Ok(JsValue::from(obj))
         })
     };
     let _ = context.register_global_callable(js_string!("FocusEvent"), 1, focus_event_ctor);
+
+    // --- DragEvent constructor (extends MouseEvent init keys) ---
+    let drag_event_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("type"),
+                    JsValue::from(JsString::from(event_type.as_str())),
+                    Attribute::all(),
+                )
+                .property(js_string!("bubbles"), JsValue::from(true), Attribute::all())
+                .property(
+                    js_string!("cancelable"),
+                    JsValue::from(true),
+                    Attribute::all(),
+                )
+                .property(js_string!("clientX"), JsValue::from(0), Attribute::all())
+                .property(js_string!("clientY"), JsValue::from(0), Attribute::all())
+                .property(js_string!("button"), JsValue::from(0), Attribute::all())
+                .property(js_string!("buttons"), JsValue::from(0), Attribute::all())
+                .property(js_string!("screenX"), JsValue::from(0), Attribute::all())
+                .property(js_string!("screenY"), JsValue::from(0), Attribute::all())
+                .property(js_string!("ctrlKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("shiftKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("altKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("metaKey"), JsValue::from(false), Attribute::all())
+                .property(js_string!("dataTransfer"), JsValue::null(), Attribute::all())
+                .build();
+            apply_init_dict(args, &obj, ctx, MOUSE_INIT_KEYS);
+            setup_event_object(&obj, ctx);
+            Ok(JsValue::from(obj))
+        })
+    };
+    let _ = context.register_global_callable(js_string!("DragEvent"), 1, drag_event_ctor);
 
     // --- document.createDocumentFragment (via eval) ---
     let _ = context.eval(Source::from_bytes(
@@ -3679,6 +3981,7 @@ fn create_element_object(
 
     // addEventListener — stores callback by event type on the JS object itself.
     // We use a hidden `__listeners` property: { "click": [fn1, fn2], "DOMContentLoaded": [fn3] }
+    let node_id_ael = node.id;
     let add_event_listener_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event_type = args
@@ -3724,7 +4027,13 @@ fn create_element_object(
             if let Some(arr_obj) = arr_val.as_object()
                 && let Ok(arr) = JsArray::from_object(arr_obj.clone())
             {
-                let _ = arr.push(callback, ctx);
+                let _ = arr.push(callback.clone(), ctx);
+            }
+
+            // Also store in the nodeId-keyed registry so bubbling can find
+            // listeners registered through any element object instance.
+            if let Some(cb_obj) = callback.as_object() {
+                registry_add(node_id_ael, &event_type, cb_obj.clone());
             }
 
             Ok(JsValue::undefined())
@@ -3732,6 +4041,7 @@ fn create_element_object(
     };
 
     // removeEventListener — removes callback from __listeners
+    let node_id_rel = node.id;
     let remove_event_listener_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event_type = args
@@ -3754,27 +4064,34 @@ fn create_element_object(
                 );
             }
 
+            // Also remove from the nodeId-keyed registry.
+            registry_remove(node_id_rel, &event_type);
+
             Ok(JsValue::undefined())
         })
     };
 
     // dispatchEvent — calls all registered callbacks for the event type
+    let node_id_disp = node.id;
+    let snap_disp = dom_snapshot_arc.clone();
     let dispatch_event_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let event = args.first().cloned().unwrap_or(JsValue::undefined());
 
-            // Get event type from the event object or use empty string
-            let event_type = if let Some(evt_obj) = event.as_object() {
-                evt_obj
-                    .get(js_string!("type"), ctx)
-                    .ok()
-                    .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
-                    .unwrap_or_default()
-            } else if let Some(s) = event.as_string() {
-                s.to_std_string_escaped()
-            } else {
+            // Need a valid event object with a "type" property
+            let Some(evt_obj) = event.as_object() else {
                 return Ok(JsValue::from(true));
             };
+
+            let event_type = evt_obj
+                .get(js_string!("type"), ctx)
+                .ok()
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_default();
+
+            // Set target/currentTarget before any listener runs
+            let _ = evt_obj.set(js_string!("target"), _this.clone(), true, ctx);
+            let _ = evt_obj.set(js_string!("currentTarget"), _this.clone(), true, ctx);
 
             let this_obj = _this.as_object().unwrap();
             let listeners = this_obj.get(js_string!("__listeners"), ctx);
@@ -3789,6 +4106,16 @@ fn create_element_object(
                     && let Ok(len) = arr.length(ctx)
                 {
                     for i in 0..len {
+                        // Check stopImmediatePropagation before each callback
+                        if evt_obj
+                            .get(js_string!("__stopImmediatePropagation"), ctx)
+                            .ok()
+                            .and_then(|v| v.as_boolean())
+                            .unwrap_or(false)
+                        {
+                            break;
+                        }
+
                         if let Ok(cb) = arr.at(i as i64, ctx)
                             && let Some(cb_obj) = cb.as_object()
                             && cb_obj.is_callable()
@@ -3800,7 +4127,87 @@ fn create_element_object(
                 }
             }
 
-            Ok(JsValue::from(true))
+            // === Bubbling phase ===
+            // Walk the DomSnapshot parent chain (not JS parentNode stubs,
+            // which lack __listeners). For each ancestor nodeId, look up
+            // listeners in the thread-local registry.
+            let bubbles = evt_obj
+                .get(js_string!("bubbles"), ctx)
+                .ok()
+                .and_then(|v| v.as_boolean())
+                .unwrap_or(true);
+            if bubbles {
+                // Build the ancestor nodeId chain from the snapshot.
+                let mut ancestor_ids: Vec<u32> = Vec::new();
+                let snap = snap_disp.read();
+                if let Some(ref s) = *snap {
+                    let mut current = s.nodes.get(&node_id_disp)
+                        .and_then(|n| n.parent);
+                    while let Some(pid) = current {
+                        // Stop at document nodes (type 9) — they use a
+                        // separate listener system on the document object.
+                        match s.nodes.get(&pid) {
+                            Some(pn) if pn.node_type == 1 => {
+                                ancestor_ids.push(pid);
+                                current = pn.parent;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                drop(snap);
+
+                for aid in ancestor_ids {
+                    // Check stopPropagation
+                    if evt_obj
+                        .get(js_string!("__stopPropagation"), ctx)
+                        .ok()
+                        .and_then(|v| v.as_boolean())
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+
+                    // Look up listeners from the registry (NOT from JS
+                    // __listeners, which lives on a different object instance).
+                    let callbacks = registry_get(aid, &event_type);
+                    if callbacks.is_empty() {
+                        continue;
+                    }
+
+                    // Build a minimal ancestor JS object for currentTarget.
+                    let ancestor_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                        .property(js_string!("__nodeId"), JsValue::from(aid), Attribute::all())
+                        .build();
+                    let _ = evt_obj.set(
+                        js_string!("currentTarget"),
+                        JsValue::from(ancestor_obj.clone()),
+                        true,
+                        ctx,
+                    );
+
+                    let ancestor_val = JsValue::from(ancestor_obj);
+                    for cb in &callbacks {
+                        if evt_obj
+                            .get(js_string!("__stopImmediatePropagation"), ctx)
+                            .ok()
+                            .and_then(|v| v.as_boolean())
+                            .unwrap_or(false)
+                        {
+                            break;
+                        }
+                        let _ = cb.call(&ancestor_val, &[event.clone()], ctx);
+                    }
+                }
+            }
+
+            let prevented = evt_obj
+                .get(js_string!("defaultPrevented"), ctx)
+                .ok()
+                .and_then(|v| v.as_boolean())
+                .unwrap_or(false);
+
+            Ok(JsValue::from(!prevented))
         })
     };
 
@@ -4738,16 +5145,18 @@ fn create_element_object(
         .name(js_string!("set textContent"))
         .build();
 
-    // innerHTML getter — reads from live snapshot (same as textContent)
+    // innerHTML getter — serializes the node's children from the live snapshot.
     let dom_snap_ihg = dom_snapshot_arc.clone();
     let nid_ihg = node.id;
     let inner_html_getter = unsafe {
         NativeFunction::from_closure(move |_this, _args, _ctx| {
             let dom = dom_snap_ihg.read();
-            if let Some(ref s) = *dom
+            let mut buf = String::new();
+            if let Some(s) = &*dom
                 && let Some(n) = s.nodes.get(&nid_ihg)
             {
-                return Ok(JsValue::from(JsString::from(n.text_content.as_str())));
+                crate::js::dom_serializer::serialize_children(n, s, &mut buf);
+                return Ok(JsValue::from(JsString::from(buf.as_str())));
             }
             Ok(JsValue::from(JsString::from("")))
         })
@@ -4769,10 +5178,9 @@ fn create_element_object(
                 .unwrap_or_default();
             {
                 let mut dom = dom_snap_ihs.write();
-                if let Some(ref mut s) = *dom
-                    && let Some(n) = s.nodes.get_mut(&nid_ihs)
-                {
-                    n.text_content = html.clone();
+                if let Some(s) = &mut *dom {
+                    s.set_inner_html(nid_ihs, &html);
+                    s.rebuild_indices();
                 }
             }
             mut_ihs.write().push(DomMutation::SetInnerHtml {
@@ -4784,6 +5192,27 @@ fn create_element_object(
     };
     let inner_html_setter_fn = FunctionObjectBuilder::new(ctx.realm(), inner_html_setter)
         .name(js_string!("set innerHTML"))
+        .build();
+
+    // outerHTML getter — serializes the node itself (tag + attrs + children).
+    // Read-only; matches browser semantics (no setter).
+    let dom_snap_ohg = dom_snapshot_arc.clone();
+    let nid_ohg = node.id;
+    let outer_html_getter = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let dom = dom_snap_ohg.read();
+            let mut buf = String::new();
+            if let Some(s) = &*dom
+                && let Some(n) = s.nodes.get(&nid_ohg)
+            {
+                crate::js::dom_serializer::serialize_node(n, s, &mut buf);
+                return Ok(JsValue::from(JsString::from(buf.as_str())));
+            }
+            Ok(JsValue::from(JsString::from("")))
+        })
+    };
+    let outer_html_getter_fn = FunctionObjectBuilder::new(ctx.realm(), outer_html_getter)
+        .name(js_string!("get outerHTML"))
         .build();
 
     // children → [element children IDs as lightweight objects]
@@ -4971,14 +5400,26 @@ fn create_element_object(
         )
         .accessor(
             js_string!("textContent"),
-            Some(text_content_getter_fn),
+            Some(text_content_getter_fn.clone()),
             Some(text_content_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("innerText"),
+            Some(text_content_getter_fn),
+            None,
             Attribute::all(),
         )
         .accessor(
             js_string!("innerHTML"),
             Some(inner_html_getter_fn),
             Some(inner_html_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("outerHTML"),
+            Some(outer_html_getter_fn),
+            None,
             Attribute::all(),
         )
         .accessor(
@@ -6082,6 +6523,11 @@ fn register_window_globals(
     let _ = ctx.register_global_property(
         js_string!("location"),
         JsValue::from(location_obj.clone()),
+        Attribute::all(),
+    );
+    let _ = ctx.register_global_property(
+        js_string!("performance"),
+        JsValue::from(perf_obj.clone()),
         Attribute::all(),
     );
     // crypto global (for window.crypto)
@@ -7234,6 +7680,33 @@ mod tests {
             "textContent should contain 'Hello World', got: {:?}",
             text
         );
+    }
+
+    #[tokio::test]
+    async fn test_element_inner_text_matches_text_content() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><p>Hello World</p></body></html>";
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        rt.set_dom_snapshot(Some(snapshot));
+
+        let result = rt
+            .evaluate("var p = document.querySelector('p'); p.innerText === p.textContent && p.innerText")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::String("Hello World".into())));
+    }
+
+    #[tokio::test]
+    async fn test_performance_now_standalone_global_matches_window() {
+        let mut rt = JsRuntime::new();
+        let result = rt
+            .evaluate("var t = performance.now(); typeof performance === 'object' && typeof performance.now === 'function' && window.performance === performance && typeof t === 'number' && t > 1000000000000")
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.value, Some(Value::Bool(true)));
     }
 
     #[tokio::test]

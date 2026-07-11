@@ -18,9 +18,14 @@ use wreq::{Client, Response};
 use wreq_util::Emulation;
 
 /// Check if a URL is allowed by the SSRF filter.
+/// Only applies to http/https schemes — about:, data:, etc. bypass.
 /// This is a standalone function so it can be used both for initial requests
 /// and inside the redirect policy closure.
 fn check_url_ssrf(url: &Url, filter: &IpFilter) -> bool {
+    // Only http/https can be SSRF targets; data:, blob:, about: etc. are local.
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return true;
+    }
     if let Some(host) = url.host_str() {
         return filter.is_hostname_allowed(host);
     }

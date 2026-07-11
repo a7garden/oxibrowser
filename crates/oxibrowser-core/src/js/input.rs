@@ -131,6 +131,25 @@ pub fn js_insert_text(text: &str) -> String {
     )
 }
 
+
+/// Generate JS to dispatch a drag event at viewport coordinates.
+pub fn js_dispatch_drag_event(x: f64, y: f64, event_type: &str) -> String {
+    let event_type_json = serde_json::to_string(event_type).unwrap_or_default();
+    format!(
+        r#"(function() {{
+            var el = document.elementFromPoint({x}, {y});
+            if (el) {{
+                el.dispatchEvent(new DragEvent({event_type_json}, {{
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: {x},
+                    clientY: {y}
+                }}));
+            }}
+            return el ? el.tagName : null;
+        }})()"#
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;

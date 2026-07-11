@@ -351,6 +351,13 @@ impl Session {
 
         // `data:` URLs are resolved locally (no HTTP fetch) so the stealth
         // surface can be exercised fully offline.
+        // `about:` URLs create an empty local page (no HTTP fetch).
+        // `about:blank` is the canonical case, but we accept any about:<path>
+        // and render it identically to about:blank for now.
+        if parsed.scheme() == "about" {
+            return self.navigate_about().await;
+        }
+
         if parsed.scheme() == "data" {
             return self.navigate_data_url(&parsed).await;
         }
@@ -442,6 +449,24 @@ impl Session {
             self.history.truncate(self.history_index + 1);
         }
         self.history.push(url.clone());
+        self.history_index = self.history.len() - 1;
+        self.active_page = Some(page);
+        self.inject_dom_snapshot();
+        Ok(())
+    }
+
+    /// Navigate to an `about:` URL — creates an empty page without network fetch.
+    /// `about:blank` is the canonical case; `about:srcdoc`, `about:config`, etc.
+    /// all render as a blank HTML5 document for simplicity.
+    async fn navigate_about(&mut self) -> Result<()> {
+        const ABOUT_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>about:blank</title></head><body></body></html>"#;
+        let about_url = Url::parse("about:blank").unwrap();
+        let page = Page::from_html(about_url.clone(), ABOUT_HTML, 200, "text/html".into()).await?;
+        if self.history.is_empty() {
+        } else if self.history_index < self.history.len() - 1 {
+            self.history.truncate(self.history_index + 1);
+        }
+        self.history.push(about_url.clone());
         self.history_index = self.history.len() - 1;
         self.active_page = Some(page);
         self.inject_dom_snapshot();

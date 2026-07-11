@@ -4,6 +4,7 @@
 //! No C dependencies — no V8, no SpiderMonkey, no Node.js.
 
 pub mod dom_snapshot;
+pub mod dom_serializer;
 pub mod form;
 pub mod input;
 pub mod job_queue;
@@ -17,7 +18,7 @@ pub mod stealth;
 pub use dom_snapshot::{DomMutation, DomSnapshot};
 
 // Input (keyboard + mouse + insertText)
-pub use input::{js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
+pub use input::{js_dispatch_drag_event, js_dispatch_key_event, js_dispatch_mouse_event, js_insert_text};
 
 // Mouse (hover, drag, scroll, double-click, right-click, move)
 pub use mouse::{
