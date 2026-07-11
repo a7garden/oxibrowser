@@ -117,75 +117,52 @@ This lets html5ever parse any HTML and build our `Document` type directly, with 
 
 For a detailed architecture comparison with other headless browsers, see [docs/COMPARISON_REPORT.md](docs/COMPARISON_REPORT.md).
 
-## JS Runtime Abstraction Strategy
+## JS Runtime Architecture
 
-### Design Goals
+### Engine: boa_engine
 
-1. **Zero-dependency default** — OxiBrowser should compile and run without any JS engine
-2. **Pluggable real engine** — when `full-servo` feature is enabled, real JS execution via SpiderMonkey
-3. **Consistent API** — same `JsRuntime` trait regardless of backend
+OxiBrowser uses `boa_engine` 0.20 as its sole JavaScript engine — a pure-Rust
+ES2024+ implementation with no C/C++ dependencies (no V8, no SpiderMonkey).
 
-### Architecture
+`boa_engine::Context` is `!Send` (internal GC pointers use `NonNull`), so
+it cannot live on the async tokio runtime. Instead, `JsRuntime` spawns a
+dedicated `std::thread` that owns the `Context` and communicates with the
+async main thread via `std::sync::mpsc` channels:
 
 ```
-┌────────────────────────────────────┐
-│          JsRuntime                  │
-│                                     │
-│  evaluate(expr) → JsEvalResult     │
-│  execute(script) → JsEvalResult    │
-│  console_output() → &[String]      │
-│  set_global(name, value)           │
-├─────────────┬──────────────────────┤
-│  Stub Mode  │   Servo Mode         │
-│  (default)  │   (full-servo feat)  │
-│             │                      │
-│  Literals   │   SpiderMonkey       │
-│  console.log│   evaluate_javascript│
-│  globals    │   real DOM access    │
-│  passthrough│   event loop         │
-└─────────────┴──────────────────────┘
+main thread (async)          JS thread (sync, std::thread)
+┌─────────────────┐          ┌──────────────────┐
+│ JsRuntime        │──send──→│ Context (영구)    │
+│  evaluate()     │          │  console.log 등록 │
+│  set_global()   │          │  eval(script)     │
+│  set_dom()      │          │  document 객체    │
+│  console_output  │←─recv──│  json_value 반환  │
+└─────────────────┘          └──────────────────┘
 ```
 
-### Stub Mode Capabilities
+JS state (variables, functions, closures) persists across `evaluate()` calls —
+exactly like a real browser tab.
 
-The stub evaluator handles enough for basic CDP compatibility:
+### Design Decision: boa_engine vs Servo/SpiderMonkey
 
-- String/number/boolean/null literals → direct conversion to `serde_json::Value`
-- `console.log(...)` → captured to console buffer
-- `document.title` / `document.URL` → returns empty string (placeholder)
-- Global variable lookup → `HashMap<String, Value>`
-- Unknown expressions → returned as string value (passthrough)
+Originally, a `full-servo` feature flag with SpiderMonkey integration was
+planned. This was abandoned in favor of `boa_engine` for these reasons:
 
-This is sufficient for Puppeteer/Playwright to connect and issue basic commands without crashing.
+- **Zero C/C++ FFI** — boa is pure Rust; SpiderMonkey requires a C++ toolchain.
+- **Single static binary** — simplifies cross-compilation and distribution.
+- **Trade-off** — boa's ES2024 compatibility does not match V8, but the
+  DOM API + fetch + timer surface needed for AI agent automation is fully supported.
 
-### Servo Mode Integration Path
+### Web API Surface
 
-When `full-servo` is enabled:
+`create_context()` registers browser globals into the boa `Context`:
+`window`, `navigator`, `document`, `location`, `console`, `fetch`, `XMLHttpRequest`,
+`setTimeout`, `setInterval`, `localStorage`, `sessionStorage`, `URL`,
+`URLSearchParams`, `getComputedStyle`, `MutationObserver`, and more.
 
-```rust
-#[cfg(feature = "full-servo")]
-pub struct JsRuntime {
-    webview: servo::WebView,
-    console: Vec<String>,
-}
-
-#[cfg(feature = "full-servo")]
-impl JsRuntime {
-    pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
-        match self.webview.evaluate_javascript(expression).await {
-            Ok(value) => Ok(JsEvalResult::ok(serialize_servo_value(value))),
-            Err(e) => Ok(JsEvalResult::error(e.to_string())),
-        }
-    }
-}
-```
-
-The servo crate's `WebView::evaluate_javascript()` provides:
-- Full ECMAScript support (via SpiderMonkey)
-- DOM access (document, window, etc.)
-- Event loop integration
-- Promise handling
-
+These are injected via `unsafe { NativeFunction::from_closure(...) }` — the
+`unsafe` is required by boa's closure-capturing API (the closure must be
+`'static + Send`), not by any memory-unsafe operation on untrusted input.
 ---
 
 ## Network Layer Design Decisions

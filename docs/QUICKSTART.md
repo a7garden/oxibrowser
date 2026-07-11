@@ -21,9 +21,9 @@ cargo build --release
 
 ```toml
 [dependencies]
-oxibrowser-core = "0.11"
+oxibrowser-core = "0.16"
 # Or the full CDP server:
-oxibrowser-cdp = "0.11"
+oxibrowser-cdp = "0.16"
 ```
 
 ## CLI Usage
