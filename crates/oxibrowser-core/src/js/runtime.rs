@@ -2,9 +2,6 @@
 //! JavaScript runtime using boa_engine with a persistent context.
 //!
 //! boa_engine is a pure Rust JavaScript engine (ES2024+), no C dependencies.
-//! TEST EDIT
-//! Provides real JS evaluation with console.log and Math, JSON, etc.
-//! TEST EDIT
 //!
 //! ## Architecture
 //!
@@ -127,34 +124,31 @@ enum JsCommand {
     /// Evaluate a JS expression.
     Eval {
         expression: String,
-        /// Timeout in ms for this eval. None = use default.
         timeout_ms: Option<u64>,
-        /// Max loop iterations. None = use default.
         max_loop_iterations: Option<u64>,
-        /// Max recursion depth. None = use default.
         max_recursion: Option<usize>,
-        /// Max operand stack size. None = use default.
         max_stack_size: Option<usize>,
-        /// If true, drain the microtask queue after eval to resolve Promises.
-        /// When the eval result is a Promise, re-read the resolved value.
         await_promise: bool,
+        response_tx: Sender<JsResponse>,
     },
     /// Set a global variable in the persistent Context.
-    SetGlobal { name: String, value: Value },
+    SetGlobal { name: String, value: Value, response_tx: Sender<JsResponse> },
     /// Update the DOM snapshot available to `document` object.
-    SetDom { snapshot: Option<DomSnapshot> },
+    SetDom { snapshot: Option<DomSnapshot>, response_tx: Sender<JsResponse> },
     /// Update the page URL (for window.location).
-    SetPageUrl { url: String },
+    SetPageUrl { url: String, response_tx: Sender<JsResponse> },
     /// Set the fetch channel so JS can make real HTTP requests.
     SetFetchChannel {
         tx: std::sync::mpsc::Sender<FetchRequestMsg>,
+        response_tx: Sender<JsResponse>,
     },
     /// Set the localStorage sync channel so JS operations propagate to Session.
     SetLocalStorageChannel {
         tx: std::sync::mpsc::Sender<LocalStorageMsg>,
+        response_tx: Sender<JsResponse>,
     },
     /// Set the CookieJar so document.cookie can read/write real cookies.
-    SetCookieJar { jar: Arc<RwLock<CookieJar>> },
+    SetCookieJar { jar: Arc<RwLock<CookieJar>>, response_tx: Sender<JsResponse> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -284,8 +278,6 @@ impl From<&crate::config::BrowserConfig> for JsRuntimeConfig {
 pub struct JsRuntime {
     /// Channel to send commands to the JS thread.
     cmd_tx: Sender<JsCommand>,
-    /// Channel to receive responses from the JS thread.
-    resp_rx: Mutex<Receiver<JsResponse>>,
     /// Shared console output buffer (also shared with JS thread closures).
     console_output: Arc<RwLock<Vec<String>>>,
     /// Shared mutation buffer — JS thread pushes, main thread drains.
@@ -300,8 +292,6 @@ pub struct JsRuntime {
 
 impl JsRuntime {
     /// Create a new JS runtime with default configuration.
-    ///
-    /// Spawns a dedicated OS thread that owns the `boa_engine::Context`.
     pub fn new() -> Self {
         Self::with_config(JsRuntimeConfig::default())
     }
@@ -309,7 +299,6 @@ impl JsRuntime {
     /// Create a new JS runtime with the given configuration.
     pub fn with_config(config: JsRuntimeConfig) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<JsCommand>();
-        let (resp_tx, resp_rx) = mpsc::channel::<JsResponse>();
         let console_output = Arc::new(RwLock::new(Vec::<String>::new()));
         let mutations = Arc::new(RwLock::new(Vec::<DomMutation>::new()));
 
@@ -324,7 +313,6 @@ impl JsRuntime {
             .spawn(move || {
                 js_thread_loop(
                     cmd_rx,
-                    resp_tx,
                     console_output_clone,
                     mutations_clone,
                     viewport,
@@ -336,7 +324,6 @@ impl JsRuntime {
 
         Self {
             cmd_tx,
-            resp_rx: Mutex::new(resp_rx),
             console_output,
             mutations,
             globals: RwLock::new(HashMap::new()),
@@ -348,56 +335,36 @@ impl JsRuntime {
     /// Set the channel for fetch requests. Must be called before JS can use fetch().
     pub fn set_fetch_channel(&mut self, tx: std::sync::mpsc::Sender<FetchRequestMsg>) {
         self.fetch_tx = Some(tx.clone());
-        self.cmd_tx
-            .send(JsCommand::SetFetchChannel { tx })
-            .expect("JS thread has died");
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
-            .recv()
-            .expect("JS thread has died");
-        match resp {
-            JsResponse::Done => {}
-            _ => panic!("unexpected response"),
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetFetchChannel { tx, response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetFetchChannel: JS thread has died");
+            return;
         }
+        let _ = response_rx.recv();
     }
 
     /// Set the channel for localStorage sync.
-    ///
-    /// When JS calls localStorage.setItem/removeItem/clear, the operation
-    /// is forwarded to Session via this channel.
     pub fn set_local_storage_channel(&mut self, tx: std::sync::mpsc::Sender<LocalStorageMsg>) {
-        self.cmd_tx
-            .send(JsCommand::SetLocalStorageChannel { tx })
-            .expect("JS thread has died");
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
-            .recv()
-            .expect("JS thread has died");
-        match resp {
-            JsResponse::Done => {}
-            _ => panic!("unexpected response"),
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetLocalStorageChannel { tx, response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetLocalStorageChannel: JS thread has died");
+            return;
         }
+        let _ = response_rx.recv();
     }
 
     /// Evaluate a JavaScript expression and return the result.
-    ///
-    /// JS state persists across calls — variables, functions, closures
-    /// defined in one `evaluate()` are available in the next.
-    ///
-    /// If the evaluation exceeds the configured timeout, the JS context
-    /// is reset and previous state (variables, functions) is lost.
     pub async fn evaluate(&mut self, expression: &str) -> Result<JsEvalResult> {
         self.evaluate_with_timeout(expression, None).await
     }
 
     /// Evaluate a JavaScript expression, optionally awaiting Promise resolution.
-    ///
-    /// When `await_promise` is true and the result is a Promise, the runtime
-    /// drains microtasks to resolve it and returns the settled value.
     pub async fn evaluate_with_await(
         &mut self,
         expression: &str,
@@ -408,8 +375,6 @@ impl JsRuntime {
     }
 
     /// Evaluate a JavaScript expression with an explicit timeout override.
-    ///
-    /// If `timeout_ms` is `None`, uses the default from config.
     pub async fn evaluate_with_timeout(
         &mut self,
         expression: &str,
@@ -426,16 +391,13 @@ impl JsRuntime {
         timeout_ms: Option<u64>,
         await_promise: bool,
     ) -> Result<JsEvalResult> {
-        // Clear shared console buffer
         self.console_output.write().clear();
-
         tracing::debug!(
             expr_len = expression.len(),
             timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms),
             "JS evaluation started"
         );
-
-        // Send eval command with limits
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
         self.cmd_tx
             .send(JsCommand::Eval {
                 expression: expression.to_string(),
@@ -444,17 +406,12 @@ impl JsRuntime {
                 max_recursion: Some(self.config.max_recursion),
                 max_stack_size: Some(self.config.max_stack_size),
                 await_promise,
+                response_tx,
             })
-            .expect("JS thread has died");
-
-        // Wait for response
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
             .recv()
-            .expect("JS thread has died");
-
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
         match resp {
             JsResponse::EvalResult {
                 value,
@@ -462,22 +419,11 @@ impl JsRuntime {
                 console_output,
                 timed_out,
             } => {
-                let has_value = value.is_some();
-                let has_exception = exception.is_some();
-                tracing::debug!(
-                    has_value,
-                    has_exception,
-                    timed_out,
-                    "JS evaluation completed"
-                );
                 if timed_out {
                     tracing::warn!(
                         timeout_ms = timeout_ms.unwrap_or(self.config.timeout_ms),
                         "JS evaluation timed out — context reset"
                     );
-                    // Context was reset — clear our globals tracking too
-                    // (they're stale in the new context)
-                    // We do NOT clear self.globals because set_global can re-inject them.
                     return Err(CoreError::JsTimeout(
                         timeout_ms.unwrap_or(self.config.timeout_ms),
                     ));
@@ -509,8 +455,6 @@ impl JsRuntime {
     }
 
     /// Drain all pending DOM mutations collected by JS execution.
-    ///
-    /// After calling this, the internal buffer is empty.
     pub fn drain_mutations(&self) -> Vec<DomMutation> {
         let mut guard = self.mutations.write();
         std::mem::take(&mut *guard)
@@ -520,60 +464,39 @@ impl JsRuntime {
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
         self.globals.write().insert(name.clone(), value.clone());
-
-        // Also inject into the persistent JS Context
-        self.cmd_tx
-            .send(JsCommand::SetGlobal {
-                name,
-                value: value.clone(),
-            })
-            .expect("JS thread has died");
-
-        // Wait for ack
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
-            .recv()
-            .expect("JS thread has died");
-        let _ = resp; // JsResponse::Done
-    }
-
-    /// Get a global variable (Rust-side tracking).
-    pub fn get_global(&self, name: &str) -> Option<Value> {
-        self.globals.read().get(name).cloned()
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self.cmd_tx.send(JsCommand::SetGlobal {
+            name,
+            value,
+            response_tx,
+        }) {
+            tracing::error!(error = %e, "failed to send SetGlobal: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
     }
 
     /// Set the DOM snapshot (called after navigate).
-    ///
-    /// Sends the snapshot to the JS thread so that `document.querySelector`
-    /// and friends operate on real DOM data. Also clears the mutation buffer.
     pub fn set_dom_snapshot(&mut self, snapshot: Option<DomSnapshot>) {
-        // Clear mutations when snapshot changes
         self.mutations.write().clear();
-
-        self.cmd_tx
-            .send(JsCommand::SetDom { snapshot })
-            .expect("JS thread has died");
-        // Wait for ack
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
-            .recv()
-            .expect("JS thread has died");
-        let _ = resp;
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetDom { snapshot, response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetDom: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
     }
 
     /// Set the CookieJar so document.cookie reads/writes real cookies.
     pub fn set_cookie_jar(&mut self, jar: Arc<RwLock<CookieJar>>) -> Result<()> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
         self.cmd_tx
-            .send(JsCommand::SetCookieJar { jar })
+            .send(JsCommand::SetCookieJar { jar, response_tx })
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
+        let resp = response_rx
             .recv()
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
         match resp {
@@ -584,18 +507,15 @@ impl JsRuntime {
 
     /// Update the page URL (used for window.location).
     pub fn set_page_url(&mut self, url: &str) {
-        self.cmd_tx
-            .send(JsCommand::SetPageUrl {
-                url: url.to_string(),
-            })
-            .expect("JS thread has died");
-        let resp = self
-            .resp_rx
-            .lock()
-            .expect("resp_rx lock poisoned")
-            .recv()
-            .expect("JS thread has died");
-        let _ = resp;
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetPageUrl { url: url.to_string(), response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetPageUrl: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
     }
 }
 
@@ -607,12 +527,8 @@ impl Default for JsRuntime {
 
 impl Drop for JsRuntime {
     fn drop(&mut self) {
-        // Signal the JS thread to shut down
+        // Signal the JS thread to shut down — no response needed for Shutdown
         let _ = self.cmd_tx.send(JsCommand::Shutdown);
-        // Best-effort: don't panic in drop if mutex is poisoned or thread is dead
-        if let Ok(guard) = self.resp_rx.lock() {
-            let _ = guard.recv();
-        }
     }
 }
 
@@ -626,7 +542,6 @@ impl Drop for JsRuntime {
 /// until a `Shutdown` is received.
 fn js_thread_loop(
     cmd_rx: Receiver<JsCommand>,
-    resp_tx: Sender<JsResponse>,
     console_output: Arc<RwLock<Vec<String>>>,
     mutations: Arc<RwLock<Vec<DomMutation>>>,
     viewport: (u32, u32),
@@ -659,6 +574,7 @@ fn js_thread_loop(
                 max_recursion,
                 max_stack_size,
                 await_promise,
+                response_tx,
             } => {
                 // Clear console buffer before eval
                 console_output.write().clear();
@@ -707,7 +623,7 @@ fn js_thread_loop(
                     );
                     ctx = new_ctx;
                     job_queue = new_queue;
-                    let _ = resp_tx.send(JsResponse::EvalResult {
+                    let _ = response_tx.send(JsResponse::EvalResult {
                         value: None,
                         exception: Some(format!(
                             "JS execution timed out after {}ms — context was reset, previous state lost",
@@ -729,7 +645,7 @@ fn js_thread_loop(
                             value
                         };
                         let json_value = js_value_to_json(&final_value, &mut ctx);
-                        let _ = resp_tx.send(JsResponse::EvalResult {
+                        let _ = response_tx.send(JsResponse::EvalResult {
                             value: Some(json_value),
                             exception: None,
                             console_output: console,
@@ -750,7 +666,7 @@ fn js_thread_loop(
                             // a catchable error (the context is fine).
                         }
 
-                        let _ = resp_tx.send(JsResponse::EvalResult {
+                        let _ = response_tx.send(JsResponse::EvalResult {
                             value: None,
                             exception: Some(msg),
                             console_output: console,
@@ -759,16 +675,16 @@ fn js_thread_loop(
                     }
                 }
             }
-            JsCommand::SetGlobal { name, value } => {
+            JsCommand::SetGlobal { name, value, response_tx } => {
                 let js_val = json_to_js_value(&value, &mut ctx);
                 let _ = ctx.register_global_property(
                     JsString::from(name.as_str()),
                     js_val,
                     Attribute::all(),
                 );
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
             }
-            JsCommand::SetDom { snapshot } => {
+            JsCommand::SetDom { snapshot, response_tx } => {
                 *dom_snapshot.write() = snapshot;
                 // Update document title/URL in the JS context
                 let snap = dom_snapshot.read();
@@ -784,9 +700,9 @@ fn js_thread_loop(
                         Attribute::all(),
                     );
                 }
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
             }
-            JsCommand::SetPageUrl { url } => {
+            JsCommand::SetPageUrl { url, response_tx } => {
                 // Re-register window.location with the new URL
                 let snap = dom_snapshot.read();
                 let dom_snapshot_ref = dom_snapshot.clone();
@@ -827,22 +743,25 @@ fn js_thread_loop(
                     );
                 }
                 // else: localStorage already exists, preserve it across navigation
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
             }
-            JsCommand::SetLocalStorageChannel { tx } => {
+            JsCommand::SetLocalStorageChannel { tx, response_tx } => {
                 *local_storage_tx_arc.write() = Some(tx);
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
+                
             }
-            JsCommand::SetFetchChannel { tx } => {
+            JsCommand::SetFetchChannel { tx, response_tx } => {
                 *fetch_tx_arc.write() = Some(tx);
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
+                
             }
-            JsCommand::SetCookieJar { jar } => {
+            JsCommand::SetCookieJar { jar, response_tx } => {
                 *cookie_jar_arc.write() = Some(jar);
-                let _ = resp_tx.send(JsResponse::Done);
+                let _ = response_tx.send(JsResponse::Done);
+                
             }
             JsCommand::Shutdown => {
-                let _ = resp_tx.send(JsResponse::Done);
+                
                 break;
             }
         }

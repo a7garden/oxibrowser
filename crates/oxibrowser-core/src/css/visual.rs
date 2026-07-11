@@ -828,14 +828,11 @@ mod tests {
             },
         );
 
-        let snap = DomSnapshot {
-            url: "http://test/".into(),
-            title: String::new(),
-            nodes,
-            root_id,
-            body_id: Some(body_id),
-            head_id: None,
-        };
+        let mut snap = DomSnapshot::empty();
+        snap.url = "http://test/".into();
+        snap.nodes = nodes;
+        snap.root_id = root_id;
+        snap.body_id = Some(body_id);
 
         let png = render_box_model_png(&snap, 640).unwrap();
         assert!(png.len() > 8);
@@ -912,14 +909,11 @@ mod tests {
             },
         );
 
-        let snap = DomSnapshot {
-            url: "http://test/".into(),
-            title: String::new(),
-            nodes,
-            root_id,
-            body_id: Some(body_id),
-            head_id: None,
-        };
+        let mut snap = DomSnapshot::empty();
+        snap.url = "http://test/".into();
+        snap.nodes = nodes;
+        snap.root_id = root_id;
+        snap.body_id = Some(body_id);
 
         let tree = render_accessibility_tree(&snap);
         assert!(

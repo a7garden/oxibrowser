@@ -25,6 +25,7 @@ pub mod error;
 pub use browse_result::BrowseResult;
 pub use browser::Browser;
 pub use config::BrowserConfig;
+pub use config::BrowserConfigBuilder;
 pub use error::Result;
 pub use event::BrowserEvent;
 pub use tab::Tab;

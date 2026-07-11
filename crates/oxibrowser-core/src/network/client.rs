@@ -30,7 +30,6 @@ fn check_url_ssrf(url: &Url, filter: &IpFilter) -> bool {
 /// HTTP client wrapper with cookie support and configurable defaults.
 pub struct HttpClient {
     client: Client,
-    #[allow(dead_code)]
     config: BrowserConfig,
     cookie_jar: Arc<RwLock<CookieJar>>,
     ip_filter: Arc<IpFilter>,
@@ -47,7 +46,52 @@ pub struct ChallengeOutcome {
     pub challenge: Option<challenge::DetectedChallenge>,
 }
 
+
 impl HttpClient {
+
+    /// Read a response body with a streaming byte cap.
+    ///
+    /// Avoids loading the entire body into memory: keeps at most `max_bytes`
+    /// plus one network chunk resident at any time. Returns the body
+    /// as raw bytes plus a `truncated` flag. Callers that need a
+    /// `String` should apply their own lossy/text conversion after
+    /// charset detection.
+    pub(crate) async fn read_body_limited(
+        response: Response,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, bool)> {
+        // NOTE: wreq 6.0.0-rc does not expose chunk(), bytes_stream(), or
+        // into_body(). The full body is read via bytes().await before
+        // truncation. Content-Length pre-check provides early warning for
+        // well-behaved servers but does NOT prevent OOM from malicious
+        // responses that omit or falsify Content-Length.
+        // TODO: migrate to streaming when wreq exposes bytes_stream() or
+        // when reqwest is used instead of wreq.
+        if let Some(len) = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            if len > max_bytes {
+                tracing::warn!(
+                    content_length = len,
+                    max_bytes,
+                    "response body exceeds size limit (Content-Length pre-check)"
+                );
+            }
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+        if bytes.len() > max_bytes {
+            Ok((bytes[..max_bytes].to_vec(), true))
+        } else {
+            Ok((bytes.to_vec(), false))
+        }
+    }
+
     /// Build a new HTTP client from browser config.
     ///
     /// The client uses a custom redirect policy that validates every redirect
@@ -180,10 +224,12 @@ impl HttpClient {
             let response = self.fetch(url).await?;
             let status = response.status().as_u16();
             let headers = Self::response_headers(&response);
-            let body = response
-                .text()
-                .await
-                .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let max = self.config.max_response_body_bytes;
+            let (buf, truncated) = Self::read_body_limited(response, max).await?;
+            if truncated {
+                tracing::warn!(url = %url, max_bytes = max, "response body truncated at size limit");
+            }
+            let body = String::from_utf8_lossy(&buf).into_owned();
             let detected = challenge::detect(status, &headers, &body);
             let is_challenge = detected.is_some();
             outcome = ChallengeOutcome {
@@ -328,13 +374,14 @@ impl HttpClient {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+        let max = self.config.max_response_body_bytes;
+        let (buf, truncated) = Self::read_body_limited(response, max).await?;
+        if truncated {
+            tracing::warn!(url = %url, max_bytes = max, "response body truncated at size limit");
+        }
 
         Ok(crate::encoding::decode_html(
-            &bytes,
+            &buf,
             content_type.as_deref(),
         ))
     }

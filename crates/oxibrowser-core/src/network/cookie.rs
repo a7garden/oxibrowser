@@ -22,6 +22,17 @@ impl std::fmt::Display for SameSite {
     }
 }
 
+/// Context in which cookies are being sent, used for SameSite enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameSiteContext {
+    /// Request originates from the same origin as the cookie.
+    SameOrigin,
+    /// Safe cross-site request (GET, HEAD navigation).
+    CrossSiteSafe,
+    /// Unsafe cross-site request (POST, PUT, DELETE from cross-site).
+    CrossSiteUnsafe,
+}
+
 /// Maximum number of cookies per domain (RFC 6265 §6.1 recommends 50).
 const MAX_COOKIES_PER_DOMAIN: usize = 50;
 
@@ -311,8 +322,20 @@ impl CookieJar {
     /// - Domain matching (including subdomain/superdomain sharing)
     /// - Path matching
     /// - Secure flag enforcement (only send secure cookies over HTTPS)
-    /// - SameSite basic enforcement
+    /// - SameSite enforcement via [`SameSiteContext`]
+    ///
+    /// Defaults to [`SameSiteContext::SameOrigin`], preserving the
+    /// historical "same-origin request" assumption.
     pub fn cookies_for_url(&self, url: &Url) -> String {
+        self.cookies_for_url_with_context(url, SameSiteContext::SameOrigin)
+    }
+
+    /// Context-aware variant: SameSite filters honour the supplied context.
+    ///
+    /// - `Strict`: dropped for any non-same-origin context.
+    /// - `Lax`:    dropped only on `CrossSiteUnsafe`.
+    /// - `None` or unset: always sent.
+    pub fn cookies_for_url_with_context(&self, url: &Url, ctx: SameSiteContext) -> String {
         let host = url.host_str().unwrap_or("unknown").to_lowercase();
         let url_path = url.path();
         let is_secure = url.scheme() == "https";
@@ -337,18 +360,20 @@ impl CookieJar {
                     continue;
                 }
 
-                // SameSite basic enforcement
+                // SameSite enforcement
                 match cookie.same_site {
                     Some(SameSite::Strict) => {
-                        // Strict: never send in cross-site requests
-                        // (basic enforcement: always allow for same-origin)
+                        if ctx != SameSiteContext::SameOrigin {
+                            continue;
+                        }
                     }
                     Some(SameSite::Lax) => {
-                        // Lax: safe HTTP methods (GET, HEAD) only for cross-site
-                        // (basic enforcement: always allow for now)
+                        if ctx == SameSiteContext::CrossSiteUnsafe {
+                            continue;
+                        }
                     }
                     Some(SameSite::None) | None => {
-                        // None or unset: send in all contexts
+                        // Always sent.
                     }
                 }
 
@@ -370,7 +395,6 @@ impl CookieJar {
             .join("; ")
     }
 
-    /// Returns cookies visible to JavaScript (excludes HttpOnly cookies).
     /// Per RFC 6265 §5.4, HttpOnly cookies must not be accessible via
     /// `document.cookie` or other script APIs.
     pub fn cookies_for_js(&self, url: &Url) -> String {
@@ -401,7 +425,9 @@ impl CookieJar {
                 }
 
                 match cookie.same_site {
-                    Some(SameSite::Strict) | Some(SameSite::Lax) | Some(SameSite::None) | None => {}
+                    Some(SameSite::Strict) => {}
+                    Some(SameSite::Lax) => {}
+                    Some(SameSite::None) | None => {}
                 }
 
                 matching.push(cookie);

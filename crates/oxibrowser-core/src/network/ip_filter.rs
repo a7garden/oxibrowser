@@ -102,9 +102,10 @@ pub struct IpFilter {
     blocked_v6: Vec<CidrRangeV6>,
     allowed: Vec<CidrRange>,
     allowed_v6: Vec<CidrRangeV6>,
-    /// When `true`, DNS resolution failures cause the check to return `false`
-    /// (fail-closed). When `false` (default), DNS failures return `true`
-    /// (fail-open) to avoid breaking legitimate requests on transient errors.
+    /// When `true` (default for `block_private`), DNS resolution failures cause
+    /// the check to return `false` (fail-closed). When `false`, DNS failures
+    /// return `true` (fail-open) to avoid breaking legitimate requests on
+    /// transient errors.
     fail_closed: bool,
 }
 
@@ -165,7 +166,7 @@ impl IpFilter {
             ],
             allowed: vec![],
             allowed_v6: vec![],
-            fail_closed: false,
+            fail_closed: true,
         }
     }
 
@@ -458,7 +459,8 @@ mod tests {
 
     #[test]
     fn test_fail_open_dns() {
-        let f = IpFilter::block_private();
+        let mut f = IpFilter::block_private();
+        f.set_fail_closed(false);
         assert!(!f.is_fail_closed());
         // A non-existent hostname should fail-open (allowed)
         assert!(f.is_hostname_allowed("this-domain-definitely-does-not-exist-xyz.invalid"));

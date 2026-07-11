@@ -54,7 +54,6 @@ pub struct Session {
     #[allow(dead_code)]
     browser_id: BrowserId,
     /// Configuration.
-    #[allow(dead_code)]
     config: BrowserConfig,
     /// HTTP client (shared from Browser).
     http_client: Arc<HttpClient>,
@@ -110,6 +109,7 @@ fn handle_fetch_requests(
     fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>,
     http_client: Arc<HttpClient>,
     _cookie_jar: Arc<RwLock<CookieJar>>,
+    max_body_bytes: usize,
     in_flight: Arc<AtomicU64>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -164,13 +164,18 @@ fn handle_fetch_requests(
                                 .iter()
                                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                                 .collect();
-                            let body = match response.bytes().await {
-                                Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                            let body = match HttpClient::read_body_limited(response, max_body_bytes).await {
+                                Ok((buf, truncated)) => {
+                                    if truncated {
+                                        tracing::warn!(url = %resp_url, max_bytes = max_body_bytes, "fetch body truncated");
+                                    }
+                                    String::from_utf8_lossy(&buf).into_owned()
+                                }
                                 Err(e) => {
                                     let _ = request.response_tx.send(FetchResponseMsg {
                                         status,
                                         status_text,
-                                        url: resp_url,
+                                        url: resp_url.clone(),
                                         headers,
                                         body: String::new(),
                                         error: Some(format!("failed to read body: {}", e)),
@@ -293,11 +298,13 @@ impl Session {
         let cookie_jar_clone = cookie_jar.clone();
         let in_flight = Arc::new(AtomicU64::new(0));
         let in_flight_clone = in_flight.clone();
+        let max_body_bytes = config.max_response_body_bytes;
         let fetch_task = Some(std::thread::spawn(move || {
             handle_fetch_requests(
                 fetch_rx,
                 http_client_clone,
                 cookie_jar_clone,
+                max_body_bytes,
                 in_flight_clone,
             );
         }));
@@ -364,18 +371,17 @@ impl Session {
                 message: format!("HTTP {} for {}", status, parsed),
             });
         }
-
         let ct_header = response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("text/html")
             .to_string();
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+        let max = self.config.max_response_body_bytes;
+        let (bytes, truncated) = HttpClient::read_body_limited(response, max).await?;
+        if truncated {
+            tracing::warn!(final_url = %final_url, max_bytes = max, "navigate body truncated");
+        }
 
         let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
 
@@ -494,10 +500,11 @@ impl Session {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("text/html")
                 .to_string();
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let max = self.config.max_response_body_bytes;
+            let (bytes, truncated) = HttpClient::read_body_limited(response, max).await?;
+            if truncated {
+                tracing::warn!(url = %url, max_bytes = max, "history body truncated");
+            }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
             self.inject_dom_snapshot();
@@ -524,10 +531,11 @@ impl Session {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("text/html")
                 .to_string();
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let max = self.config.max_response_body_bytes;
+            let (bytes, truncated) = HttpClient::read_body_limited(response, max).await?;
+            if truncated {
+                tracing::warn!(url = %url, max_bytes = max, "history body truncated");
+            }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
             self.inject_dom_snapshot();
@@ -551,10 +559,11 @@ impl Session {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("text/html")
                 .to_string();
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let max = self.config.max_response_body_bytes;
+            let (bytes, truncated) = HttpClient::read_body_limited(response, max).await?;
+            if truncated {
+                tracing::warn!(url = %url, max_bytes = max, "reload body truncated");
+            }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url.clone(), &html, 200, ct_header).await?);
             self.inject_dom_snapshot();

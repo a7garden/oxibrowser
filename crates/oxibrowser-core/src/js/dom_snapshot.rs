@@ -10,8 +10,10 @@
 //! JS: document.querySelector('a') → DomSnapshot::query_selector() → result
 //! ```
 
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::css::ComputedStyle;
 
 /// DOM 변경 사항
 ///
@@ -61,8 +63,19 @@ pub struct DomNode {
     pub node_type: u8,
 }
 
+/// Per-node `ComputedStyle` cache, keyed by `node_id` and invalidated by snapshot revision.
+///
+/// Stays private — only `DomSnapshot::compute_style_cached` reads or writes it.
+#[derive(Debug, Clone, Default)]
+struct StyleCache {
+    /// Revision this cache was populated against. If `snapshot.revision` differs,
+    /// the cache is stale and must be rebuilt from scratch.
+    revision: u64,
+    styles: HashMap<u32, ComputedStyle>,
+}
+
 /// DOM tree snapshot (Send + Serialize).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DomSnapshot {
     pub url: String,
     pub title: String,
@@ -70,6 +83,53 @@ pub struct DomSnapshot {
     pub root_id: u32,
     pub body_id: Option<u32>,
     pub head_id: Option<u32>,
+    /// Monotonic counter. Bumped on any mutation that affects computed styles
+    /// OR structural shape (so the id/class/tag indices know to rebuild).
+    /// `compute_style_cached` keys its cache against this; index-using methods
+    /// lazily rebuild when `revision != index_revision`.
+    #[serde(default)]
+    pub revision: u64,
+    /// Revision the id/class/tag indices were last rebuilt against.
+    /// On any read-through, if `self.index_revision != self.revision`, indices
+    /// are regenerated from `self.nodes` before use.
+    #[serde(default)]
+    pub index_revision: u64,
+    /// `id` attribute → first node_id (HTML ids SHOULD be unique).
+    #[serde(default)]
+    pub id_index: HashMap<String, u32>,
+    /// Class name → node_ids, in document (DFS pre-order) order.
+    #[serde(default)]
+    pub class_index: HashMap<String, Vec<u32>>,
+    /// Tag name (already lowercased) → node_ids, in document order.
+    #[serde(default)]
+    pub tag_index: HashMap<String, Vec<u32>>,
+    /// Lazily-populated per-node `ComputedStyle` cache. `Mutex` (not `RefCell`)
+    /// so the snapshot stays `Send + Sync` — `Arc<RwLock<Option<DomSnapshot>>>`
+    /// in runtime.rs requires `Sync`. Never serialized.
+    #[serde(skip, default)]
+    style_cache: Mutex<Option<StyleCache>>,
+}
+
+// Manual `Clone`: `std::sync::Mutex` doesn't derive Clone (cloning the inner
+// while another thread holds the lock is a soundness hole). For our use case
+// the cache is transient — every clone starts with a fresh empty cache.
+impl Clone for DomSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            url: self.url.clone(),
+            title: self.title.clone(),
+            nodes: self.nodes.clone(),
+            root_id: self.root_id,
+            body_id: self.body_id,
+            head_id: self.head_id,
+            revision: self.revision,
+            index_revision: self.index_revision,
+            id_index: self.id_index.clone(),
+            class_index: self.class_index.clone(),
+            tag_index: self.tag_index.clone(),
+            style_cache: Mutex::new(None),
+        }
+    }
 }
 
 impl DomSnapshot {
@@ -82,12 +142,20 @@ impl DomSnapshot {
             root_id: 0,
             body_id: None,
             head_id: None,
+            revision: 0,
+            index_revision: 0,
+            id_index: HashMap::new(),
+            class_index: HashMap::new(),
+            tag_index: HashMap::new(),
+            style_cache: Mutex::new(None),
         }
     }
 
     /// Extract a snapshot from a Frame's Document.
     ///
-    /// Walks all nodes in the document tree, converting each to a `DomNode`.
+    /// Walks all nodes in the document tree, converting each to a `DomNode`,
+    /// and pre-builds id/class/tag indices so `query_selector` and friends can
+    /// answer simple selectors in O(1)/O(matches) instead of walking the tree.
     pub fn from_frame(frame: &crate::frame::Frame) -> Self {
         let doc = frame.document();
         let tree = doc.tree();
@@ -97,13 +165,19 @@ impl DomSnapshot {
         let mut nodes = HashMap::new();
         let mut body_id = None;
         let mut head_id = None;
+        let mut order: Vec<u32> = Vec::new();
 
-        // Walk all nodes via DFS from root
+        // Walk all nodes via DFS from root, capturing document order for the indices.
         if let Some(root) = tree.root() {
-            collect_nodes(root, doc, tree, &mut nodes, &mut body_id, &mut head_id);
+            collect_nodes(root, doc, tree, &mut nodes, &mut order, &mut body_id, &mut head_id);
         }
 
         let root_id = tree.root().map(|id| id.0 as u32).unwrap_or(0);
+
+        // Build id/class/tag indices in document (DFS pre-order) so that
+        // `query_selector` / `get_element_*` can return the first match in
+        // correct order without re-walking the tree.
+        let (id_index, class_index, tag_index) = build_indices(&nodes, &order);
 
         Self {
             url,
@@ -112,7 +186,128 @@ impl DomSnapshot {
             root_id,
             body_id,
             head_id,
+            revision: 0,
+            index_revision: 0,
+            id_index,
+            class_index,
+            tag_index,
+            style_cache: Mutex::new(None),
         }
+    }
+
+    /// Bump the snapshot revision, invalidating the style cache AND marking
+    /// the id/class/tag indices stale.
+    ///
+    /// Every in-place DOM mutation closure in `runtime.rs` MUST call this
+    /// after mutating `snap.nodes`. Otherwise `compute_style_cached` returns
+    /// cached styles for nodes whose attributes changed, and the indices
+    /// return deleted/renamed ids/classes/tags.
+    pub fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        // Drop the style cache; the next `compute_style_cached` rebuilds it.
+        // Single-threaded access under the snapshot's RwLock; the Mutex exists
+        // only for `Sync` and Clone compatibility — poisoning is impossible.
+        *self.style_cache.lock().expect("style cache mutex poisoned") = None;
+        // Indices become stale but stay allocated; the next index-using read
+        // detects `index_revision != revision` and rebuilds them.
+    }
+
+    /// Compute (and cache) the resolved style for a node.
+    ///
+    /// Cache lookup is keyed by `node_id` and validated against the snapshot's
+    /// `revision`. A revision mismatch drops the entire cache and the next
+    /// call rebuilds it (cheaper than per-entry versioning because mutations
+    pub fn compute_style_cached(&self, node_id: u32) -> Option<ComputedStyle> {
+        let mut cache_slot = self.style_cache.lock().expect("style cache mutex poisoned");
+        let cache: &mut StyleCache = match cache_slot.as_mut() {
+            Some(c) if c.revision == self.revision => c,
+            _ => {
+                *cache_slot = Some(StyleCache {
+                    revision: self.revision,
+                    styles: HashMap::new(),
+                });
+                cache_slot
+                    .as_mut()
+                    .expect("style cache was just initialized above")
+            }
+        };
+
+        if let Some(hit) = cache.styles.get(&node_id) {
+            return Some(hit.clone());
+        }
+
+        let computed = crate::css::LayoutEngine::compute_style(self, node_id)?;
+        cache.styles.insert(node_id, computed.clone());
+        Some(computed)
+    }
+
+    /// Fast path for `query_selector` on simple `#id`, `.class`, bare `tag`.
+    ///
+    /// Returns the first matching node_id in document order ONLY if the
+    /// pre-built indices are still fresh (`index_revision == revision`).
+    /// After any in-place mutation (which bumps `revision`), indices become
+    /// stale and we deliberately return `None` so the caller falls back to
+    /// the tree walk — safer than risking stale results, and the perf win
+    /// between `from_frame` and the first mutation is the meaningful window.
+    fn simple_selector_first(&self, selector: &str) -> Option<u32> {
+        // Indices only trustworthy between `from_frame` and the first mutation.
+        if self.index_revision != self.revision {
+            return None;
+        }
+        if let Some(id) = selector.strip_prefix('#') {
+            if id.is_empty() {
+                return None;
+            }
+            return self.id_index.get(id).copied();
+        }
+        if let Some(class) = selector.strip_prefix('.') {
+            if class.is_empty() {
+                return None;
+            }
+            return self.class_index.get(class).and_then(|v| v.first().copied());
+        }
+        if !selector.is_empty()
+            && !selector
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'.' | b'#' | b'[' | b',' | b'>' | b'+' | b'~' | b':' | b'*'))
+        {
+            return self
+                .tag_index
+                .get(&selector.to_lowercase())
+                .and_then(|v| v.first().copied());
+        }
+        None
+    }
+
+    /// Fast path for `query_selector_all` on simple `#id`, `.class`, bare `tag`.
+    ///
+    /// Same freshness rule as `simple_selector_first`: returns `None` once any
+    /// in-place mutation has invalidated the indices, deferring to the tree
+    /// walk.
+    fn simple_selector_all(&self, selector: &str) -> Option<Vec<u32>> {
+        if self.index_revision != self.revision {
+            return None;
+        }
+        if let Some(id) = selector.strip_prefix('#') {
+            if id.is_empty() {
+                return None;
+            }
+            return self.id_index.get(id).map(|&id| vec![id]);
+        }
+        if let Some(class) = selector.strip_prefix('.') {
+            if class.is_empty() {
+                return None;
+            }
+            return self.class_index.get(class).cloned();
+        }
+        if !selector.is_empty()
+            && !selector
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'.' | b'#' | b'[' | b',' | b'>' | b'+' | b'~' | b':' | b'*'))
+        {
+            return self.tag_index.get(&selector.to_lowercase()).cloned();
+        }
+        None
     }
 
     /// Query the first matching node by CSS selector.
@@ -125,6 +320,12 @@ impl DomSnapshot {
     /// - Tag + ID: `"div#id"`
     /// - Attribute: `"[href]"`, `"a[href]"`
     pub fn query_selector(&self, selector: &str) -> Option<u32> {
+        // Index fast-path for simple `#id`, `.class`, bare `tag` selectors
+        // when the indices haven't been invalidated by a mutation.
+        if let Some(first) = self.simple_selector_first(selector) {
+            return Some(first);
+        }
+
         // Walk nodes in tree order (DFS from root)
         let mut stack = vec![self.root_id];
         while let Some(id) = stack.pop() {
@@ -142,7 +343,14 @@ impl DomSnapshot {
     }
 
     /// Query all matching nodes by CSS selector.
+    ///
+    /// Same fast-path strategy as `query_selector`: simple selectors consult
+    /// the pre-built indices; everything else walks the tree.
     pub fn query_selector_all(&self, selector: &str) -> Vec<u32> {
+        if let Some(matches) = self.simple_selector_all(selector) {
+            return matches;
+        }
+
         let mut results = Vec::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(self.root_id);
@@ -196,7 +404,17 @@ impl DomSnapshot {
     }
 
     /// Get an element by its ID attribute.
+    ///
+    /// Uses the `id_index` when fresh (between `from_frame` and the first
+    /// in-place mutation); falls back to a linear scan otherwise. The
+    /// linear scan also handles legacy snapshots that pre-date F-12 and
+    /// were deserialized with an empty index.
     pub fn get_element_by_id(&self, id: &str) -> Option<u32> {
+        if self.index_revision == self.revision
+            && let Some(&node_id) = self.id_index.get(id)
+        {
+            return Some(node_id);
+        }
         self.nodes
             .values()
             .find(|node| {
@@ -206,8 +424,17 @@ impl DomSnapshot {
     }
 
     /// Get all elements by tag name.
+    ///
+    /// Uses `tag_index` when fresh; falls back to a DFS walk otherwise. The
+    /// tag index keys are already lowercased; we lowercase the query the
+    /// same way.
     pub fn get_elements_by_tag_name(&self, tag: &str) -> Vec<u32> {
         let tag_lower = tag.to_lowercase();
+        if self.index_revision == self.revision
+            && let Some(ids) = self.tag_index.get(&tag_lower)
+        {
+            return ids.clone();
+        }
         let mut results = Vec::new();
         let mut stack = vec![self.root_id];
         while let Some(id) = stack.pop() {
@@ -225,7 +452,14 @@ impl DomSnapshot {
     }
 
     /// Get all elements by class name.
+    ///
+    /// Uses `class_index` when fresh; falls back to a DFS walk otherwise.
     pub fn get_elements_by_class_name(&self, class: &str) -> Vec<u32> {
+        if self.index_revision == self.revision
+            && let Some(ids) = self.class_index.get(class)
+        {
+            return ids.clone();
+        }
         let mut results = Vec::new();
         let mut stack = vec![self.root_id];
         while let Some(id) = stack.pop() {
@@ -520,6 +754,7 @@ fn collect_nodes(
     doc: &oxibrowser_webapi::dom::Document,
     tree: &oxibrowser_webapi::dom::Tree,
     nodes: &mut HashMap<u32, DomNode>,
+    order: &mut Vec<u32>,
     body_id: &mut Option<u32>,
     head_id: &mut Option<u32>,
 ) {
@@ -569,12 +804,13 @@ fn collect_nodes(
             parent,
             node_type: node_type_u8,
         };
-
         nodes.insert(id_u32, dom_node);
+        // Record document order (DFS pre-order: parent before children).
+        order.push(id_u32);
 
         // Recurse into children
         for &child in tree.children(node_id) {
-            collect_nodes(child, doc, tree, nodes, body_id, head_id);
+            collect_nodes(child, doc, tree, nodes, order, body_id, head_id);
         }
     }
 }
@@ -605,6 +841,46 @@ fn collect_text_recursive(
     for &child in tree.children(node_id) {
         collect_text_recursive(child, doc, tree, text);
     }
+}
+
+/// Build id/class/tag indices from `nodes` in the order given by `order`
+/// (DFS pre-order), used exclusively by `DomSnapshot::from_frame` for the
+/// initial snapshot. After any in-place mutation, indices are not refreshed
+/// eagerly; the `&self` read methods on `DomSnapshot` detect staleness via
+/// `index_revision != revision` and fall back to a tree walk.
+fn build_indices(
+    nodes: &HashMap<u32, DomNode>,
+    order: &[u32],
+) -> (HashMap<String, u32>, HashMap<String, Vec<u32>>, HashMap<String, Vec<u32>>) {
+    let mut id_index: HashMap<String, u32> = HashMap::new();
+    let mut class_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut tag_index: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for &id in order {
+        let node = match nodes.get(&id) {
+            Some(n) if n.node_type == 1 => n,
+            _ => continue,
+        };
+        if let Some(id_attr) = node.attributes.get("id")
+            && !id_attr.is_empty()
+            && !id_index.contains_key(id_attr)
+        {
+            id_index.insert(id_attr.clone(), id);
+        }
+        if let Some(cls) = node.attributes.get("class") {
+            for token in cls.split_whitespace() {
+                if !token.is_empty() {
+                    class_index.entry(token.to_string()).or_default().push(id);
+                }
+            }
+        }
+        let tag_lower = node.tag.to_lowercase();
+        if !tag_lower.is_empty() {
+            tag_index.entry(tag_lower).or_default().push(id);
+        }
+    }
+
+    (id_index, class_index, tag_index)
 }
 
 #[cfg(test)]

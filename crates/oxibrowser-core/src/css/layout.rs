@@ -929,14 +929,11 @@ mod tests {
             tagged.push((tag.to_string(), nid));
         }
 
-        let snap = DomSnapshot {
-            url: "http://test/".into(),
-            title: String::new(),
-            nodes,
-            root_id,
-            body_id: Some(body_id),
-            head_id: None,
-        };
+        let mut snap = DomSnapshot::empty();
+        snap.url = "http://test/".into();
+        snap.nodes = nodes;
+        snap.root_id = root_id;
+        snap.body_id = Some(body_id);
 
         (snap, tagged)
     }

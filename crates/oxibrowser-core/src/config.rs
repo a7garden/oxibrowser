@@ -76,6 +76,9 @@ fn default_navigation_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_max_response_body() -> usize {
+    10 * 1024 * 1024
+}
 // ---------------------------------------------------------------------------
 // BrowserConfig
 // ---------------------------------------------------------------------------
@@ -165,7 +168,14 @@ pub struct BrowserConfig {
     /// Cookie jar persistence file path. `None` = in-memory only (default).
     #[serde(default)]
     pub cookie_file: Option<PathBuf>,
+
+    /// Maximum HTTP response body size in bytes (default 10 MiB).
+    /// Responses larger than this are truncated at the limit; truncation is
+    /// logged but not treated as an error.
+    #[serde(default = "default_max_response_body")]
+    pub max_response_body_bytes: usize,
 }
+
 
 impl Default for BrowserConfig {
     fn default() -> Self {
@@ -186,6 +196,7 @@ impl Default for BrowserConfig {
             js_max_stack_size: default_js_max_stack_size(),
             navigation_timeout_ms: default_navigation_timeout_ms(),
             cookie_file: None,
+            max_response_body_bytes: default_max_response_body(),
         }
     }
 }
@@ -209,7 +220,91 @@ impl BrowserConfig {
             ..Self::default()
         }
     }
+
+
+    /// Return a fluent [`BrowserConfigBuilder`] seeded with
+    /// `BrowserConfig::default()`.
+    pub fn builder() -> BrowserConfigBuilder {
+        BrowserConfigBuilder::new()
+    }
 }
+// ---------------------------------------------------------------------------
+// BrowserConfigBuilder
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for [`BrowserConfig`].
+///
+/// Each method returns `Self` so calls can be chained; `build()` consumes
+/// the builder and yields a fully-formed [`BrowserConfig`]. All fields
+/// start at `BrowserConfig::default()` values.
+///
+/// # Example
+///
+/// ```
+/// use oxibrowser_core::BrowserConfig;
+/// let cfg = BrowserConfig::builder()
+///     .user_agent("MyBot/1.0")
+///     .viewport(1920, 1080)
+///     .max_sessions(4)
+///     .ssrf_filter(false)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct BrowserConfigBuilder {
+    inner: BrowserConfig,
+}
+
+impl BrowserConfigBuilder {
+    /// Create a new builder seeded with `BrowserConfig::default()`.
+    pub fn new() -> Self {
+        Self {
+            inner: BrowserConfig::default(),
+        }
+    }
+
+    /// Override the User-Agent string.
+    pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
+        self.inner.user_agent = ua.into();
+        self
+    }
+
+    /// Override the viewport dimensions (width, height).
+    pub fn viewport(mut self, width: u32, height: u32) -> Self {
+        self.inner.viewport_width = width;
+        self.inner.viewport_height = height;
+        self
+    }
+
+    /// Override the default page-navigation timeout.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.inner.default_timeout = timeout;
+        self
+    }
+
+    /// Override the JavaScript execution timeout (milliseconds).
+    pub fn js_timeout(mut self, ms: u64) -> Self {
+        self.inner.js_timeout_ms = ms;
+        self
+    }
+
+    /// Enable or disable the SSRF filter.
+    pub fn ssrf_filter(mut self, enabled: bool) -> Self {
+        self.inner.enable_ssrf_filter = enabled;
+        self
+    }
+
+    /// Override the maximum number of concurrent sessions.
+    pub fn max_sessions(mut self, max: usize) -> Self {
+        self.inner.max_sessions = max;
+        self
+    }
+
+    /// Consume the builder and return the configured [`BrowserConfig`].
+    pub fn build(self) -> BrowserConfig {
+        self.inner
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -298,5 +393,94 @@ mod tests {
         assert_eq!(config.default_timeout, default_timeout_secs());
         assert!(config.obey_robots);
         assert_eq!(config.max_sessions, default_max_sessions());
+    }
+
+    #[test]
+    fn test_builder_produces_default_when_empty() {
+        // Builder with no calls must produce a config equivalent to
+        // BrowserConfig::default().
+        let from_builder = BrowserConfigBuilder::new().build();
+        let from_default = BrowserConfig::default();
+        assert_eq!(from_builder.user_agent, from_default.user_agent);
+        assert_eq!(from_builder.default_timeout, from_default.default_timeout);
+        assert_eq!(from_builder.max_sessions, from_default.max_sessions);
+        assert_eq!(from_builder.viewport_width, from_default.viewport_width);
+        assert_eq!(from_builder.viewport_height, from_default.viewport_height);
+        assert_eq!(from_builder.js_timeout_ms, from_default.js_timeout_ms);
+        assert_eq!(
+            from_builder.enable_ssrf_filter,
+            from_default.enable_ssrf_filter
+        );
+        assert_eq!(
+            from_builder.cookie_file, from_default.cookie_file,
+            "cookie_file should default to None"
+        );
+    }
+
+    #[test]
+    fn test_builder_method_on_browser_config() {
+        // BrowserConfig::builder() must work too — equivalent to
+        // BrowserConfigBuilder::new().
+        let cfg = BrowserConfig::builder().build();
+        assert_eq!(cfg.user_agent, BrowserConfig::default().user_agent);
+    }
+
+    #[test]
+    fn test_builder_user_agent() {
+        let cfg = BrowserConfig::builder()
+            .user_agent("MyBot/1.0")
+            .build();
+        assert_eq!(cfg.user_agent, "MyBot/1.0");
+    }
+
+    #[test]
+    fn test_builder_viewport() {
+        let cfg = BrowserConfig::builder().viewport(1920, 1080).build();
+        assert_eq!(cfg.viewport_width, 1920);
+        assert_eq!(cfg.viewport_height, 1080);
+    }
+
+    #[test]
+    fn test_builder_timeout() {
+        let cfg = BrowserConfig::builder()
+            .timeout(Duration::from_secs(45))
+            .build();
+        assert_eq!(cfg.default_timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn test_builder_js_timeout() {
+        let cfg = BrowserConfig::builder().js_timeout(12_345).build();
+        assert_eq!(cfg.js_timeout_ms, 12_345);
+    }
+
+    #[test]
+    fn test_builder_ssrf_filter() {
+        let enabled = BrowserConfig::builder().ssrf_filter(true).build();
+        let disabled = BrowserConfig::builder().ssrf_filter(false).build();
+        assert!(enabled.enable_ssrf_filter);
+        assert!(!disabled.enable_ssrf_filter);
+    }
+
+    #[test]
+    fn test_builder_max_sessions() {
+        let cfg = BrowserConfig::builder().max_sessions(3).build();
+        assert_eq!(cfg.max_sessions, 3);
+    }
+
+    #[test]
+    fn test_builder_chains_and_preserves_other_defaults() {
+        // Multi-field chain — confirming non-overridden fields stay at defaults.
+        let cfg = BrowserConfig::builder()
+            .user_agent("X")
+            .max_sessions(7)
+            .ssrf_filter(false)
+            .build();
+        assert_eq!(cfg.user_agent, "X");
+        assert_eq!(cfg.max_sessions, 7);
+        assert!(!cfg.enable_ssrf_filter);
+        // Defaults preserved on untouched fields.
+        assert_eq!(cfg.viewport_width, default_viewport_width());
+        assert_eq!(cfg.default_timeout, default_timeout_secs());
     }
 }
