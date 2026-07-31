@@ -9,15 +9,15 @@
 Not a Chromium fork. Not a C++ wrapper. A browser engine written from scratch in Rust,
 designed from day one for automation, web scraping, and AI-driven workflows.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/a7garden/oxibrowser/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/a7garden/oxibrowser/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/project-oxi/oxibrowser/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/project-oxi/oxibrowser/actions)
 [![Crates.io](https://img.shields.io/crates/v/oxibrowser?style=flat-square&logo=rust&label=crates.io)](https://crates.io/crates/oxibrowser)
 [![docs.rs](https://img.shields.io/docsrs/oxibrowser?style=flat-square&label=docs.rs)](https://docs.rs/oxibrowser)
-[![GitHub release](https://img.shields.io/github/v/release/a7garden/oxibrowser?style=flat-square&include_prereleases&label=release)](https://github.com/a7garden/oxibrowser/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/a7garden/oxibrowser/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/a7garden/oxibrowser?style=flat-square&logo=github)](https://github.com/a7garden/oxibrowser/stargazers)
+[![GitHub release](https://img.shields.io/github/v/release/project-oxi/oxibrowser?style=flat-square&include_prereleases&label=release)](https://github.com/project-oxi/oxibrowser/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/project-oxi/oxibrowser/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/project-oxi/oxibrowser?style=flat-square&logo=github)](https://github.com/project-oxi/oxibrowser/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
-[Report Bug](https://github.com/a7garden/oxibrowser/issues) · [Request Feature](https://github.com/a7garden/oxibrowser/issues) · [Read the Docs](https://github.com/a7garden/oxibrowser/blob/main/docs/ARCHITECTURE.md) · [Discord](https://discord.gg/oxibrowser)
+[Report Bug](https://github.com/project-oxi/oxibrowser/issues) · [Request Feature](https://github.com/project-oxi/oxibrowser/issues) · [Read the Docs](https://github.com/project-oxi/oxibrowser/blob/main/docs/ARCHITECTURE.md) · [Discord](https://discord.gg/oxibrowser)
 
 </div>
 
@@ -270,7 +270,7 @@ oxibrowser search "rust async" --engine ddg --max-results 5 --json
 oxibrowser search "memory pool" --source github --json
 
 # GitHub issues for a specific repo
-oxibrowser search "panic on shutdown" --source github-issues --repo a7garden/oxibrowser --json
+oxibrowser search "panic on shutdown" --source github-issues --repo project-oxi/oxibrowser --json
 ```
 ### run — YAML automation
 
@@ -528,7 +528,7 @@ client.on('Fetch.requestPaused', async ({ requestId }) => {
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
 
 ```bash
-git clone https://github.com/a7garden/oxibrowser.git
+git clone https://github.com/project-oxi/oxibrowser.git
 cd oxibrowser
 cargo build
 cargo test --workspace

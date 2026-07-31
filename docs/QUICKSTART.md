@@ -11,7 +11,7 @@ cargo install oxibrowser
 ### From source
 
 ```bash
-git clone https://github.com/a7garden/oxibrowser.git
+git clone https://github.com/project-oxi/oxibrowser.git
 cd oxibrowser
 cargo build --release
 # Binary: ./target/release/oxibrowser
