@@ -1,3 +1,5 @@
+> Canonical unified design system: project-oxi/.github/DESIGN.md — this file is project-specific.
+
 # OxiBrowser Design Rationale
 
 ## Why Build OxiBrowser?
