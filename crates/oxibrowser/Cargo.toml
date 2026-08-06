@@ -12,6 +12,18 @@ categories.workspace = true
 rust-version.workspace = true
 description = "Headless browser engine with CDP support"
 
+
+[features]
+default = []
+# Enable the headless browser engine (oxibrowser-core + oxibrowser-cdp).
+# Without this feature, only the lightweight search module is compiled —
+# no boa_engine (JS engine) dependency.
+browser = ["dep:oxibrowser-core", "dep:oxibrowser-cdp"]
+
+[[bin]]
+name = "oxibrowser"
+required-features = ["browser"]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -26,8 +38,8 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
-oxibrowser-core = { version = "0.17.0", path = "../oxibrowser-core" }
-oxibrowser-cdp = { version = "0.17.0", path = "../oxibrowser-cdp" }
+oxibrowser-core = { version = "0.17.0", path = "../oxibrowser-core", optional = true }
+oxibrowser-cdp = { version = "0.17.0", path = "../oxibrowser-cdp", optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"
