@@ -131,10 +131,63 @@ impl Page {
 
     /// Render the page as a PNG screenshot.
     ///
-    /// Renders the DOM text content as a PNG image using a monospace bitmap font.
+    /// Renders the page HTML through the Blitz pipeline (Stylo CSS cascade +
+    /// Taffy layout + vello_cpu paint) as a full-page screenshot. This is a
+    /// real CSS render — a successor to the legacy bitmap-font renderer.
     pub fn to_screenshot_png(&self, viewport_width: u32) -> Result<Vec<u8>> {
-        let text = self.to_text_screenshot();
-        crate::css::text_to_png(&text, viewport_width).map_err(CoreError::ScreenshotError)
+        let html = self.root_frame.html();
+        let viewport = oxibrowser_render::Viewport {
+            width: viewport_width.max(64),
+            height: 800,
+            scale: 1.0,
+        };
+        let mut doc = oxibrowser_render::RenderDocument::from_html(
+            html,
+            Some(self.url.as_str()),
+            viewport,
+        )
+        .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
+        doc.capture_png(&oxibrowser_render::CaptureOpts {
+            full_page: true,
+            ..Default::default()
+        })
+        .map_err(|e| CoreError::ScreenshotError(e.to_string()))
+    }
+
+    /// Render the page's **live** (post-JS) DOM as a full-page PNG screenshot.
+    ///
+    /// Serializes the current DOM snapshot — which reflects JS-driven mutations
+    /// applied during page interaction — to HTML and renders it through the
+    /// Blitz pipeline. The correct path for dynamic/SPA content. Falls back to
+    /// the page source HTML if the serialized DOM is empty.
+    pub fn to_screenshot_png_live(&self, viewport_width: u32) -> Result<Vec<u8>> {
+        let snapshot = self.root_frame.to_dom_snapshot();
+        let mut html_buf = String::new();
+        if let Some(root) = snapshot.nodes.get(&snapshot.root_id) {
+            crate::js::dom_serializer::serialize_node(root, &snapshot, &mut html_buf);
+        }
+        let html: &str = if html_buf.trim().is_empty() {
+            self.root_frame.html()
+        } else {
+            html_buf.as_str()
+        };
+
+        let viewport = oxibrowser_render::Viewport {
+            width: viewport_width.max(64),
+            height: 800,
+            scale: 1.0,
+        };
+        let mut doc = oxibrowser_render::RenderDocument::from_html(
+            html,
+            Some(self.url.as_str()),
+            viewport,
+        )
+        .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
+        doc.capture_png(&oxibrowser_render::CaptureOpts {
+            full_page: true,
+            ..Default::default()
+        })
+        .map_err(|e| CoreError::ScreenshotError(e.to_string()))
     }
 
     /// Get the page ID.
@@ -215,6 +268,70 @@ mod tests {
             &png[0..4],
             &[0x89, 0x50, 0x4E, 0x47],
             "should start with PNG magic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_page_to_screenshot_png_renders_styled_content() {
+        // Exercises the full Blitz pipeline (Stylo + Taffy + vello_cpu) via the
+        // page's HTML, asserting real CSS-rendered content (not a blank image).
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!DOCTYPE html><html><head><style>
+            body { margin: 0; background: #ffffff; }
+            h1 { color: #ff0000; font-size: 32px; }
+            .box { width: 100px; height: 100px; background: #0000ff; }
+        </style></head><body>
+            <h1>Red Heading</h1>
+            <div class="box"></div>
+        </body></html>"#;
+        let page = Page::from_html(url, html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+        let png = page
+            .to_screenshot_png(400)
+            .expect("Blitz PNG generation should succeed");
+
+        // Decode and verify there is substantial non-white content (the red
+        // heading and the blue box), proving the CSS render actually engaged.
+        let img = image::load_from_memory(&png)
+            .expect("decode screenshot png")
+            .to_rgba8();
+        let non_white = img
+            .pixels()
+            .filter(|p| p.0 != [255, 255, 255, 255])
+            .count();
+        assert!(
+            non_white > 200,
+            "expected substantial CSS-rendered content, got {non_white} non-white px"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_page_to_screenshot_png_live_renders_dom() {
+        // The live path serializes the DOM snapshot and re-renders it. Asserts
+        // the serialize → re-parse → Blitz render round-trip produces styled
+        // content (proving post-JS DOM can be captured).
+        let url = Url::parse("https://example.com/").unwrap();
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .box { width: 80px; height: 80px; background: #00aa00; }
+            h1 { color: #cc0000; }
+        </style></head><body><h1>Live DOM</h1><div class="box"></div></body></html>"#;
+        let page = Page::from_html(url, html, 200, "text/html".to_string())
+            .await
+            .unwrap();
+        let png = page
+            .to_screenshot_png_live(400)
+            .expect("live DOM render should succeed");
+        let img = image::load_from_memory(&png)
+            .expect("decode live screenshot png")
+            .to_rgba8();
+        let non_white = img
+            .pixels()
+            .filter(|p| p.0 != [255, 255, 255, 255])
+            .count();
+        assert!(
+            non_white > 100,
+            "live DOM render should contain styled content, got {non_white} px"
         );
     }
 
