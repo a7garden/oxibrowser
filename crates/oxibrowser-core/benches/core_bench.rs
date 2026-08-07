@@ -16,13 +16,15 @@ fn bench_html_parsing(c: &mut Criterion) {
     group.bench_function("simple", |b| {
         b.iter(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(Frame::from_html(url.clone(), simple_html)).unwrap()
+            rt.block_on(Frame::from_html(url.clone(), simple_html))
+                .unwrap()
         })
     });
     group.bench_function("complex", |b| {
         b.iter(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(Frame::from_html(url.clone(), complex_html)).unwrap()
+            rt.block_on(Frame::from_html(url.clone(), complex_html))
+                .unwrap()
         })
     });
     group.finish();
@@ -51,8 +53,12 @@ fn bench_dom_queries(c: &mut Criterion) {
     let (_frame, snap) = build_snapshot(html);
 
     let mut group = c.benchmark_group("dom_queries");
-    group.bench_function("query_selector_id", |b| b.iter(|| snap.query_selector("#main")));
-    group.bench_function("query_selector_tag", |b| b.iter(|| snap.query_selector("h1")));
+    group.bench_function("query_selector_id", |b| {
+        b.iter(|| snap.query_selector("#main"))
+    });
+    group.bench_function("query_selector_tag", |b| {
+        b.iter(|| snap.query_selector("h1"))
+    });
     group.bench_function("query_selector_class", |b| {
         b.iter(|| snap.query_selector(".text"))
     });

@@ -79,7 +79,6 @@ pub struct ResourceUrl {
     pub kind: ResourceKind,
 }
 
-
 /// Per-node `ComputedStyle` cache, keyed by `node_id` and invalidated by snapshot revision.
 ///
 /// Stays private — only `DomSnapshot::compute_style_cached` reads or writes it.
@@ -189,7 +188,7 @@ impl DomSnapshot {
         url: &str,
         title: &str,
     ) -> Self {
-    use oxibrowser_render::BaseDocument;
+        use oxibrowser_render::BaseDocument;
         let doc: &BaseDocument = rd.document();
         let mut nodes: HashMap<u32, DomNode> = HashMap::new();
         let mut order: Vec<u32> = Vec::new();
@@ -200,7 +199,15 @@ impl DomSnapshot {
         // to <html> itself if Blitz did not synthesize a Document wrapper.
         let html = doc.root_element();
         let root = html.parent.unwrap_or(html.id);
-        collect_from_render(root, doc, None, &mut nodes, &mut order, &mut body_id, &mut head_id);
+        collect_from_render(
+            root,
+            doc,
+            None,
+            &mut nodes,
+            &mut order,
+            &mut body_id,
+            &mut head_id,
+        );
         // Element text_content = concatenation of descendant text (mirrors
         // `collect_text_content` in the retired `from_frame` path).
         fill_element_text(&mut nodes, root as u32);
@@ -221,7 +228,6 @@ impl DomSnapshot {
             style_cache: Mutex::new(None),
         }
     }
-
 
     /// Bump the snapshot revision, invalidating the style cache AND marking
     /// the id/class/tag indices stale.
@@ -836,7 +842,6 @@ impl DomSnapshot {
         self.bump_revision();
     }
 
-
     /// Copy a subtree from `source` rooted at `src_root` into this snapshot
     /// under `dst_parent`, remapping ids to start at `id_offset`.
     fn graft_subtree_from_snapshot(
@@ -923,7 +928,6 @@ impl DomSnapshot {
         }
     }
 
-
     /// Text content of a single node (its own `text_content` field).
     pub fn text_content(&self, node_id: u32) -> Option<String> {
         self.nodes.get(&node_id).map(|n| n.text_content.clone())
@@ -940,7 +944,10 @@ impl DomSnapshot {
             match node.tag.to_lowercase().as_str() {
                 "script" => {
                     if let Some(src) = node.attributes.get("src") {
-                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Script });
+                        out.push(ResourceUrl {
+                            url: src.clone(),
+                            kind: ResourceKind::Script,
+                        });
                     }
                 }
                 "link" => {
@@ -949,20 +956,27 @@ impl DomSnapshot {
                         .get("rel")
                         .map(|r| r.eq_ignore_ascii_case("stylesheet"))
                         .unwrap_or(false);
-                    if is_css
-                        && let Some(href) = node.attributes.get("href")
-                    {
-                        out.push(ResourceUrl { url: href.clone(), kind: ResourceKind::Stylesheet });
+                    if is_css && let Some(href) = node.attributes.get("href") {
+                        out.push(ResourceUrl {
+                            url: href.clone(),
+                            kind: ResourceKind::Stylesheet,
+                        });
                     }
                 }
                 "img" => {
                     if let Some(src) = node.attributes.get("src") {
-                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Image });
+                        out.push(ResourceUrl {
+                            url: src.clone(),
+                            kind: ResourceKind::Image,
+                        });
                     }
                 }
                 "iframe" => {
                     if let Some(src) = node.attributes.get("src") {
-                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Iframe });
+                        out.push(ResourceUrl {
+                            url: src.clone(),
+                            kind: ResourceKind::Iframe,
+                        });
                     }
                 }
                 _ => {}
@@ -980,7 +994,6 @@ impl DomSnapshot {
             .collect()
     }
 }
-
 
 /// DFS pre-order collection of `node_id` and every descendant present in
 /// `self.nodes`. Excludes `node_id` itself; callers typically prepend it.
@@ -1018,7 +1031,6 @@ fn collect_from_render(
             let t = e.name.local.to_string();
             if t == "body" && body_id.is_none() {
                 *body_id = Some(id_u32);
-
             } else if t == "head" && head_id.is_none() {
                 *head_id = Some(id_u32);
             }
@@ -1081,7 +1093,6 @@ fn set_element_text_recursive(nodes: &mut HashMap<u32, DomNode>, id: u32) -> Str
     }
     text
 }
-
 
 /// Build id/class/tag indices from `nodes` in the order given by `order`
 /// (DFS pre-order), used exclusively by `DomSnapshot::from_frame` for the
@@ -1206,7 +1217,11 @@ mod tests {
 
         assert!(snapshot.body_id.is_some(), "body found");
         assert!(snapshot.head_id.is_some(), "head found");
-        assert!(snapshot.nodes.len() > 5, "multiple nodes: {}", snapshot.nodes.len());
+        assert!(
+            snapshot.nodes.len() > 5,
+            "multiple nodes: {}",
+            snapshot.nodes.len()
+        );
         let p = snapshot.query_selector("p").expect("<p> found");
         assert_eq!(snapshot.nodes.get(&p).unwrap().tag, "p");
         let intro = snapshot.query_selector(".intro").expect(".intro found");
@@ -1219,12 +1234,17 @@ mod tests {
         let snap2 = DomSnapshot::from_render_document(&rd, "https://example.com/", "Live Page");
         let link2 = snap2.query_selector("a").unwrap();
         assert_eq!(
-            snap2.nodes.get(&link2).unwrap().attributes.get("href").map(|s| s.as_str()),
+            snap2
+                .nodes
+                .get(&link2)
+                .unwrap()
+                .attributes
+                .get("href")
+                .map(|s| s.as_str()),
             Some("/changed"),
             "snapshot must reflect the RenderDocument mutation"
         );
     }
-
 
     #[test]
     fn test_query_selector_tag() {
@@ -1493,4 +1513,3 @@ mod tests {
         assert!(!still_present, "<span id=leaf> purged from nodes");
     }
 }
-

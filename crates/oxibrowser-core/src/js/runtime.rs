@@ -178,7 +178,6 @@ pub struct NodeInfo {
     pub attributes: Vec<(String, String)>,
 }
 
-
 /// Commands sent from the async main thread to the JS thread.
 enum JsCommand {
     /// Evaluate a JS expression.
@@ -654,9 +653,7 @@ impl JsRuntime {
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
         match resp {
             JsResponse::Done => Ok(()),
-            JsResponse::Error { message } => {
-                Err(CoreError::ScreenshotError(message))
-            }
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
             _ => Err(CoreError::JsError("unexpected response".into())),
         }
     }
@@ -707,7 +704,10 @@ impl JsRuntime {
     /// The snapshot reflects every JS mutation (it is built from the
     /// `RenderDocument` on the JS thread, not a navigate-time copy), so CDP
     /// DOM/OXI and `extract` reads stay correct after JS interaction.
-    pub async fn dom_snapshot(&mut self, url: &str) -> Result<crate::js::dom_snapshot::DomSnapshot> {
+    pub async fn dom_snapshot(
+        &mut self,
+        url: &str,
+    ) -> Result<crate::js::dom_snapshot::DomSnapshot> {
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
         self.cmd_tx
             .send(JsCommand::GetDocumentSnapshot {
@@ -778,7 +778,6 @@ fn js_thread_loop(
         &cookie_jar_arc,
         &render_doc_cell,
     );
-
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -1048,7 +1047,9 @@ fn js_thread_loop(
                             .query_selector("title")
                             .map(|id| doc.node_text(id))
                             .unwrap_or_default();
-                        crate::js::dom_snapshot::DomSnapshot::from_render_document(doc, &url, &title)
+                        crate::js::dom_snapshot::DomSnapshot::from_render_document(
+                            doc, &url, &title,
+                        )
                     })
                 };
                 match snap {
@@ -2069,7 +2070,13 @@ fn create_context(
 
     // --- Document object ---
 
-    register_document_object(&mut context, dom_snapshot, mutations, cookie_jar_arc, render_doc_cell);
+    register_document_object(
+        &mut context,
+        dom_snapshot,
+        mutations,
+        cookie_jar_arc,
+        render_doc_cell,
+    );
 
     // --- Window global ---
 
@@ -3547,7 +3554,11 @@ fn create_render_element_object(
             // Fire any registered click listeners directly (no mutation log).
             for cb in registry_get(node_id as u32, "click") {
                 let evt = boa_engine::object::ObjectInitializer::new(ctx)
-                    .property(js_string!("type"), JsValue::from(JsString::from("click")), Attribute::all())
+                    .property(
+                        js_string!("type"),
+                        JsValue::from(JsString::from("click")),
+                        Attribute::all(),
+                    )
                     .build();
                 let _ = cb.call(&JsValue::undefined(), &[JsValue::from(evt)], ctx);
             }
@@ -3621,21 +3632,19 @@ fn create_render_element_object(
         })
     };
 
-    let make_noop = || {
-        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) }
+    let make_noop = || unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
     };
     // value / checked / href / src (attribute-backed)
-    let attr_getter = |rd: Rc<RefCell<Option<RenderDocument>>>, name: &'static str| {
-        unsafe {
-            NativeFunction::from_closure(move |_this, _args, _ctx| {
-                let v = rd
-                    .borrow()
-                    .as_ref()
-                    .and_then(|d| d.node_attr(node_id, name))
-                    .unwrap_or_default();
-                Ok(JsValue::from(JsString::from(v.as_str())))
-            })
-        }
+    let attr_getter = |rd: Rc<RefCell<Option<RenderDocument>>>, name: &'static str| unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let v = rd
+                .borrow()
+                .as_ref()
+                .and_then(|d| d.node_attr(node_id, name))
+                .unwrap_or_default();
+            Ok(JsValue::from(JsString::from(v.as_str())))
+        })
     };
     let val_get_fn = attr_getter(render_doc.clone(), "value");
     let val_getter_fn = FunctionObjectBuilder::new(ctx.realm(), val_get_fn)
@@ -3668,7 +3677,6 @@ fn create_render_element_object(
         .name(js_string!("get src"))
         .build();
 
-
     let obj = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
             js_string!("tagName"),
@@ -3680,11 +3688,7 @@ fn create_render_element_object(
             JsValue::from(JsString::from(tag_upper.as_str())),
             Attribute::all(),
         )
-        .property(
-            js_string!("nodeType"),
-            JsValue::from(1),
-            Attribute::all(),
-        )
+        .property(js_string!("nodeType"), JsValue::from(1), Attribute::all())
         .property(
             js_string!("__nodeId"),
             JsValue::from(node_id),
@@ -3696,7 +3700,11 @@ fn create_render_element_object(
         .function(append_child_fn, js_string!("appendChild"), 1)
         .function(remove_fn, js_string!("remove"), 0)
         .function(click_fn, js_string!("click"), 0)
-        .function(get_bounding_client_rect_fn, js_string!("getBoundingClientRect"), 0)
+        .function(
+            get_bounding_client_rect_fn,
+            js_string!("getBoundingClientRect"),
+            0,
+        )
         .function(ael_fn, js_string!("addEventListener"), 2)
         .function(rel_fn, js_string!("removeEventListener"), 2)
         .function(dispatch_fn, js_string!("dispatchEvent"), 1)
@@ -4394,7 +4402,6 @@ fn register_document_object(
             if let Some(nid) = nid_opt {
                 return Ok(create_render_element_object(ctx, rd_ce.clone(), nid));
             }
-
 
             // Generate a unique node ID using an atomic counter (avoids collisions in tight loops)
             let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -7968,19 +7975,14 @@ mod tests {
         // Decode and confirm real (non-blank) CSS-rendered content.
         let img = image::load_from_memory(&png).expect("decode captured png");
         let rgba = img.to_rgba8();
-        let has_red = rgba
-            .pixels()
-            .any(|p| p[0] > 200 && p[1] < 80 && p[2] < 80);
+        let has_red = rgba.pixels().any(|p| p[0] > 200 && p[1] < 80 && p[2] < 80);
         assert!(has_red, "the red .box should be rendered");
     }
 
     #[tokio::test]
     async fn test_capture_without_document_errors() {
         let mut rt = JsRuntime::new();
-        let err = rt
-            .capture_png(CaptureOpts::default())
-            .await
-            .unwrap_err();
+        let err = rt.capture_png(CaptureOpts::default()).await.unwrap_err();
         assert!(
             matches!(err, CoreError::ScreenshotError(_)),
             "capture without a document should be a screenshot error, got {err:?}"
@@ -8002,7 +8004,11 @@ mod tests {
         assert_eq!(nodes[0].tag.as_deref(), Some("div"));
         assert_eq!(nodes[0].text, "one");
         assert_eq!(
-            nodes[0].attributes.iter().find(|(k, _)| k == "data-n").map(|(_, v)| v.as_str()),
+            nodes[0]
+                .attributes
+                .iter()
+                .find(|(k, _)| k == "data-n")
+                .map(|(_, v)| v.as_str()),
             Some("1"),
             "first item data-n attribute"
         );
@@ -8068,7 +8074,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.value, Some(Value::Number(1.into())));
     }
-
 
     // --- Basic types ---
 

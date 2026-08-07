@@ -381,9 +381,7 @@ async fn main() {
 
 /// Recursively-joined text of the document's `<body>`, used by `extract --text`.
 /// Lives here (rather than on `DomSnapshot`) because it is purely a CLI concern.
-fn body_text(
-    doc: &oxibrowser_core::js::dom_snapshot::DomSnapshot,
-) -> Option<String> {
+fn body_text(doc: &oxibrowser_core::js::dom_snapshot::DomSnapshot) -> Option<String> {
     let body_id = doc.body_id?;
     doc.text_content(body_id)
 }
@@ -988,10 +986,10 @@ async fn run_extract(
                             .map(|t| t.trim().to_string())
                             .unwrap_or_default()
                     } else {
-                            doc.nodes
-                                .get(id)
-                                .and_then(|n| n.attributes.get(attr).cloned())
-                                .unwrap_or_default()
+                        doc.nodes
+                            .get(id)
+                            .and_then(|n| n.attributes.get(attr).cloned())
+                            .unwrap_or_default()
                     };
                     item.insert(attr.into(), Value::String(val));
                 }

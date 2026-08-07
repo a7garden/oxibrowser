@@ -81,13 +81,13 @@ async fn get_structured_page(_params: Option<Value>, ctx: &DispatchContext) -> D
             let headings: Vec<Value> = s
                 .headings()
                 .into_iter()
-                .map(|(level, text)| { json!({ "level": level, "text": text }) })
+                .map(|(level, text)| json!({ "level": level, "text": text }))
                 .collect();
             let links: Vec<Value> = s
                 .links()
                 .into_iter()
                 .take(max_links)
-                .map(|(text, href)| { json!({ "text": text, "href": href }) })
+                .map(|(text, href)| json!({ "text": text, "href": href }))
                 .collect();
             let meta: Value = s
                 .meta_tags()

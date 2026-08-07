@@ -39,7 +39,8 @@ async fn test_extract_links_from_example() {
     let mut href_count = 0;
     for link_id in &links {
         if let Some(node) = doc.nodes.get(link_id)
-            && node.attributes.contains_key("href") {
+            && node.attributes.contains_key("href")
+        {
             href_count += 1;
         }
     }

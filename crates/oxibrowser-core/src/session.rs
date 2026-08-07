@@ -737,7 +737,6 @@ impl Session {
         self.js_runtime.capture_png(opts).await
     }
 
-
     /// Inject the current page into the JS runtime.
     ///
     /// Builds the `RenderDocument` (the single DOM source of truth that JS
@@ -759,7 +758,11 @@ impl Session {
 
         // Build/replace the render document that JS mutates and screenshots render.
         let viewport = (self.config.viewport_width, self.config.viewport_height);
-        if let Err(e) = self.js_runtime.set_document(&html, Some(&url), viewport).await {
+        if let Err(e) = self
+            .js_runtime
+            .set_document(&html, Some(&url), viewport)
+            .await
+        {
             tracing::warn!(error = %e, "failed to build render document; falling back");
         }
         // Derive the DomSnapshot from the (now-current) RenderDocument so every

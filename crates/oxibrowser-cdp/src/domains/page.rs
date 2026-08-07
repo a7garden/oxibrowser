@@ -371,9 +371,7 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
     let png_bytes: Vec<u8> = guard
         .capture_screenshot_png(viewport_width.max(64))
         .await
-        .unwrap_or_else(|_| {
-            oxibrowser_core::blank_png(viewport_width.max(64), 800)
-        });
+        .unwrap_or_else(|_| oxibrowser_core::blank_png(viewport_width.max(64), 800));
 
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD.encode(&png_bytes);

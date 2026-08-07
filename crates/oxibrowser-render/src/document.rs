@@ -1,11 +1,11 @@
 //! [`RenderDocument`] — the public handle wrapping a Blitz [`BaseDocument`].
 
-use blitz_dom::ns;
 use blitz_dom::BaseDocument;
 use blitz_dom::DocumentConfig;
 use blitz_dom::LocalName;
 use blitz_dom::NodeData;
 use blitz_dom::QualName;
+use blitz_dom::ns;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::ColorScheme;
 use blitz_traits::shell::Viewport as BlitzViewport;
@@ -90,7 +90,11 @@ impl RenderDocument {
     ///
     /// `base_url`, if provided, is used to resolve linked resources
     /// (stylesheets, images, fonts).
-    pub fn from_html(html: &str, base_url: Option<&str>, viewport: Viewport) -> Result<Self, RenderError> {
+    pub fn from_html(
+        html: &str,
+        base_url: Option<&str>,
+        viewport: Viewport,
+    ) -> Result<Self, RenderError> {
         let config = DocumentConfig::default();
         let mut doc = HtmlDocument::from_html(html, config).into_inner();
 
@@ -222,7 +226,9 @@ impl RenderDocument {
 
     /// Set (or replace) an attribute on `node`.
     pub fn set_attribute(&mut self, node: NodeId, name: &str, value: &str) {
-        self.doc.mutate().set_attribute(node, html_name(name), value);
+        self.doc
+            .mutate()
+            .set_attribute(node, html_name(name), value);
     }
 
     /// Remove an attribute from `node`.

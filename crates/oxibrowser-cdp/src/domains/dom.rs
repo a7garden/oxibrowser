@@ -77,7 +77,12 @@ async fn query_selector_all(params: Option<Value>, ctx: &DispatchContext) -> Dom
     let snap = guard.dom_snapshot().await?;
     let node_ids: Vec<u64> = snap
         .as_ref()
-        .map(|s| s.query_selector_all(selector).iter().map(|id| *id as u64).collect())
+        .map(|s| {
+            s.query_selector_all(selector)
+                .iter()
+                .map(|id| *id as u64)
+                .collect()
+        })
         .unwrap_or_default();
     Ok(Some(json!({ "nodeIds": node_ids })))
 }
@@ -118,25 +123,20 @@ async fn describe_node(params: Option<Value>, ctx: &DispatchContext) -> DomainRe
 
     let (node_type_num, node_name, local_name, node_value) = match node.node_type {
         9 => (9, "#document".to_string(), String::new(), String::new()),
-        1 => (
-            1,
-            node.tag.to_uppercase(),
-            node.tag.clone(),
+        1 => (1, node.tag.to_uppercase(), node.tag.clone(), String::new()),
+        3 => (
+            3,
+            "#text".to_string(),
             String::new(),
+            node.text_content.clone(),
         ),
-        3 => (3, "#text".to_string(), String::new(), node.text_content.clone()),
         8 => (
             8,
             "#comment".to_string(),
             String::new(),
             node.text_content.clone(),
         ),
-        _ => (
-            1,
-            node.tag.to_uppercase(),
-            node.tag.clone(),
-            String::new(),
-        ),
+        _ => (1, node.tag.to_uppercase(), node.tag.clone(), String::new()),
     };
 
     let child_count = node.children.len();
@@ -198,25 +198,20 @@ fn build_cdp_node(snapshot: &DomSnapshot, node_id: u32, depth: usize) -> Value {
 
     let (node_type_num, node_name, local_name, node_value) = match node.node_type {
         9 => (9, "#document".to_string(), String::new(), String::new()),
-        1 => (
-            1,
-            node.tag.to_uppercase(),
-            node.tag.clone(),
+        1 => (1, node.tag.to_uppercase(), node.tag.clone(), String::new()),
+        3 => (
+            3,
+            "#text".to_string(),
             String::new(),
+            node.text_content.clone(),
         ),
-        3 => (3, "#text".to_string(), String::new(), node.text_content.clone()),
         8 => (
             8,
             "#comment".to_string(),
             String::new(),
             node.text_content.clone(),
         ),
-        _ => (
-            1,
-            node.tag.to_uppercase(),
-            node.tag.clone(),
-            String::new(),
-        ),
+        _ => (1, node.tag.to_uppercase(), node.tag.clone(), String::new()),
     };
 
     // Attribute pairs [name1, value1, name2, value2, ...]

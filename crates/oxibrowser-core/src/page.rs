@@ -141,12 +141,9 @@ impl Page {
             height: 800,
             scale: 1.0,
         };
-        let mut doc = oxibrowser_render::RenderDocument::from_html(
-            html,
-            Some(self.url.as_str()),
-            viewport,
-        )
-        .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
+        let mut doc =
+            oxibrowser_render::RenderDocument::from_html(html, Some(self.url.as_str()), viewport)
+                .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
         doc.capture_png(&oxibrowser_render::CaptureOpts {
             full_page: true,
             ..Default::default()
@@ -177,12 +174,9 @@ impl Page {
             height: 800,
             scale: 1.0,
         };
-        let mut doc = oxibrowser_render::RenderDocument::from_html(
-            html,
-            Some(self.url.as_str()),
-            viewport,
-        )
-        .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
+        let mut doc =
+            oxibrowser_render::RenderDocument::from_html(html, Some(self.url.as_str()), viewport)
+                .map_err(|e| CoreError::ScreenshotError(e.to_string()))?;
         doc.capture_png(&oxibrowser_render::CaptureOpts {
             full_page: true,
             ..Default::default()
@@ -296,10 +290,7 @@ mod tests {
         let img = image::load_from_memory(&png)
             .expect("decode screenshot png")
             .to_rgba8();
-        let non_white = img
-            .pixels()
-            .filter(|p| p.0 != [255, 255, 255, 255])
-            .count();
+        let non_white = img.pixels().filter(|p| p.0 != [255, 255, 255, 255]).count();
         assert!(
             non_white > 200,
             "expected substantial CSS-rendered content, got {non_white} non-white px"
@@ -325,10 +316,7 @@ mod tests {
         let img = image::load_from_memory(&png)
             .expect("decode live screenshot png")
             .to_rgba8();
-        let non_white = img
-            .pixels()
-            .filter(|p| p.0 != [255, 255, 255, 255])
-            .count();
+        let non_white = img.pixels().filter(|p| p.0 != [255, 255, 255, 255]).count();
         assert!(
             non_white > 100,
             "live DOM render should contain styled content, got {non_white} px"

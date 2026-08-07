@@ -34,10 +34,16 @@ fn renders_basic_html_to_valid_png() {
     )
     .expect("from_html");
 
-    let png = doc.capture_png(&CaptureOpts::default()).expect("capture_png");
+    let png = doc
+        .capture_png(&CaptureOpts::default())
+        .expect("capture_png");
 
     // Valid PNG with a real header.
-    assert!(png.len() > 100, "png suspiciously small: {} bytes", png.len());
+    assert!(
+        png.len() > 100,
+        "png suspiciously small: {} bytes",
+        png.len()
+    );
     assert_eq!(
         &png[0..8],
         &PNG_SIG,
@@ -77,7 +83,9 @@ fn empty_document_produces_blank_png() {
         },
     )
     .expect("from_html");
-    let png = doc.capture_png(&CaptureOpts::default()).expect("capture_png");
+    let png = doc
+        .capture_png(&CaptureOpts::default())
+        .expect("capture_png");
     assert_eq!(&png[0..8], &PNG_SIG);
     assert!(png.len() > 50);
 }

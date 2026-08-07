@@ -2,14 +2,14 @@
 //!
 //! Mirrors the pattern proven in Blitz's own `apps/browser/src/capture.rs`.
 
-use anyrender::render_to_buffer;
 use anyrender::PaintScene;
+use anyrender::render_to_buffer;
 use anyrender_vello_cpu::VelloCpuImageRenderer;
-use blitz_dom::util::Color;
 use blitz_dom::BaseDocument;
+use blitz_dom::util::Color;
 use blitz_paint::paint_scene;
-use peniko::kurbo::Rect;
 use peniko::Fill;
+use peniko::kurbo::Rect;
 
 use crate::document::{RenderError, Viewport};
 
