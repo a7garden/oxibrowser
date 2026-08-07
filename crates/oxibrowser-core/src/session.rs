@@ -7,7 +7,7 @@ use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
-use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
+use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
 use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::network::HttpClient;
@@ -745,28 +745,55 @@ impl Session {
     /// `DomSnapshot` (still used by `document.title`/`document.cookie`/window
     /// globals until the webapi DOM is retired) and the page URL.
     async fn inject_dom_snapshot(&mut self) {
-        let (html, url, snapshot) = match &self.active_page {
+        let (html, url) = match &self.active_page {
             Some(page) => {
-                let snapshot = DomSnapshot::from_frame(page.root_frame());
                 let html = page.content().to_string();
                 let url = self
                     .current_url()
                     .map(|u| u.as_str().to_string())
                     .unwrap_or_default();
-                (html, url, snapshot)
+                (html, url)
             }
             None => return,
         };
-        tracing::debug!(node_count = snapshot.nodes.len(), "DOM snapshot injected");
 
         // Build/replace the render document that JS mutates and screenshots render.
         let viewport = (self.config.viewport_width, self.config.viewport_height);
         if let Err(e) = self.js_runtime.set_document(&html, Some(&url), viewport).await {
             tracing::warn!(error = %e, "failed to build render document; falling back");
         }
-        // Seed the legacy snapshot (title/cookie/window globals) + page URL.
-        self.js_runtime.set_dom_snapshot(Some(snapshot));
+        // Derive the DomSnapshot from the (now-current) RenderDocument so every
+        // reader — JS metadata bindings, CDP DOM/OXI, extract — reflects JS
+        // mutations, not a stale navigate-time copy.
+        let snapshot = match self.js_runtime.dom_snapshot(&url).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to derive DOM snapshot");
+                None
+            }
+        };
+        tracing::debug!(
+            node_count = snapshot.as_ref().map(|s| s.nodes.len()).unwrap_or(0),
+            "DOM snapshot injected"
+        );
+        self.js_runtime.set_dom_snapshot(snapshot);
         self.js_runtime.set_page_url(&url);
+    }
+
+    /// Serialize the live (post-JS) document to a [`DomSnapshot`].
+    ///
+    /// For CDP DOM/OXI and `extract` readers — reflects JS mutations because it
+    /// is derived from the `RenderDocument` on the JS thread.
+    pub async fn dom_snapshot(&mut self) -> Result<Option<crate::js::dom_snapshot::DomSnapshot>> {
+        let url = self
+            .current_url()
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_default();
+        match self.js_runtime.dom_snapshot(&url).await {
+            Ok(s) => Ok(Some(s)),
+            Err(CoreError::ScreenshotError(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Wait for a CSS selector to match an element in the current page.

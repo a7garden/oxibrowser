@@ -239,6 +239,12 @@ enum JsCommand {
         selector: String,
         response_tx: Sender<JsResponse>,
     },
+    /// Serialize the current RenderDocument to a DomSnapshot for async-side
+    /// readers (CDP DOM/OXI, extract). Reflects all JS mutations.
+    GetDocumentSnapshot {
+        url: String,
+        response_tx: Sender<JsResponse>,
+    },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -256,6 +262,8 @@ enum JsResponse {
     Done,
     /// PNG bytes returned by a `Capture` command.
     CaptureResult { png: Vec<u8> },
+    /// Serialized DomSnapshot of the current RenderDocument.
+    Snapshot(Box<crate::js::dom_snapshot::DomSnapshot>),
     /// Nodes returned by a `Query` command.
     QueryResult { nodes: Vec<NodeInfo> },
     /// Error from a `SetDocument` / `Capture` / `Query` command.
@@ -693,6 +701,29 @@ impl JsRuntime {
             _ => Err(CoreError::JsError("unexpected response".into())),
         }
     }
+
+    /// Serialize the live RenderDocument to a [`DomSnapshot`].
+    ///
+    /// The snapshot reflects every JS mutation (it is built from the
+    /// `RenderDocument` on the JS thread, not a navigate-time copy), so CDP
+    /// DOM/OXI and `extract` reads stay correct after JS interaction.
+    pub async fn dom_snapshot(&mut self, url: &str) -> Result<crate::js::dom_snapshot::DomSnapshot> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::GetDocumentSnapshot {
+                url: url.to_string(),
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Snapshot(snap) => Ok(*snap),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
 }
 
 impl Default for JsRuntime {
@@ -1008,6 +1039,28 @@ fn js_thread_loop(
                     None => Vec::new(),
                 };
                 let _ = response_tx.send(JsResponse::QueryResult { nodes });
+            }
+            JsCommand::GetDocumentSnapshot { url, response_tx } => {
+                let snap = {
+                    let guard = render_doc_cell.borrow();
+                    guard.as_ref().map(|doc| {
+                        let title = doc
+                            .query_selector("title")
+                            .map(|id| doc.node_text(id))
+                            .unwrap_or_default();
+                        crate::js::dom_snapshot::DomSnapshot::from_render_document(doc, &url, &title)
+                    })
+                };
+                match snap {
+                    Some(s) => {
+                        let _ = response_tx.send(JsResponse::Snapshot(Box::new(s)));
+                    }
+                    None => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: "no render document set".into(),
+                        });
+                    }
+                }
             }
             JsCommand::Shutdown => {
                 break;

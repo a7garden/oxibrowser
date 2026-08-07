@@ -203,6 +203,52 @@ impl DomSnapshot {
         }
     }
 
+    /// Build a snapshot from the live [`RenderDocument`] (Blitz `BaseDocument`).
+    ///
+    /// This is the post-unification DOM source: the `RenderDocument` on the JS
+    /// thread is the single source of truth that JS mutates directly, so a
+    /// snapshot derived here reflects every JS-driven change (no stale
+    /// navigate-time copy). Used by the CDP DOM domain, OXI extensions,
+    /// `extract`, and the legacy snapshot-path JS bindings.
+    pub fn from_render_document(
+        rd: &oxibrowser_render::RenderDocument,
+        url: &str,
+        title: &str,
+    ) -> Self {
+    use oxibrowser_render::BaseDocument;
+        let doc: &BaseDocument = rd.document();
+        let mut nodes: HashMap<u32, DomNode> = HashMap::new();
+        let mut order: Vec<u32> = Vec::new();
+        let mut body_id = None;
+        let mut head_id = None;
+
+        // The document root is <html>'s parent (the Document node); fall back
+        // to <html> itself if Blitz did not synthesize a Document wrapper.
+        let html = doc.root_element();
+        let root = html.parent.unwrap_or(html.id);
+        collect_from_render(root, doc, None, &mut nodes, &mut order, &mut body_id, &mut head_id);
+        // Element text_content = concatenation of descendant text (mirrors
+        // `collect_text_content` in the retired `from_frame` path).
+        fill_element_text(&mut nodes, root as u32);
+
+        let (id_index, class_index, tag_index) = build_indices(&nodes, &order);
+        Self {
+            url: url.to_string(),
+            title: title.to_string(),
+            nodes,
+            root_id: root as u32,
+            body_id,
+            head_id,
+            revision: 0,
+            index_revision: 0,
+            id_index,
+            class_index,
+            tag_index,
+            style_cache: Mutex::new(None),
+        }
+    }
+
+
     /// Bump the snapshot revision, invalidating the style cache AND marking
     /// the id/class/tag indices stale.
     ///
@@ -976,6 +1022,92 @@ fn collect_subtree_ids(snap: &DomSnapshot, node_id: u32) -> Vec<u32> {
     out
 }
 
+/// DFS collection from a Blitz `BaseDocument` (the live RenderDocument tree).
+/// Mirrors `collect_nodes` but reads Blitz node data instead of the webapi DOM.
+fn collect_from_render(
+    id: usize,
+    doc: &oxibrowser_render::BaseDocument,
+    parent: Option<u32>,
+    nodes: &mut HashMap<u32, DomNode>,
+    order: &mut Vec<u32>,
+    body_id: &mut Option<u32>,
+    head_id: &mut Option<u32>,
+) {
+    use oxibrowser_render::NodeData;
+    let Some(node) = doc.get_node(id) else {
+        return;
+    };
+    let id_u32 = id as u32;
+    let (tag, attributes, node_type_u8, text_content) = match &node.data {
+        NodeData::Document => (String::new(), HashMap::new(), 9u8, String::new()),
+        NodeData::Element(e) => {
+            let t = e.name.local.to_string();
+            if t == "body" && body_id.is_none() {
+                *body_id = Some(id_u32);
+            } else if t == "head" && head_id.is_none() {
+                *head_id = Some(id_u32);
+            }
+            let attrs: HashMap<String, String> = node
+                .attrs()
+                .map(|a| {
+                    a.iter()
+                        .map(|x| (x.name.local.to_string(), x.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (t, attrs, 1u8, String::new())
+        }
+        NodeData::Text(tn) => (String::new(), HashMap::new(), 3u8, tn.content.clone()),
+        NodeData::Comment => (String::new(), HashMap::new(), 8u8, String::new()),
+        // Layout-only anonymous boxes are not part of the DOM.
+        NodeData::AnonymousBlock(_) => return,
+    };
+    let children: Vec<u32> = node.children.iter().map(|c| *c as u32).collect();
+    nodes.insert(
+        id_u32,
+        DomNode {
+            id: id_u32,
+            tag,
+            attributes,
+            text_content,
+            children: children.clone(),
+            parent,
+            node_type: node_type_u8,
+        },
+    );
+    order.push(id_u32);
+    for &child in &node.children {
+        collect_from_render(child, doc, Some(id_u32), nodes, order, body_id, head_id);
+    }
+}
+
+/// Set each element node's `text_content` to the concatenation of its
+/// descendant text nodes (mirrors the retired `collect_text_content`).
+fn fill_element_text(nodes: &mut HashMap<u32, DomNode>, root: u32) {
+    set_element_text_recursive(nodes, root);
+}
+
+fn set_element_text_recursive(nodes: &mut HashMap<u32, DomNode>, id: u32) -> String {
+    let (ntype, children, own_text) = match nodes.get(&id) {
+        Some(n) => (n.node_type, n.children.clone(), n.text_content.clone()),
+        None => return String::new(),
+    };
+    if ntype == 3 {
+        return own_text;
+    }
+    let mut text = String::new();
+    for child in children {
+        text.push_str(&set_element_text_recursive(nodes, child));
+    }
+    if ntype == 1
+        && let Some(n) = nodes.get_mut(&id)
+    {
+        n.text_content = text.clone();
+    }
+    text
+}
+
+
 /// Recursively collect all nodes from the document tree into the snapshot.
 fn collect_nodes(
     node_id: oxibrowser_webapi::dom::NodeId,
@@ -1163,6 +1295,44 @@ mod tests {
         assert!(snapshot.head_id.is_some(), "should find head element");
         assert!(snapshot.nodes.len() > 5, "should have multiple nodes");
     }
+
+    #[test]
+    fn test_dom_snapshot_from_render_document() {
+        // The converter builds a DomSnapshot from the live RenderDocument (Blitz
+        // BaseDocument) — the post-unification DOM source. It must reproduce the
+        // same queryable structure as the retired from_frame path, and reflect
+        // JS mutations applied to the RenderDocument.
+        let html = r#"<html><head><title>Live Page</title></head>
+            <body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
+        let rd = oxibrowser_render::RenderDocument::from_html(
+            html,
+            Some("https://example.com/"),
+            oxibrowser_render::Viewport::default(),
+        )
+        .expect("parse");
+        let snapshot = DomSnapshot::from_render_document(&rd, "https://example.com/", "Live Page");
+
+        assert!(snapshot.body_id.is_some(), "body found");
+        assert!(snapshot.head_id.is_some(), "head found");
+        assert!(snapshot.nodes.len() > 5, "multiple nodes: {}", snapshot.nodes.len());
+        let p = snapshot.query_selector("p").expect("<p> found");
+        assert_eq!(snapshot.nodes.get(&p).unwrap().tag, "p");
+        let intro = snapshot.query_selector(".intro").expect(".intro found");
+        assert_eq!(snapshot.nodes.get(&intro).unwrap().text_content, "Hello");
+
+        // A mutation on the RenderDocument is reflected in a fresh snapshot.
+        let mut rd = rd;
+        let link = rd.query_selector("a").expect("<a> found");
+        rd.set_attribute(link, "href", "/changed");
+        let snap2 = DomSnapshot::from_render_document(&rd, "https://example.com/", "Live Page");
+        let link2 = snap2.query_selector("a").unwrap();
+        assert_eq!(
+            snap2.nodes.get(&link2).unwrap().attributes.get("href").map(|s| s.as_str()),
+            Some("/changed"),
+            "snapshot must reflect the RenderDocument mutation"
+        );
+    }
+
 
     #[test]
     fn test_query_selector_tag() {

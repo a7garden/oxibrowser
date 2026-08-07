@@ -59,60 +59,41 @@ async fn get_page_info(ctx: &DispatchContext) -> DomainResult {
 /// Optional params:
 /// - `maxLinks` (number): limit number of links returned (default: 200)
 async fn get_structured_page(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
-    let guard = ctx.session.read().await;
-
-    let url = guard
-        .current_url()
-        .map(|u| u.to_string())
-        .unwrap_or_default();
-
-    let title = guard
-        .page()
-        .and_then(|p| p.title().map(|t| t.to_string()))
-        .unwrap_or_default();
-
     let max_links = _params
         .as_ref()
         .and_then(|p| p.get("maxLinks"))
         .and_then(|v| v.as_u64())
         .unwrap_or(200) as usize;
 
-    // Build a DomSnapshot from the current frame
-    let snapshot = guard
-        .page()
-        .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
+    let mut guard = ctx.session.write().await;
+    let url = guard
+        .current_url()
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+    let snapshot = guard.dom_snapshot().await?;
+    let title = snapshot
+        .as_ref()
+        .map(|s| s.title.clone())
+        .unwrap_or_default();
 
     let (headings, links, meta) = match snapshot {
         Some(s) => {
             let headings: Vec<Value> = s
                 .headings()
                 .into_iter()
-                .map(|(level, text)| {
-                    json!({
-                        "level": level,
-                        "text": text
-                    })
-                })
+                .map(|(level, text)| { json!({ "level": level, "text": text }) })
                 .collect();
-
             let links: Vec<Value> = s
                 .links()
                 .into_iter()
                 .take(max_links)
-                .map(|(text, href)| {
-                    json!({
-                        "text": text,
-                        "href": href
-                    })
-                })
+                .map(|(text, href)| { json!({ "text": text, "href": href }) })
                 .collect();
-
             let meta: Value = s
                 .meta_tags()
                 .into_iter()
                 .map(|(k, v)| (k, json!(v)))
                 .collect();
-
             (headings, links, meta)
         }
         None => (vec![], vec![], json!({})),
@@ -134,10 +115,8 @@ async fn get_structured_page(_params: Option<Value>, ctx: &DispatchContext) -> D
 /// Shows what a user (or screen reader) would perceive:
 /// roles, labels, visibility, interactivity, approximate positions.
 async fn get_accessibility_tree(ctx: &DispatchContext) -> DomainResult {
-    let guard = ctx.session.read().await;
-    let snapshot = guard
-        .page()
-        .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
+    let mut guard = ctx.session.write().await;
+    let snapshot = guard.dom_snapshot().await?;
 
     let tree = match snapshot {
         Some(s) => oxibrowser_core::css::render_accessibility_tree(&s),
@@ -160,10 +139,8 @@ async fn get_box_model_screenshot(params: Option<Value>, ctx: &DispatchContext) 
         .and_then(|v| v.as_u64())
         .unwrap_or(1280) as u32;
 
-    let guard = ctx.session.read().await;
-    let snapshot = guard
-        .page()
-        .map(|p| oxibrowser_core::js::dom_snapshot::DomSnapshot::from_frame(p.root_frame()));
+    let mut guard = ctx.session.write().await;
+    let snapshot = guard.dom_snapshot().await?;
 
     let png_bytes = match snapshot {
         Some(s) => {

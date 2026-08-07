@@ -16,5 +16,10 @@
 mod document;
 mod paint;
 
+// Re-export Blitz DOM types so downstream crates (oxibrowser-core) can walk the
+// `BaseDocument` tree (returned by `RenderDocument::document()`) without adding
+// a direct blitz-dom dependency.
+pub use blitz_dom::{BaseDocument, NodeData};
+
 pub use document::{CaptureOpts, NodeId, RenderDocument, RenderError, Viewport};
 pub use paint::blank_png;
