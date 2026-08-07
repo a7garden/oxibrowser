@@ -96,9 +96,7 @@ enum PendingFetch {
 /// wrapper exists only to track liveness for the idle condition
 /// (`pending_ws = any non-Closed`).
 enum WsState {
-    Live {
-        obj: JsObject,
-    },
+    Live { obj: JsObject },
     Closed,
 }
 
@@ -1012,7 +1010,8 @@ fn js_thread_loop(
                 // is returned. Gate on pending fetches so a top-level
                 // setInterval(0) doesn't over-fire during this pump.
                 if PENDING_FETCH.with(|m| !m.borrow().is_empty())
-                    || PENDING_WS.with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)))
+                    || PENDING_WS
+                        .with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)))
                 {
                     settle_to_idle(&mut ctx, &job_queue, start, Duration::from_millis(timeout));
                 }
@@ -1793,7 +1792,7 @@ fn drain_ws_events(ctx: &mut Context) {
 
 /// Fire the on-property + the hidden `__listeners_<type>` array for one event.
 fn ws_fire(obj: &JsObject, type_name: &str, event: JsValue, ctx: &mut Context) {
-    let type_key = JsString::from(type_name);
+    let type_key = JsString::from(format!("on{type_name}").as_str());
     // on-property
     if let Ok(cb) = obj.get(type_key.clone(), ctx)
         && !cb.is_null()
@@ -1801,7 +1800,7 @@ fn ws_fire(obj: &JsObject, type_name: &str, event: JsValue, ctx: &mut Context) {
         && let Some(f) = cb.as_object()
         && f.is_callable()
     {
-        let _ = f.call(&JsValue::undefined(), &[event.clone()], ctx);
+        let _ = f.call(&JsValue::undefined(), std::slice::from_ref(&event), ctx);
     }
     // listener vec
     let lkey = JsString::from(format!("__listeners_{type_name}").as_str());
@@ -1815,20 +1814,17 @@ fn ws_fire(obj: &JsObject, type_name: &str, event: JsValue, ctx: &mut Context) {
                 && let Some(f) = cb.as_object()
                 && f.is_callable()
             {
-                let _ = f.call(&JsValue::undefined(), &[event.clone()], ctx);
+                let _ = f.call(&JsValue::undefined(), std::slice::from_ref(&event), ctx);
             }
         }
     }
 }
-
 fn settle_ws_open(id: u64, protocol: String, extensions: String, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
-        m.borrow()
-            .get(&id)
-            .and_then(|s| match s {
-                WsState::Live { obj } => Some(obj.clone()),
-                _ => None,
-            })
+        m.borrow().get(&id).and_then(|s| match s {
+            WsState::Live { obj } => Some(obj.clone()),
+            _ => None,
+        })
     });
     let Some(obj) = obj else {
         return;
@@ -1852,19 +1848,21 @@ fn settle_ws_open(id: u64, protocol: String, extensions: String, ctx: &mut Conte
             JsValue::from(JsString::from("open")),
             Attribute::all(),
         )
-        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .property(
+            js_string!("target"),
+            JsValue::from(obj.clone()),
+            Attribute::all(),
+        )
         .build();
     ws_fire(&obj, "open", event.into(), ctx);
 }
 
 fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
-        m.borrow()
-            .get(&id)
-            .and_then(|s| match s {
-                WsState::Live { obj } => Some(obj.clone()),
-                _ => None,
-            })
+        m.borrow().get(&id).and_then(|s| match s {
+            WsState::Live { obj } => Some(obj.clone()),
+            _ => None,
+        })
     });
     let Some(obj) = obj else {
         return;
@@ -1888,7 +1886,11 @@ fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
             Attribute::all(),
         )
         .property(js_string!("data"), data_val, Attribute::all())
-        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .property(
+            js_string!("target"),
+            JsValue::from(obj.clone()),
+            Attribute::all(),
+        )
         .build();
     ws_fire(&obj, "message", event.into(), ctx);
 }
@@ -1904,7 +1906,8 @@ fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mu
         obj
     });
     let Some(obj) = obj else {
- return; };
+        return;
+    };
     let _ = obj.set(js_string!("readyState"), JsValue::from(3), true, ctx);
     let event = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
@@ -1923,19 +1926,21 @@ fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mu
             JsValue::from(was_clean),
             Attribute::all(),
         )
-        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .property(
+            js_string!("target"),
+            JsValue::from(obj.clone()),
+            Attribute::all(),
+        )
         .build();
     ws_fire(&obj, "close", event.into(), ctx);
 }
 
 fn settle_ws_error(id: u64, _message: String, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
-        m.borrow()
-            .get(&id)
-            .and_then(|s| match s {
-                WsState::Live { obj } => Some(obj.clone()),
-                _ => None,
-            })
+        m.borrow().get(&id).and_then(|s| match s {
+            WsState::Live { obj } => Some(obj.clone()),
+            _ => None,
+        })
     });
     let Some(obj) = obj else {
         return;
@@ -1946,7 +1951,11 @@ fn settle_ws_error(id: u64, _message: String, ctx: &mut Context) {
             JsValue::from(JsString::from("error")),
             Attribute::all(),
         )
-        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .property(
+            js_string!("target"),
+            JsValue::from(obj.clone()),
+            Attribute::all(),
+        )
         .build();
     ws_fire(&obj, "error", event.into(), ctx);
 }
@@ -2633,7 +2642,7 @@ fn create_context(
             // ws.close(code?, reason?)
             let close_id = id;
             let close_fn = NativeFunction::from_closure(move |_this, args, _| {
-                let code = args.get(0).and_then(|v| v.as_number()).map(|n| n as u16);
+                let code = args.first().and_then(|v| v.as_number()).map(|n| n as u16);
                 let reason = args
                     .get(1)
                     .and_then(|v| v.as_string())
@@ -2653,7 +2662,7 @@ fn create_context(
             // live object, read back at settle time alongside the on* property.
             let ael_id = id;
             let ael_fn = NativeFunction::from_closure(move |_this, args, ctx| {
-                let (t, cb) = match (args.get(0), args.get(1)) {
+                let (t, cb) = match (args.first(), args.get(1)) {
                     (Some(t), Some(cb)) => (t, cb),
                     _ => return Ok(JsValue::undefined()),
                 };
@@ -2667,8 +2676,7 @@ fn create_context(
                         let key = JsString::from(format!("__listeners_{t}").as_str());
                         let existing = obj.get(key.clone(), ctx).unwrap_or(JsValue::null());
                         let arr = if let Some(o) = existing.as_object() {
-                            JsArray::from_object(o.clone())
-                                .unwrap_or_else(|_| JsArray::new(ctx))
+                            JsArray::from_object(o.clone()).unwrap_or_else(|_| JsArray::new(ctx))
                         } else {
                             JsArray::new(ctx)
                         };
@@ -2715,7 +2723,8 @@ fn create_context(
                 .build();
 
             PENDING_WS.with(|m| {
-                m.borrow_mut().insert(id, WsState::Live { obj: obj.clone() });
+                m.borrow_mut()
+                    .insert(id, WsState::Live { obj: obj.clone() });
             });
             let _ = WS_REQ_TX.with(|cell| {
                 cell.borrow().as_ref().map(|tx| {
@@ -10901,5 +10910,137 @@ mod tests {
             .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.value.unwrap(), "300x150");
+    }
+
+    // ---- WebSocket integration helpers (Phase 4) ----
+
+    /// Spawn a local echo WebSocket server on an ephemeral port. Returns
+    /// `(port, join_handle)`. Accepts exactly one connection and echoes frames.
+    fn spawn_echo_ws_server() -> (u16, std::thread::JoinHandle<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                use futures::{SinkExt, StreamExt};
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                tx.send(listener.local_addr().unwrap().port()).unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(msg)) = ws.next().await {
+                    if msg.is_close() {
+                        break;
+                    }
+                    if msg.is_text() || msg.is_binary() {
+                        ws.send(msg).await.unwrap();
+                    }
+                }
+            });
+        });
+        let port = rx.recv().unwrap();
+        (port, handle)
+    }
+
+    fn setup_ws_runtime() -> JsRuntime {
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<WsReqMsg>();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel::<WsEvent>();
+        rt.set_ws_channel(req_tx, ev_rx);
+        std::thread::spawn(move || crate::session::handle_ws_requests(req_rx, ev_tx));
+        rt
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_ws_onopen_and_echo() {
+        let (port, _srv) = spawn_echo_ws_server();
+        let mut rt = setup_ws_runtime();
+        let url = format!("ws://127.0.0.1:{port}");
+        let r = rt
+            .evaluate(&format!(
+                "var ws = new WebSocket('{url}');\
+                 ws.onopen = function() {{ ws.send('ping'); }};\
+                 ws.onmessage = function(e) {{ globalThis.__got = e.data; }};"
+            ))
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        let got = rt.evaluate("__got").await.unwrap();
+        assert_eq!(got.value, Some(serde_json::Value::String("ping".into())));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_ws_readystate_and_close() {
+        let (port, _srv) = spawn_echo_ws_server();
+        let mut rt = setup_ws_runtime();
+        let url = format!("ws://127.0.0.1:{port}");
+        rt.evaluate(&format!(
+            "var ws = new WebSocket('{url}');\
+             globalThis.__rs0 = ws.readyState;\
+             ws.onopen = function() {{ globalThis.__rs1 = ws.readyState; ws.close(1000, 'bye'); }};\
+             ws.onclose = function(e) {{ globalThis.__rs3 = ws.readyState; globalThis.__code = e.code; }};"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            rt.evaluate("__rs0").await.unwrap().value,
+            Some(serde_json::Value::Number(0.into()))
+        );
+        assert_eq!(
+            rt.evaluate("__rs1").await.unwrap().value,
+            Some(serde_json::Value::Number(1.into()))
+        );
+        assert_eq!(
+            rt.evaluate("__rs3").await.unwrap().value,
+            Some(serde_json::Value::Number(3.into()))
+        );
+        assert_eq!(
+            rt.evaluate("__code").await.unwrap().value,
+            Some(serde_json::Value::Number(1000.into()))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_ws_connect_failure() {
+        let mut rt = setup_ws_runtime();
+        // Port 1 is reserved and never accepts — connect fails fast.
+        let r = rt
+            .evaluate(
+                "var ws = new WebSocket('ws://127.0.0.1:1');\
+                 ws.onclose = function(e) { globalThis.__code = e.code; };",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        let code = rt.evaluate("__code").await.unwrap();
+        assert_eq!(code.value, Some(serde_json::Value::Number(1006.into())));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_ws_concurrent_sockets() {
+        let (port_a, _a) = spawn_echo_ws_server();
+        let (port_b, _b) = spawn_echo_ws_server();
+        let mut rt = setup_ws_runtime();
+        let url_a = format!("ws://127.0.0.1:{port_a}");
+        let url_b = format!("ws://127.0.0.1:{port_b}");
+        rt.evaluate(&format!(
+            "var a = new WebSocket('{url_a}');\
+             var b = new WebSocket('{url_b}');\
+             a.onopen = function() {{ a.send('A'); }};\
+             b.onopen = function() {{ b.send('B'); }};\
+             a.onmessage = function(e) {{ globalThis.__ga = e.data; }};\
+             b.onmessage = function(e) {{ globalThis.__gb = e.data; }};"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            rt.evaluate("__ga").await.unwrap().value,
+            Some(serde_json::Value::String("A".into()))
+        );
+        assert_eq!(
+            rt.evaluate("__gb").await.unwrap().value,
+            Some(serde_json::Value::String("B".into()))
+        );
     }
 }

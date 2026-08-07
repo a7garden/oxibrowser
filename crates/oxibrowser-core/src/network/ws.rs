@@ -6,9 +6,9 @@
 
 use futures::{SinkExt, StreamExt};
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::tungstenite::Message;
 
 /// Outbound command from the session bridge to a socket task.
 #[derive(Debug)]
@@ -80,8 +80,10 @@ pub async fn run_ws_connection(
         );
     }
 
-    let connect =
-        tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(req));
+    let connect = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(req),
+    );
     let ws_stream = match connect.await {
         Ok(Ok((ws, resp))) => {
             let protocol = resp
@@ -206,9 +208,7 @@ mod tests {
     async fn echo_server(port_tx: std::sync::mpsc::Sender<u16>) {
         // Bind an ephemeral port, publish it, then accept one connection.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        port_tx
-            .send(listener.local_addr().unwrap().port())
-            .unwrap();
+        port_tx.send(listener.local_addr().unwrap().port()).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
         while let Some(Ok(msg)) = ws.next().await {

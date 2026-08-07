@@ -11,8 +11,8 @@ use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
 use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg, WsReqMsg};
 use crate::network::HttpClient;
-use crate::network::ws::{run_ws_connection, WsCmd, WsEvent};
 use crate::network::cookie::CookieJar;
+use crate::network::ws::{WsCmd, WsEvent, run_ws_connection};
 use crate::page::Page;
 use parking_lot::RwLock;
 use percent_encoding::percent_decode_str;
@@ -252,7 +252,7 @@ fn handle_fetch_requests(
 /// `WS_EVENT_RX` via the shared event channel (id-routed). Mirrors
 /// `handle_fetch_requests` (try_recv + sleep polling — never a blocking recv
 /// inside the current-thread runtime, or spawned socket tasks stall).
-fn handle_ws_requests(
+pub(crate) fn handle_ws_requests(
     ws_req_rx: std::sync::mpsc::Receiver<WsReqMsg>,
     ws_event_tx: std::sync::mpsc::Sender<WsEvent>,
 ) {
@@ -300,7 +300,6 @@ fn handle_ws_requests(
 // ---------------------------------------------------------------------------
 // LocalStorage sync handler
 // ---------------------------------------------------------------------------
-
 /// Handle localStorage sync messages from the JS thread.
 ///
 /// Updates the Session's shared `local_storage` HashMap in response to
