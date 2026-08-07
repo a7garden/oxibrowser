@@ -875,10 +875,10 @@ impl DomSnapshot {
                 );
             }
         }
-        if let Some(parent) = self.nodes.get_mut(&dst_parent) {
-            if let Some(&new_id) = id_map.get(&src_root) {
-                parent.children.push(new_id);
-            }
+        if let Some(parent) = self.nodes.get_mut(&dst_parent)
+            && let Some(&new_id) = id_map.get(&src_root)
+        {
+            parent.children.push(new_id);
         }
     }
 

@@ -3625,7 +3625,7 @@ fn create_render_element_object(
                 .unwrap_or_default();
             if !event_type.is_empty() {
                 for cb in registry_get(node_id as u32, &event_type) {
-                    let _ = cb.call(&JsValue::undefined(), &[event.clone()], ctx);
+                    let _ = cb.call(&JsValue::undefined(), std::slice::from_ref(&event), ctx);
                 }
             }
             Ok(JsValue::from(true))
