@@ -153,7 +153,11 @@ async fn navigate_renders_mini_spa_on_dom_content_loaded() {
         .evaluate("document.querySelectorAll('#app li').length")
         .await
         .expect("evaluate count");
-    assert_eq!(count, serde_json::json!(3), "three <li> rendered by the bundle");
+    assert_eq!(
+        count,
+        serde_json::json!(3),
+        "three <li> rendered by the bundle"
+    );
 
     let text = tab
         .evaluate("document.getElementById('app').textContent")

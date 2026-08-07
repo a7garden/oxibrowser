@@ -772,7 +772,9 @@ impl Session {
                 let _in_flight = InFlightGuard::new(self.in_flight.clone());
                 match self.http_client.fetch_text(&full_url).await {
                     Ok(body) => s.source = body,
-                    Err(e) => tracing::warn!(src = %src, error = %e, "failed to fetch external script"),
+                    Err(e) => {
+                        tracing::warn!(src = %src, error = %e, "failed to fetch external script")
+                    }
                 }
             }
         }

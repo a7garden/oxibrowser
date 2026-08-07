@@ -1337,7 +1337,12 @@ fn fire_lifecycle_event(ctx: &mut Context, event_type: &str) {
 /// pending microtasks. If timers are scheduled for the future, sleep on the JS
 /// thread until the nearest deadline (capped at `budget` remaining from
 /// `start`), then loop. Bounded by 200 passes to guard interval storms.
-fn settle_to_idle(ctx: &mut Context, job_queue: &Rc<TokioJobQueue>, start: Instant, budget: Duration) {
+fn settle_to_idle(
+    ctx: &mut Context,
+    job_queue: &Rc<TokioJobQueue>,
+    start: Instant,
+    budget: Duration,
+) {
     for _pass in 0..200u32 {
         ctx.run_jobs();
         drain_timers(job_queue, ctx);
@@ -8192,8 +8197,8 @@ fn estimate_element_height(node: &DomNode) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::js::dom_snapshot::{ExecuteTiming, ScriptKind};
     use crate::frame::Frame;
+    use crate::js::dom_snapshot::{ExecuteTiming, ScriptKind};
     use url::Url;
 
     // --- Render façades (RenderDocument on the JS thread) ---
@@ -8252,7 +8257,8 @@ mod tests {
         }
     }
 
-    const NAV_HTML: &str = "<!DOCTYPE html><html><head></head><body><div id=\"app\"></div></body></html>";
+    const NAV_HTML: &str =
+        "<!DOCTYPE html><html><head></head><body><div id=\"app\"></div></body></html>";
 
     #[tokio::test]
     async fn test_nav_script_inline_executes() {
@@ -8303,7 +8309,11 @@ mod tests {
         .await
         .expect("set_document_with_scripts");
         let r = rt.evaluate("window.__survived").await.expect("evaluate");
-        assert_eq!(r.value, Some(serde_json::json!(1)), "later script ran despite throw");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!(1)),
+            "later script ran despite throw"
+        );
     }
 
     #[tokio::test]
@@ -8322,7 +8332,11 @@ mod tests {
         .await
         .expect("set_document_with_scripts");
         let r = rt.evaluate("window.__dcl").await.expect("evaluate");
-        assert_eq!(r.value, Some(serde_json::json!(1)), "DOMContentLoaded fired");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!(1)),
+            "DOMContentLoaded fired"
+        );
     }
 
     #[tokio::test]
@@ -8339,7 +8353,11 @@ mod tests {
         // The script captured readyState during execution ("interactive"); the
         // post-nav readyState must be "complete".
         let r = rt.evaluate("document.readyState").await.expect("evaluate");
-        assert_eq!(r.value, Some(serde_json::json!("complete")), "readyState complete");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!("complete")),
+            "readyState complete"
+        );
     }
 
     #[tokio::test]
@@ -8351,12 +8369,18 @@ mod tests {
             NAV_HTML,
             Some("https://example.com/"),
             (400, 300),
-            vec![classic("setTimeout(function () { window.__to = 'fired'; }, 50);")],
+            vec![classic(
+                "setTimeout(function () { window.__to = 'fired'; }, 50);",
+            )],
         )
         .await
         .expect("set_document_with_scripts");
         let r = rt.evaluate("window.__to").await.expect("evaluate");
-        assert_eq!(r.value, Some(serde_json::json!("fired")), "setTimeout fired in pump");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!("fired")),
+            "setTimeout fired in pump"
+        );
     }
 
     #[tokio::test]
@@ -8415,12 +8439,17 @@ mod tests {
             panic!("matchMedia eval failed: {:?}", r.exception);
         }
         let obj = r.value.expect("json object");
-        assert_eq!(obj["has"], serde_json::json!(true), "matchMedia is a function");
+        assert_eq!(
+            obj["has"],
+            serde_json::json!(true),
+            "matchMedia is a function"
+        );
         assert_eq!(obj["small"], serde_json::json!(true), "1280 >= 100");
         assert_eq!(obj["huge"], serde_json::json!(false), "1280 < 99999");
         assert_eq!(obj["maxok"], serde_json::json!(true), "1280 <= 5000");
         assert_eq!(
-            obj["dark"], serde_json::json!(false),
+            obj["dark"],
+            serde_json::json!(false),
             "non-width query defaults to false"
         );
     }
