@@ -611,9 +611,17 @@ impl Tab {
 
         loop {
             {
-                let session = self.inner.lock().await;
-                if let Some(page) = session.page()
-                    && page.root_frame().query_selector(selector).is_some()
+                let mut session = self.inner.lock().await;
+                // Check the LIVE (post-JS) DOM, not the static navigate-time
+                // snapshot. Each evaluate also drains microtasks + due timers,
+                // advancing the event loop so delayed renders surface during
+                // the wait — Playwright-style auto-waiting.
+                let expr = format!(
+                    "document.querySelector({}) !== null",
+                    serde_json::to_string(selector).unwrap_or_else(|_| "null".into())
+                );
+                if let Ok(r) = session.evaluate_js(&expr).await
+                    && r.value == Some(serde_json::Value::Bool(true))
                 {
                     return Ok(());
                 }

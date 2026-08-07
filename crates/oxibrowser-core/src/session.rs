@@ -833,9 +833,15 @@ impl Session {
         let start = std::time::Instant::now();
         let duration = std::time::Duration::from_millis(timeout_ms);
 
+        let expr = format!(
+            "document.querySelector({}) !== null",
+            serde_json::to_string(selector).unwrap_or_else(|_| "null".into())
+        );
         loop {
-            if let Some(page) = &self.active_page
-                && page.root_frame().query_selector(selector).is_some()
+            // Check the LIVE (post-JS) DOM. Each evaluate drains microtasks +
+            // due timers, advancing the event loop so delayed renders surface.
+            if let Ok(r) = self.evaluate_js(&expr).await
+                && r.value == Some(serde_json::Value::Bool(true))
             {
                 return Ok(());
             }

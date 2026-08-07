@@ -165,3 +165,44 @@ async fn navigate_renders_mini_spa_on_dom_content_loaded() {
         "rendered list text content"
     );
 }
+
+#[tokio::test]
+async fn wait_for_finds_element_present_only_in_live_dom() {
+    // A setTimeout creates #late ~80ms after load. The element exists only in
+    // the LIVE (post-JS) DOM, never in the static navigate-time snapshot.
+    // wait_for must observe the live DOM (Playwright-style) to find it; the
+    // old static-snapshot poll would time out.
+    let server = MockServer::start().await;
+    let html = concat!(
+        "<!DOCTYPE html><html><body>",
+        "<script>setTimeout(function () {",
+        "  var el = document.createElement('div');",
+        "  el.id = 'late';",
+        "  document.body.appendChild(el);",
+        "}, 80);</script>",
+        "</body></html>"
+    );
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(html)
+                .insert_header("content-type", "text/html"),
+        )
+        .mount(&server)
+        .await;
+
+    let tab = make_tab().await;
+    tab.goto(&format!("{}/", server.uri()))
+        .await
+        .expect("navigate");
+
+    tab.wait_for("#late", 2000)
+        .await
+        .expect("wait_for must find the element rendered into the live DOM");
+    let count = tab
+        .evaluate("document.querySelectorAll('#late').length")
+        .await
+        .expect("evaluate");
+    assert_eq!(count, serde_json::json!(1));
+}
