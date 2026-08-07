@@ -809,11 +809,8 @@ impl Tab {
     /// Render the current page as a PNG screenshot (text-based bitmap font).
     pub async fn screenshot(&self, width: u32) -> Result<Vec<u8>> {
         let started = std::time::Instant::now();
-        let session = self.inner.lock().await;
-        let png = match session.page() {
-            Some(page) => page.to_screenshot_png_live(width)?,
-            None => return Err(CoreError::PageNotLoaded),
-        };
+        let mut session = self.inner.lock().await;
+        let png = session.capture_screenshot_png(width).await?;
 
         self.emit(BrowserEvent::ScreenshotCaptured {
             tab_id: self.tab_id,
@@ -989,7 +986,7 @@ mod tests {
         let page = Page::from_html(url, html, 200, "text/html".to_string())
             .await
             .unwrap();
-        session.inject_dom_snapshot_for_test(page);
+        session.inject_dom_snapshot_for_test(page).await;
         Tab::new(session)
     }
 

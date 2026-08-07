@@ -3490,11 +3490,131 @@ fn create_render_element_object(
         .build();
 
     let click_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
-            // No mutation log in the render path; click is a render-time no-op.
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // Fire any registered click listeners directly (no mutation log).
+            for cb in registry_get(node_id as u32, "click") {
+                let evt = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(js_string!("type"), JsValue::from(JsString::from("click")), Attribute::all())
+                    .build();
+                let _ = cb.call(&JsValue::undefined(), &[JsValue::from(evt)], ctx);
+            }
             Ok(JsValue::undefined())
         })
     };
+
+    // ── layout + events + form helpers ──
+    let rd_rect = render_doc.clone();
+    let get_bounding_client_rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let (x, y, w, h) = rd_rect
+                .borrow()
+                .as_ref()
+                .map(|d| d.node_layout_rect(node_id))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0));
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("left"), JsValue::from(x), Attribute::all())
+                .property(js_string!("top"), JsValue::from(y), Attribute::all())
+                .property(js_string!("right"), JsValue::from(x + w), Attribute::all())
+                .property(js_string!("bottom"), JsValue::from(y + h), Attribute::all())
+                .property(js_string!("width"), JsValue::from(w), Attribute::all())
+                .property(js_string!("height"), JsValue::from(h), Attribute::all())
+                .property(js_string!("x"), JsValue::from(x), Attribute::all())
+                .property(js_string!("y"), JsValue::from(y), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    let ael_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(cb) = args.get(1).and_then(|v| v.as_object().cloned()) {
+                registry_add(node_id as u32, &event_type, cb);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let rel_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            registry_remove(node_id as u32, &event_type);
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let dispatch_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event = args.first().cloned().unwrap_or(JsValue::undefined());
+            let event_type = event
+                .as_object()
+                .and_then(|o| o.get(js_string!("type"), ctx).ok())
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_default();
+            if !event_type.is_empty() {
+                for cb in registry_get(node_id as u32, &event_type) {
+                    let _ = cb.call(&JsValue::undefined(), &[event.clone()], ctx);
+                }
+            }
+            Ok(JsValue::from(true))
+        })
+    };
+
+    let make_noop = || {
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) }
+    };
+    // value / checked / href / src (attribute-backed)
+    let attr_getter = |rd: Rc<RefCell<Option<RenderDocument>>>, name: &'static str| {
+        unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                let v = rd
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.node_attr(node_id, name))
+                    .unwrap_or_default();
+                Ok(JsValue::from(JsString::from(v.as_str())))
+            })
+        }
+    };
+    let val_get_fn = attr_getter(render_doc.clone(), "value");
+    let val_getter_fn = FunctionObjectBuilder::new(ctx.realm(), val_get_fn)
+        .name(js_string!("get value"))
+        .build();
+    let rd_val_set = render_doc.clone();
+    let val_set_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let v = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_val_set.borrow_mut().as_mut() {
+                doc.set_attribute(node_id, "value", &v);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let val_setter_fn = FunctionObjectBuilder::new(ctx.realm(), val_set_fn)
+        .name(js_string!("set value"))
+        .build();
+
+    let href_get_fn = attr_getter(render_doc.clone(), "href");
+    let href_getter_fn = FunctionObjectBuilder::new(ctx.realm(), href_get_fn)
+        .name(js_string!("get href"))
+        .build();
+    let src_get_fn = attr_getter(render_doc.clone(), "src");
+    let src_getter_fn = FunctionObjectBuilder::new(ctx.realm(), src_get_fn)
+        .name(js_string!("get src"))
+        .build();
+
 
     let obj = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
@@ -3523,6 +3643,13 @@ fn create_render_element_object(
         .function(append_child_fn, js_string!("appendChild"), 1)
         .function(remove_fn, js_string!("remove"), 0)
         .function(click_fn, js_string!("click"), 0)
+        .function(get_bounding_client_rect_fn, js_string!("getBoundingClientRect"), 0)
+        .function(ael_fn, js_string!("addEventListener"), 2)
+        .function(rel_fn, js_string!("removeEventListener"), 2)
+        .function(dispatch_fn, js_string!("dispatchEvent"), 1)
+        .function(make_noop(), js_string!("focus"), 0)
+        .function(make_noop(), js_string!("blur"), 0)
+        .function(make_noop(), js_string!("scrollIntoView"), 0)
         .accessor(
             js_string!("style"),
             Some(style_getter_fn),
@@ -3545,6 +3672,24 @@ fn create_render_element_object(
             js_string!("className"),
             Some(cls_getter_fn),
             Some(cls_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("value"),
+            Some(val_getter_fn),
+            Some(val_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("href"),
+            Some(href_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("src"),
+            Some(src_getter_fn),
+            None,
             Attribute::all(),
         )
         .build();

@@ -254,6 +254,29 @@ impl RenderDocument {
         self.doc.mutate().remove_node(node);
     }
 
+    /// The laid-out box of `node` in CSS pixels: `(x, y, width, height)`.
+    ///
+    /// Valid only after a resolve (construction or `capture_png` both resolve).
+    /// Returns zeros for unknown nodes or non-finite layouts.
+    pub fn node_layout_rect(&self, node: NodeId) -> (f64, f64, f64, f64) {
+        let Some(n) = self.doc.get_node(node) else {
+            return (0.0, 0.0, 0.0, 0.0);
+        };
+        let loc = n.final_layout.location;
+        let size = n.final_layout.size;
+        let (x, y, w, h) = (
+            loc.x as f64,
+            loc.y as f64,
+            size.width as f64,
+            size.height as f64,
+        );
+        if [x, y, w, h].iter().all(|v| v.is_finite()) {
+            (x, y, w, h)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        }
+    }
+
     // ── Capture ────────────────────────────────────────────────────────────
 
     /// The laid-out content size in CSS pixels (from the root element's
