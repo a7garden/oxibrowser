@@ -1011,7 +1011,9 @@ fn js_thread_loop(
                 // top-level `fetch().then(cb)` must resolve before the result
                 // is returned. Gate on pending fetches so a top-level
                 // setInterval(0) doesn't over-fire during this pump.
-                if PENDING_FETCH.with(|m| !m.borrow().is_empty()) {
+                if PENDING_FETCH.with(|m| !m.borrow().is_empty())
+                    || PENDING_WS.with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)))
+                {
                     settle_to_idle(&mut ctx, &job_queue, start, Duration::from_millis(timeout));
                 }
 
@@ -1503,7 +1505,9 @@ fn settle_to_idle(
         let pending_timers = job_queue.timer_count();
         let pending_microtasks = job_queue.microtask_count();
         let pending_fetch = PENDING_FETCH.with(|m| !m.borrow().is_empty());
-        if pending_timers == 0 && pending_microtasks == 0 && !pending_fetch {
+        let pending_ws =
+            PENDING_WS.with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)));
+        if pending_timers == 0 && pending_microtasks == 0 && !pending_fetch && !pending_ws {
             return;
         }
         // Only microtasks pending — run_jobs on the next pass drains them.
@@ -1753,10 +1757,204 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
         }
     }
 }
+/// Drain all available WebSocket events and fire the matching JS callbacks.
+/// Collects into a Vec first to release the `WS_EVENT_RX` borrow before
+/// re-entering boa (settling may issue more JS / WS / fetch).
+fn drain_ws_events(ctx: &mut Context) {
+    let events: Vec<WsEvent> = WS_EVENT_RX.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        let Some(rx) = borrowed.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    });
+    for ev in events {
+        match ev {
+            WsEvent::Open {
+                id,
+                protocol,
+                extensions,
+            } => settle_ws_open(id, protocol, extensions, ctx),
+            WsEvent::Message { id, data } => settle_ws_message(id, data, ctx),
+            WsEvent::Close {
+                id,
+                code,
+                reason,
+                was_clean,
+            } => settle_ws_close(id, code, reason, was_clean, ctx),
+            WsEvent::Error { id, message } => settle_ws_error(id, message, ctx),
+        }
+    }
+}
+
+/// Fire the on-property + the hidden `__listeners_<type>` array for one event.
+fn ws_fire(obj: &JsObject, type_name: &str, event: JsValue, ctx: &mut Context) {
+    let type_key = JsString::from(type_name);
+    // on-property
+    if let Ok(cb) = obj.get(type_key.clone(), ctx)
+        && !cb.is_null()
+        && !cb.is_undefined()
+        && let Some(f) = cb.as_object()
+        && f.is_callable()
+    {
+        let _ = f.call(&JsValue::undefined(), &[event.clone()], ctx);
+    }
+    // listener vec
+    let lkey = JsString::from(format!("__listeners_{type_name}").as_str());
+    if let Ok(arr_val) = obj.get(lkey, ctx)
+        && let Some(arr_obj) = arr_val.as_object()
+        && let Ok(arr) = JsArray::from_object(arr_obj.clone())
+        && let Ok(len) = arr.length(ctx)
+    {
+        for i in 0..len {
+            if let Ok(cb) = arr.get(i, ctx)
+                && let Some(f) = cb.as_object()
+                && f.is_callable()
+            {
+                let _ = f.call(&JsValue::undefined(), &[event.clone()], ctx);
+            }
+        }
+    }
+}
+
+fn settle_ws_open(id: u64, protocol: String, extensions: String, ctx: &mut Context) {
+    let obj = PENDING_WS.with(|m| {
+        m.borrow()
+            .get(&id)
+            .and_then(|s| match s {
+                WsState::Live { obj } => Some(obj.clone()),
+                _ => None,
+            })
+    });
+    let Some(obj) = obj else {
+        return;
+    };
+    let _ = obj.set(js_string!("readyState"), JsValue::from(1), true, ctx);
+    let _ = obj.set(
+        js_string!("protocol"),
+        JsValue::from(JsString::from(protocol.as_str())),
+        true,
+        ctx,
+    );
+    let _ = obj.set(
+        js_string!("extensions"),
+        JsValue::from(JsString::from(extensions.as_str())),
+        true,
+        ctx,
+    );
+    let event = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("type"),
+            JsValue::from(JsString::from("open")),
+            Attribute::all(),
+        )
+        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .build();
+    ws_fire(&obj, "open", event.into(), ctx);
+}
+
+fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
+    let obj = PENDING_WS.with(|m| {
+        m.borrow()
+            .get(&id)
+            .and_then(|s| match s {
+                WsState::Live { obj } => Some(obj.clone()),
+                _ => None,
+            })
+    });
+    let Some(obj) = obj else {
+        return;
+    };
+    let data_val = match data {
+        WsData::Text(t) => JsValue::from(JsString::from(t.as_str())),
+        WsData::Binary(b) => {
+            // Binary arrives as an array of byte values (binaryType-driven
+            // ArrayBuffer construction is refined in the binary test task).
+            let arr = JsArray::new(ctx);
+            for &byte in &b {
+                let _ = arr.push(JsValue::from(byte), ctx);
+            }
+            JsValue::from(arr)
+        }
+    };
+    let event = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("type"),
+            JsValue::from(JsString::from("message")),
+            Attribute::all(),
+        )
+        .property(js_string!("data"), data_val, Attribute::all())
+        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .build();
+    ws_fire(&obj, "message", event.into(), ctx);
+}
+
+fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mut Context) {
+    let obj = PENDING_WS.with(|m| {
+        let mut borrowed = m.borrow_mut();
+        let obj = borrowed.get(&id).and_then(|s| match s {
+            WsState::Live { obj } => Some(obj.clone()),
+            _ => None,
+        });
+        borrowed.insert(id, WsState::Closed);
+        obj
+    });
+    let Some(obj) = obj else {
+ return; };
+    let _ = obj.set(js_string!("readyState"), JsValue::from(3), true, ctx);
+    let event = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("type"),
+            JsValue::from(JsString::from("close")),
+            Attribute::all(),
+        )
+        .property(js_string!("code"), JsValue::from(code), Attribute::all())
+        .property(
+            js_string!("reason"),
+            JsValue::from(JsString::from(reason.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("wasClean"),
+            JsValue::from(was_clean),
+            Attribute::all(),
+        )
+        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .build();
+    ws_fire(&obj, "close", event.into(), ctx);
+}
+
+fn settle_ws_error(id: u64, _message: String, ctx: &mut Context) {
+    let obj = PENDING_WS.with(|m| {
+        m.borrow()
+            .get(&id)
+            .and_then(|s| match s {
+                WsState::Live { obj } => Some(obj.clone()),
+                _ => None,
+            })
+    });
+    let Some(obj) = obj else {
+        return;
+    };
+    let event = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("type"),
+            JsValue::from(JsString::from("error")),
+            Attribute::all(),
+        )
+        .property(js_string!("target"), JsValue::from(obj.clone()), Attribute::all())
+        .build();
+    ws_fire(&obj, "error", event.into(), ctx);
+}
 fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
     // Settle any fetch/XHR responses first — they may enqueue microtasks or
     // timers that the rest of this drain must then process (Phase 3).
     drain_pending_fetch_responses(ctx);
+    drain_ws_events(ctx);
     let mut iterations = 0u32;
     loop {
         let due = queue.pop_due_timers();
