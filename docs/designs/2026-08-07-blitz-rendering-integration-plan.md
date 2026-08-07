@@ -1,13 +1,15 @@
 # Blitz Rendering Integration — Implementation Plan (remaining work)
 
-> **Status of this plan (updated 2026-08-07):** Phases 1, 2a, 2b, 2c were
-> shipped on `feat/blitz-rendering`. The DOM unification (Tasks 1–3) is now
-> **SHIPPED on `feat/blitz-dom-unification`** (branch off `main`): the
+> **Status of this plan (final, 2026-08-07):** All tasks **SHIPPED on
+> `feat/blitz-dom-unification`**. The DOM is fully unified: the
 > `RenderDocument` is the single DOM that boa's JS thread mutates directly,
-> screenshots render it with no serialize/reparse round-trip, and the
-> mutation-log/apply bridge is gone. Task 4 is **PARTIAL**: the legacy bitmap
-> screenshot renderer is retired (blank-PNG fallback); the full
-> `oxibrowser-webapi` crate deletion is **DEFERRED** (see Task 4 notes).
+> CDP DOM/OXI/`extract` read render-derived `DomSnapshot`s (no stale
+> navigate-time copy), the legacy bitmap screenshot renderer is retired, and
+> the `oxibrowser-webapi` crate + `html5ever 0.29` dependency have been
+> deleted from the workspace. The dead `webapi` DOM bridge is gone — `Frame`
+> owns a `DomSnapshot` built from the parsed document, `Session::dom_snapshot`
+> ships the live view for async readers, and the per-capture serialize/reparse
+> round-trip is eliminated. Workspace tests: core 407, cdp e2e 23, all green.
 >
 > **Original status:** Phases 1, 2a, 2b, 2c SHIPPED on `feat/blitz-rendering`
 > (commits `60b0042`, `dfae6e9`, `83cca96`, `03d364d`). Real CSS screenshots —

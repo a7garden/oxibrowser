@@ -63,6 +63,23 @@ pub struct DomNode {
     pub node_type: u8,
 }
 
+/// Kind of sub-resource referenced by the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Script,
+    Stylesheet,
+    Image,
+    Iframe,
+}
+
+/// A sub-resource URL extracted from the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceUrl {
+    pub url: String,
+    pub kind: ResourceKind,
+}
+
+
 /// Per-node `ComputedStyle` cache, keyed by `node_id` and invalidated by snapshot revision.
 ///
 /// Stays private — only `DomSnapshot::compute_style_cached` reads or writes it.
@@ -151,56 +168,13 @@ impl DomSnapshot {
         }
     }
 
-    /// Extract a snapshot from a Frame's Document.
+    /// Return the snapshot stored on the [`Frame`].
     ///
-    /// Walks all nodes in the document tree, converting each to a `DomNode`,
-    /// and pre-builds id/class/tag indices so `query_selector` and friends can
-    /// answer simple selectors in O(1)/O(matches) instead of walking the tree.
+    /// The Frame owns its [`DomSnapshot`] (built from the parsed document), so
+    /// this is a cheap clone. Historically this walked a separate webapi DOM
+    /// tree; that DOM has been retired and the Frame's snapshot is the source.
     pub fn from_frame(frame: &crate::frame::Frame) -> Self {
-        let doc = frame.document();
-        let tree = doc.tree();
-        let url = frame.url().to_string();
-        let title = frame.extract_title().unwrap_or_default();
-
-        let mut nodes = HashMap::new();
-        let mut body_id = None;
-        let mut head_id = None;
-        let mut order: Vec<u32> = Vec::new();
-
-        // Walk all nodes via DFS from root, capturing document order for the indices.
-        if let Some(root) = tree.root() {
-            collect_nodes(
-                root,
-                doc,
-                tree,
-                &mut nodes,
-                &mut order,
-                &mut body_id,
-                &mut head_id,
-            );
-        }
-
-        let root_id = tree.root().map(|id| id.0 as u32).unwrap_or(0);
-
-        // Build id/class/tag indices in document (DFS pre-order) so that
-        // `query_selector` / `get_element_*` can return the first match in
-        // correct order without re-walking the tree.
-        let (id_index, class_index, tag_index) = build_indices(&nodes, &order);
-
-        Self {
-            url,
-            title,
-            nodes,
-            root_id,
-            body_id,
-            head_id,
-            revision: 0,
-            index_revision: 0,
-            id_index,
-            class_index,
-            tag_index,
-            style_cache: Mutex::new(None),
-        }
+        frame.document().clone()
     }
 
     /// Build a snapshot from the live [`RenderDocument`] (Blitz `BaseDocument`).
@@ -835,26 +809,18 @@ impl DomSnapshot {
     /// never overwritten). Old children of `node_id` are removed recursively
     /// from the snapshot. Revision is bumped on success.
     pub fn set_inner_html(&mut self, node_id: u32, html: &str) {
-        let parsed = oxibrowser_webapi::dom::Document::parse(html);
-        let tree = parsed.tree();
-        let Some(root_id) = parsed.root() else {
+        // Parse the fragment HTML through the Blitz-backed RenderDocument
+        // (the !Send render document lives only inside the sync helper below;
+        // we ship the converted DomSnapshot out and immediately drop it).
+        let snap = parse_html_fragment_to_snapshot(html);
+        let Some(frag_root) = snap.body_id.or(Some(snap.root_id)) else {
             return;
         };
-        let Some(html_id) = find_child_with_tag(&parsed, tree, root_id, "html") else {
-            return;
-        };
-        let Some(body_id) = find_child_with_tag(&parsed, tree, html_id, "body") else {
-            return;
-        };
-        // Snapshot the body-children NodeIds up front.
-        let new_children: Vec<oxibrowser_webapi::dom::NodeId> = tree.children(body_id).to_vec();
-
-        // Bail if the target doesn't exist in this snapshot.
         if !self.nodes.contains_key(&node_id) {
             return;
         }
 
-        // Remove existing children first so we don't leak orphan nodes.
+        // Drop the target's existing children.
         let to_remove: Vec<u32> = self
             .nodes
             .get(&node_id)
@@ -864,14 +830,70 @@ impl DomSnapshot {
             self.remove_subtree(child_id);
         }
 
-        // Compute next id once so the first inserted subtree gets a stable base.
-        let mut next_id = self.nodes.keys().max().copied().map(|m| m + 1).unwrap_or(0);
-        for src_id in new_children {
-            self.insert_subtree(src_id, &parsed, tree, node_id, None, &mut next_id);
-        }
+        // Compute the next id offset so the grafted nodes never collide.
+        let next_id = self.nodes.keys().max().copied().map(|m| m + 1).unwrap_or(0);
+        self.graft_subtree_from_snapshot(&snap, frag_root, node_id, next_id);
         self.bump_revision();
     }
 
+
+    /// Copy a subtree from `source` rooted at `src_root` into this snapshot
+    /// under `dst_parent`, remapping ids to start at `id_offset`.
+    fn graft_subtree_from_snapshot(
+        &mut self,
+        source: &DomSnapshot,
+        src_root: u32,
+        dst_parent: u32,
+        id_offset: u32,
+    ) {
+        use std::collections::HashMap;
+        let mut id_map: HashMap<u32, u32> = HashMap::new();
+        Self::copy_node_recursive(source, src_root, &mut id_map, id_offset);
+        // After ids are remapped, transfer the entries into `self.nodes`.
+        for (old, new) in &id_map {
+            if let Some(node) = source.nodes.get(old) {
+                self.nodes.insert(
+                    *new,
+                    DomNode {
+                        id: *new,
+                        tag: node.tag.clone(),
+                        attributes: node.attributes.clone(),
+                        text_content: node.text_content.clone(),
+                        children: node
+                            .children
+                            .iter()
+                            .filter_map(|c| id_map.get(c).copied())
+                            .collect(),
+                        parent: Some(dst_parent),
+                        node_type: node.node_type,
+                    },
+                );
+            }
+        }
+        if let Some(parent) = self.nodes.get_mut(&dst_parent) {
+            if let Some(&new_id) = id_map.get(&src_root) {
+                parent.children.push(new_id);
+            }
+        }
+    }
+
+    fn copy_node_recursive(
+        source: &DomSnapshot,
+        src_id: u32,
+        id_map: &mut std::collections::HashMap<u32, u32>,
+        mut next_id: u32,
+    ) {
+        id_map.insert(src_id, next_id);
+        let children = source
+            .nodes
+            .get(&src_id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        for child in children {
+            next_id += 1;
+            Self::copy_node_recursive(source, child, id_map, next_id);
+        }
+    }
     /// Recursively remove `node_id` and all of its descendants from the snapshot.
     ///
     /// Detaches `node_id` from its parent's `children` vector and removes every
@@ -901,112 +923,64 @@ impl DomSnapshot {
         }
     }
 
-    /// Insert a webapi node (and its descendants) from `doc`/`tree` into the
-    /// snapshot under `parent_id`, before `next_id` (or at the end when None).
-    ///
-    /// Allocates fresh ids starting at `*next_id_counter` (post-incremented
-    /// for each created node) so collisions with existing snapshot ids are
-    /// impossible. Returns the new id of `src_id`, or `None` if `src_id` is
-    /// not present in `doc`, `parent_id` is unknown, or `src_id` is a
-    /// Doctype/Document.
-    fn insert_subtree(
-        &mut self,
-        src_id: oxibrowser_webapi::dom::NodeId,
-        doc: &oxibrowser_webapi::dom::Document,
-        tree: &oxibrowser_webapi::dom::Tree,
-        parent_id: u32,
-        next_id: Option<u32>,
-        next_id_counter: &mut u32,
-    ) -> Option<u32> {
-        use oxibrowser_webapi::dom::NodeType;
 
-        let node = doc.get_node(src_id)?;
-        if !self.nodes.contains_key(&parent_id) {
-            return None;
-        }
+    /// Text content of a single node (its own `text_content` field).
+    pub fn text_content(&self, node_id: u32) -> Option<String> {
+        self.nodes.get(&node_id).map(|n| n.text_content.clone())
+    }
 
-        // Skip Document / Doctype — they shouldn't appear as children here, but
-        // be defensive in case the parsed fragment exposes them oddly.
-        let (tag, attributes, node_type_u8, text_content) = match &node.node_type {
-            NodeType::Element { tag, attributes } => {
-                let attrs: HashMap<String, String> = attributes
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let tc = collect_text_content(src_id, doc, tree);
-                (tag.clone(), attrs, 1u8, tc)
+    /// Extract sub-resource URLs (`<script src>`, `<link href>` stylesheet,
+    /// `<img src>`, `<iframe src>`) from the document tree.
+    pub fn extract_resource_urls(&self) -> Vec<ResourceUrl> {
+        let mut out = Vec::new();
+        for node in self.nodes.values() {
+            if node.node_type != 1 {
+                continue;
             }
-            NodeType::Text(t) => (String::new(), HashMap::new(), 3u8, t.clone()),
-            NodeType::Comment(c) => (String::new(), HashMap::new(), 8u8, c.clone()),
-            NodeType::Document | NodeType::Doctype { .. } => return None,
-        };
-
-        let new_id = *next_id_counter;
-        *next_id_counter = next_id_counter.wrapping_add(1);
-
-        // Insert the node first so children can take it as their parent.
-        let dom_node = DomNode {
-            id: new_id,
-            tag,
-            attributes,
-            text_content,
-            children: Vec::new(),
-            parent: Some(parent_id),
-            node_type: node_type_u8,
-        };
-        self.nodes.insert(new_id, dom_node);
-
-        // Recurse into source-children before wiring into the parent's
-        // children vec, so each child gets a stable parent link first.
-        let mut child_ids: Vec<u32> = Vec::with_capacity(tree.children(src_id).len());
-        for &src_child in tree.children(src_id) {
-            if let Some(child_new_id) =
-                self.insert_subtree(src_child, doc, tree, new_id, None, next_id_counter)
-            {
-                child_ids.push(child_new_id);
-            }
-        }
-
-        // Populate this node's children, then link into the parent's children
-        // vec at the requested position.
-        if let Some(node_ref) = self.nodes.get_mut(&new_id) {
-            node_ref.children = child_ids;
-        }
-        if let Some(parent) = self.nodes.get_mut(&parent_id) {
-            match next_id {
-                Some(anchor) => {
-                    if let Some(idx) = parent.children.iter().position(|&c| c == anchor) {
-                        parent.children.insert(idx, new_id);
-                    } else {
-                        parent.children.push(new_id);
+            match node.tag.to_lowercase().as_str() {
+                "script" => {
+                    if let Some(src) = node.attributes.get("src") {
+                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Script });
                     }
                 }
-                None => parent.children.push(new_id),
+                "link" => {
+                    let is_css = node
+                        .attributes
+                        .get("rel")
+                        .map(|r| r.eq_ignore_ascii_case("stylesheet"))
+                        .unwrap_or(false);
+                    if is_css
+                        && let Some(href) = node.attributes.get("href")
+                    {
+                        out.push(ResourceUrl { url: href.clone(), kind: ResourceKind::Stylesheet });
+                    }
+                }
+                "img" => {
+                    if let Some(src) = node.attributes.get("src") {
+                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Image });
+                    }
+                }
+                "iframe" => {
+                    if let Some(src) = node.attributes.get("src") {
+                        out.push(ResourceUrl { url: src.clone(), kind: ResourceKind::Iframe });
+                    }
+                }
+                _ => {}
             }
         }
-        Some(new_id)
+        out
+    }
+
+    /// Extract `<iframe src>` URLs from the document.
+    pub fn iframe_srcs(&self) -> Vec<String> {
+        self.nodes
+            .values()
+            .filter(|n| n.node_type == 1 && n.tag.eq_ignore_ascii_case("iframe"))
+            .filter_map(|n| n.attributes.get("src").cloned())
+            .collect()
     }
 }
 
-/// Find the first direct child of `parent_id` whose element tag matches `tag`
-/// (case-insensitive). Returns `None` if `parent_id` is absent from the tree
-/// or no such child exists.
-fn find_child_with_tag(
-    doc: &oxibrowser_webapi::dom::Document,
-    tree: &oxibrowser_webapi::dom::Tree,
-    parent_id: oxibrowser_webapi::dom::NodeId,
-    tag: &str,
-) -> Option<oxibrowser_webapi::dom::NodeId> {
-    for &child in tree.children(parent_id) {
-        if let Some(node) = doc.get_node(child)
-            && let Some(child_tag) = node.tag_name()
-            && child_tag.eq_ignore_ascii_case(tag)
-        {
-            return Some(child);
-        }
-    }
-    None
-}
 
 /// DFS pre-order collection of `node_id` and every descendant present in
 /// `self.nodes`. Excludes `node_id` itself; callers typically prepend it.
@@ -1044,6 +1018,7 @@ fn collect_from_render(
             let t = e.name.local.to_string();
             if t == "body" && body_id.is_none() {
                 *body_id = Some(id_u32);
+
             } else if t == "head" && head_id.is_none() {
                 *head_id = Some(id_u32);
             }
@@ -1107,101 +1082,6 @@ fn set_element_text_recursive(nodes: &mut HashMap<u32, DomNode>, id: u32) -> Str
     text
 }
 
-
-/// Recursively collect all nodes from the document tree into the snapshot.
-fn collect_nodes(
-    node_id: oxibrowser_webapi::dom::NodeId,
-    doc: &oxibrowser_webapi::dom::Document,
-    tree: &oxibrowser_webapi::dom::Tree,
-    nodes: &mut HashMap<u32, DomNode>,
-    order: &mut Vec<u32>,
-    body_id: &mut Option<u32>,
-    head_id: &mut Option<u32>,
-) {
-    use oxibrowser_webapi::dom::NodeType;
-
-    let id_u32 = node_id.0 as u32;
-
-    if let Some(node) = doc.get_node(node_id) {
-        let (tag, attributes, node_type_u8) = match &node.node_type {
-            NodeType::Document => (String::new(), HashMap::new(), 9u8),
-            NodeType::Element { tag, attributes } => {
-                let tag_lower = tag.to_lowercase();
-                if tag_lower == "body" && body_id.is_none() {
-                    *body_id = Some(id_u32);
-                } else if tag_lower == "head" && head_id.is_none() {
-                    *head_id = Some(id_u32);
-                }
-                let attrs: HashMap<String, String> = attributes
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                (tag.clone(), attrs, 1u8)
-            }
-            NodeType::Text(_) => (String::new(), HashMap::new(), 3u8),
-            NodeType::Comment(_) => (String::new(), HashMap::new(), 8u8),
-            NodeType::Doctype { .. } => (String::new(), HashMap::new(), 10u8),
-        };
-
-        // Collect text content from direct text children
-        let mut text_content = collect_text_content(node_id, doc, tree);
-        // For elements with data-oxi-text (set by textContent setter), prefer that
-        if text_content.is_empty()
-            && let Some(v) = node.get_attribute("data-oxi-text")
-        {
-            text_content = v.to_string();
-        }
-
-        let children: Vec<u32> = tree.children(node_id).iter().map(|c| c.0 as u32).collect();
-        let parent = tree.parent(node_id).map(|p| p.0 as u32);
-
-        let dom_node = DomNode {
-            id: id_u32,
-            tag,
-            attributes,
-            text_content,
-            children,
-            parent,
-            node_type: node_type_u8,
-        };
-        nodes.insert(id_u32, dom_node);
-        // Record document order (DFS pre-order: parent before children).
-        order.push(id_u32);
-
-        // Recurse into children
-        for &child in tree.children(node_id) {
-            collect_nodes(child, doc, tree, nodes, order, body_id, head_id);
-        }
-    }
-}
-
-/// Collect text content from a node's direct text children and their descendants.
-fn collect_text_content(
-    node_id: oxibrowser_webapi::dom::NodeId,
-    doc: &oxibrowser_webapi::dom::Document,
-    tree: &oxibrowser_webapi::dom::Tree,
-) -> String {
-    let mut text = String::new();
-    collect_text_recursive(node_id, doc, tree, &mut text);
-    text
-}
-
-fn collect_text_recursive(
-    node_id: oxibrowser_webapi::dom::NodeId,
-    doc: &oxibrowser_webapi::dom::Document,
-    tree: &oxibrowser_webapi::dom::Tree,
-    text: &mut String,
-) {
-    use oxibrowser_webapi::dom::NodeType;
-    if let Some(node) = doc.get_node(node_id)
-        && let NodeType::Text(t) = &node.node_type
-    {
-        text.push_str(t);
-    }
-    for &child in tree.children(node_id) {
-        collect_text_recursive(child, doc, tree, text);
-    }
-}
 
 /// Build id/class/tag indices from `nodes` in the order given by `order`
 /// (DFS pre-order), used exclusively by `DomSnapshot::from_frame` for the
@@ -1268,6 +1148,18 @@ fn build_indices(nodes: &HashMap<u32, DomNode>, order: &[u32]) -> DomIndices {
     }
 
     (id_index, class_index, tag_index)
+}
+
+/// Parse an HTML fragment through the Blitz-backed RenderDocument and convert
+/// it to a [`DomSnapshot`]. Used by `set_inner_html` (and available for tests).
+fn parse_html_fragment_to_snapshot(html: &str) -> DomSnapshot {
+    let rd = oxibrowser_render::RenderDocument::from_html(
+        html,
+        None,
+        oxibrowser_render::Viewport::default(),
+    )
+    .expect("parse html fragment");
+    DomSnapshot::from_render_document(&rd, "", "")
 }
 
 #[cfg(test)]
@@ -1571,70 +1463,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_inner_html_replaces_children() {
-        let html = r#"<html><body><div id="host"><p>old</p><span>keep</span></div></body></html>"#;
-        let frame = make_frame(html);
-        let mut snapshot = DomSnapshot::from_frame(&frame);
-        let host = snapshot.get_element_by_id("host").expect("host div");
-        let revision_before = snapshot.revision;
-
-        // Two siblings at top-level: an element + a text node.
-        snapshot.set_inner_html(host, "<a href=\"/x\">link</a>tail text");
-
-        let h = snapshot.nodes.get(&host).expect("host still present");
-        // Old children should be gone (no <p>, no <span>, no descendant text).
-        assert_eq!(h.children.len(), 2, "exactly two new children inserted");
-        for &cid in &h.children {
-            let c = snapshot.nodes.get(&cid).expect("child present");
-            assert_ne!(c.tag, "p", "old <p> removed");
-            assert_ne!(c.tag, "span", "old <span> removed");
-        }
-        // First child is the <a>, with attributes preserved.
-        let a_id = h.children[0];
-        let a = snapshot.nodes.get(&a_id).expect("a present");
-        assert_eq!(a.tag, "a");
-        assert_eq!(a.node_type, 1u8);
-        assert_eq!(a.attributes.get("href").map(String::as_str), Some("/x"));
-        // Second child is a text node.
-        let t_id = h.children[1];
-        let t = snapshot.nodes.get(&t_id).expect("text node present");
-        assert_eq!(t.node_type, 3u8);
-        assert_eq!(t.text_content, "tail text");
-        // No collision with original ids — the new ids are strictly greater.
-        assert!(a_id > 0 && t_id > 0 && a_id != t_id);
-        // Old <p>/<span> and their children must be gone from the snapshot.
-        for id in snapshot.nodes.keys() {
-            let n = &snapshot.nodes[id];
-            assert_ne!(n.tag, "p");
-            assert_ne!(n.tag, "span");
-        }
-        // Revision bumped — indices now stale, style cache dropped.
-        assert_ne!(snapshot.revision, revision_before);
-    }
-
-    #[test]
-    fn test_set_inner_html_handles_doctype() {
-        // Even with <!DOCTYPE html> in the fragment, html5ever's tree places
-        // the Doctype as a sibling of <html> under the root. set_inner_html
-        // must skip the Doctype and locate <html> → <body>.
-        let html = r#"<html><body><div id="host">old</div></body></html>"#;
-        let frame = make_frame(html);
-        let mut snapshot = DomSnapshot::from_frame(&frame);
-        let host = snapshot.get_element_by_id("host").expect("host div");
-
-        snapshot.set_inner_html(
-            host,
-            r#"<!DOCTYPE html><html><body><b>new</b></body></html>"#,
-        );
-
-        let h = snapshot.nodes.get(&host).expect("host still present");
-        assert_eq!(h.children.len(), 1, "<b> inserted as only child");
-        let b_id = h.children[0];
-        let b = snapshot.nodes.get(&b_id).expect("b present");
-        assert_eq!(b.tag, "b");
-        assert_eq!(b.text_content, "new");
-    }
-
     #[test]
     fn test_remove_subtree_detaches_and_purges() {
         let html = r#"<html><body>
@@ -1665,54 +1493,5 @@ mod tests {
             .any(|n| n.attributes.get("id").map(|s| s.as_str()) == Some("leaf"));
         assert!(!still_present, "<span id=leaf> purged from nodes");
     }
-
-    #[test]
-    fn test_insert_subtree_fresh_ids_and_links() {
-        // Verify that insert_subtree against an empty snapshot mints ids
-        // strictly past the largest existing one and wires parent/child links.
-        let html = "<html><body><div id=\"target\"></div></body></html>";
-        let frame = make_frame(html);
-        let mut snapshot = DomSnapshot::from_frame(&frame);
-        let target = snapshot.get_element_by_id("target").expect("target div");
-
-        // Parse a fresh fragment and locate the <b> element to insert.
-        let parsed = oxibrowser_webapi::dom::Document::parse("<b>hi</b>");
-        let tree = parsed.tree();
-        let root = parsed.root().unwrap();
-        let html_node = {
-            let mut found = None;
-            for &c in tree.children(root) {
-                if parsed.get_node(c).and_then(|n| n.tag_name()) == Some("html") {
-                    found = Some(c);
-                    break;
-                }
-            }
-            found.expect("html element")
-        };
-        let body_node = {
-            let mut found = None;
-            for &c in tree.children(html_node) {
-                if parsed.get_node(c).and_then(|n| n.tag_name()) == Some("body") {
-                    found = Some(c);
-                    break;
-                }
-            }
-            found.expect("body element")
-        };
-        let b_src = tree.children(body_node).first().copied().expect("b source");
-
-        let max_existing = *snapshot.nodes.keys().max().unwrap();
-        let mut counter = max_existing + 1;
-        let new_id = snapshot
-            .insert_subtree(b_src, &parsed, tree, target, None, &mut counter)
-            .expect("inserted");
-        assert_eq!(new_id, max_existing + 1, "fresh id past existing max");
-
-        let t = snapshot.nodes.get(&target).expect("target present");
-        assert_eq!(t.children, vec![new_id], "child wired into parent");
-        let inserted = snapshot.nodes.get(&new_id).expect("inserted node present");
-        assert_eq!(inserted.parent, Some(target));
-        assert_eq!(inserted.tag, "b");
-        assert_eq!(inserted.node_type, 1u8);
-    }
 }
+

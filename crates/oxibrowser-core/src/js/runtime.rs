@@ -8456,13 +8456,10 @@ mod tests {
     // DOM snapshot + document object tests
     // ========================================
 
-    fn make_frame(html: &str) -> Frame {
+    async fn make_frame(html: &str) -> Frame {
         let url = Url::parse("https://example.com").unwrap();
-        let doc = oxibrowser_webapi::dom::Document::parse(html);
-        // Recreate what Frame::from_html does, but synchronously
-        Frame::from_doc(url, doc, html)
+        Frame::from_html(url, html).await.unwrap()
     }
-
     #[tokio::test]
     async fn test_document_title_no_snapshot() {
         let mut rt = JsRuntime::new();
@@ -8475,7 +8472,7 @@ mod tests {
     async fn test_document_title_with_snapshot() {
         let mut rt = JsRuntime::new();
         let html = "<html><head><title>My Page</title></head><body><p>Hello</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8488,7 +8485,7 @@ mod tests {
     async fn test_document_url() {
         let mut rt = JsRuntime::new();
         let html = "<html><body></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8505,7 +8502,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8521,7 +8518,7 @@ mod tests {
     async fn test_document_query_selector_not_found() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8537,7 +8534,7 @@ mod tests {
     async fn test_element_query_selector() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div><p class="intro">Hello</p><a href="/link">click</a></div><a href="/other">other</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8562,7 +8559,7 @@ mod tests {
     async fn test_element_query_selector_all() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><ul><li>a</li><li>b</li></ul><li>c</li></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8587,7 +8584,7 @@ mod tests {
     async fn test_element_query_selector_class() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div class="outer"><span class="inner">yes</span><span class="other">no</span></div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8603,7 +8600,7 @@ mod tests {
     async fn test_document_query_selector_all() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8619,7 +8616,7 @@ mod tests {
     async fn test_document_get_element_by_id() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div id="main">content</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8635,7 +8632,7 @@ mod tests {
     async fn test_document_get_elements_by_tag_name() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>a</p><p>b</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8652,7 +8649,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8669,7 +8666,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><a href="https://example.com" class="link">click</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8688,7 +8685,7 @@ mod tests {
     async fn test_element_get_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8704,7 +8701,7 @@ mod tests {
     async fn test_element_has_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8720,7 +8717,7 @@ mod tests {
     async fn test_element_class_name() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div class="foo bar">content</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8736,7 +8733,7 @@ mod tests {
     async fn test_element_text_content() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello World</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8757,7 +8754,7 @@ mod tests {
     async fn test_element_inner_text_matches_text_content() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello World</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8786,7 +8783,7 @@ mod tests {
     async fn test_element_children() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><div><p>a</p><p>b</p></div></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8804,7 +8801,7 @@ mod tests {
 
         // First snapshot
         let html1 = "<html><head><title>Page 1</title></head><body></body></html>";
-        let frame1 = make_frame(html1);
+        let frame1 = make_frame(html1).await;
         let snapshot1 = DomSnapshot::from_frame(&frame1);
         rt.set_dom_snapshot(Some(snapshot1));
 
@@ -8813,7 +8810,7 @@ mod tests {
 
         // Second snapshot replaces
         let html2 = "<html><head><title>Page 2</title></head><body></body></html>";
-        let frame2 = make_frame(html2);
+        let frame2 = make_frame(html2).await;
         let snapshot2 = DomSnapshot::from_frame(&frame2);
         rt.set_dom_snapshot(Some(snapshot2));
 
@@ -9038,7 +9035,7 @@ mod tests {
     async fn test_element_add_event_listener_noop() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div id="test">hi</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9054,7 +9051,7 @@ mod tests {
     async fn test_element_dispatch_event_noop() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9085,7 +9082,7 @@ mod tests {
     async fn test_mutation_set_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="q" value="old"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9108,7 +9105,7 @@ mod tests {
     async fn test_mutation_click() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9463,7 +9460,7 @@ mod tests {
     async fn test_mutation_input_value_setter() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="inp" value="old"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9484,7 +9481,7 @@ mod tests {
     async fn test_mutation_value_getter() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="inp" value="hello"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9500,7 +9497,7 @@ mod tests {
     async fn test_drain_mutations_clears_buffer() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9518,7 +9515,7 @@ mod tests {
     async fn test_set_dom_snapshot_clears_mutations() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9536,7 +9533,7 @@ mod tests {
     async fn test_mutation_set_attribute_via_query_selector() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -9626,7 +9623,7 @@ mod tests {
     async fn test_get_computed_style_display_none() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="display:none">hidden</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9641,7 +9638,7 @@ mod tests {
     async fn test_get_computed_style_visible_div() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box">visible</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9656,7 +9653,7 @@ mod tests {
     async fn test_get_computed_style_color() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><p id="red" style="color:red">Red</p></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9671,7 +9668,7 @@ mod tests {
     async fn test_get_computed_style_interactive_button() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><button id="btn">Click</button></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9686,7 +9683,7 @@ mod tests {
     async fn test_get_computed_style_disabled_button() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><button id="btn" disabled>Click</button></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9702,7 +9699,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r##"<html><body><div id="box" style="position:absolute">Abs</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9719,7 +9716,7 @@ mod tests {
     async fn test_get_bounding_client_rect() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="width:200px;height:100px">Box</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -9734,7 +9731,7 @@ mod tests {
     async fn test_offset_width_height() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="width:300px;height:150px">Box</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt

@@ -1,12 +1,16 @@
 //! Frame — a document frame within a page.
 //!
-//! Holds the parsed DOM tree, document URL, and child frames. The root Frame
-//! represents the main document.
+//! Holds the document URL, original HTML, a [`DomSnapshot`] of the parsed
+//! document, and child frames. The root Frame represents the main document.
+//!
+//! Note: the live (post-JS) DOM lives on the JS thread as a `RenderDocument`;
+//! this snapshot is the static, Send view used by the CLI/extract path and as
+//! the initial seed for the JS runtime. CDP/OXI reads use the live
+//! `Session::dom_snapshot()`.
 
-use crate::error::Result;
-use oxibrowser_webapi::dom::{Document, NodeId};
+use crate::error::{CoreError, Result};
+use crate::js::dom_snapshot::{DomSnapshot, ResourceUrl};
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::debug;
 use url::Url;
 
 /// Unique frame ID.
@@ -26,7 +30,7 @@ impl std::fmt::Display for FrameId {
     }
 }
 
-/// A document frame with its parsed DOM tree.
+/// A document frame with its parsed DOM snapshot.
 pub struct Frame {
     /// Unique ID.
     id: FrameId,
@@ -34,43 +38,43 @@ pub struct Frame {
     url: Url,
     /// Original HTML source.
     html: String,
-    /// Parsed DOM document.
-    document: Document,
+    /// Parsed DOM snapshot (Send view; the live DOM is the RenderDocument).
+    snapshot: DomSnapshot,
     /// Child frames (iframes).
     children: Vec<Frame>,
     /// DOM version counter (for cache invalidation).
     dom_version: u64,
 }
 
+/// Build a DomSnapshot from HTML by parsing it through the (transient,
+/// `!Send`) `RenderDocument` and converting. Kept as a sync helper so the
+/// `!Send` value never crosses an await point.
+fn snapshot_from_html(url: &Url, html: &str) -> Result<DomSnapshot> {
+    let viewport = oxibrowser_render::Viewport::default();
+    let rd = oxibrowser_render::RenderDocument::from_html(html, Some(url.as_str()), viewport)
+        .map_err(|e| CoreError::PageError(e.to_string()))?;
+    let title = rd
+        .query_selector("title")
+        .map(|id| rd.node_text(id))
+        .unwrap_or_default();
+    Ok(DomSnapshot::from_render_document(&rd, url.as_str(), &title))
+}
+
 impl Frame {
-    /// Parse HTML into a Frame with its DOM tree.
+    /// Parse HTML into a Frame with its DOM snapshot.
     #[tracing::instrument(skip(html), err)]
     pub async fn from_html(url: Url, html: &str) -> Result<Self> {
         let id = FrameId::next();
-        let document = Document::parse(html);
-
-        debug!(id = %id, url = %url, "frame created");
-
+        let snapshot = snapshot_from_html(&url, html)?;
+        tracing::debug!(id = %id, url = %url, "frame created");
         Ok(Self {
             id,
             url,
             html: html.to_string(),
-            document,
+            snapshot,
             children: Vec::new(),
             dom_version: 0,
         })
-    }
-
-    /// Create a Frame from an already-parsed Document (sync, for testing).
-    pub fn from_doc(url: Url, document: Document, html: &str) -> Self {
-        Self {
-            id: FrameId::next(),
-            url,
-            html: html.to_string(),
-            document,
-            children: Vec::new(),
-            dom_version: 0,
-        }
     }
 
     /// Get the frame ID.
@@ -88,15 +92,9 @@ impl Frame {
         &self.html
     }
 
-    /// Get the parsed document.
-    pub fn document(&self) -> &Document {
-        &self.document
-    }
-
-    /// Get the parsed document mutably.
-    pub fn document_mut(&mut self) -> &mut Document {
-        self.dom_version += 1;
-        &mut self.document
+    /// Get the parsed DOM snapshot.
+    pub fn document(&self) -> &DomSnapshot {
+        &self.snapshot
     }
 
     /// Get child frames.
@@ -115,64 +113,40 @@ impl Frame {
         self.dom_version
     }
 
-    /// Extract the page title from the DOM.
+    /// Extract the page title.
     pub fn extract_title(&self) -> Option<String> {
-        self.document.query_text("title").or_else(|| {
-            // Fallback: extract from HTML with a simple regex-like approach
-            let html = &self.html;
-            let start = html.find("<title>").map(|i| i + 7)?;
-            let end = html.find("</title>")?;
-            if start < end {
-                Some(html[start..end].trim().to_string())
-            } else {
-                None
-            }
-        })
+        if !self.snapshot.title.is_empty() {
+            return Some(self.snapshot.title.clone());
+        }
+        // Fallback: extract from raw HTML.
+        let html = &self.html;
+        let start = html.find("<title>").map(|i| i + 7)?;
+        let end = html.find("</title>")?;
+        if start < end {
+            Some(html[start..end].trim().to_string())
+        } else {
+            None
+        }
     }
 
     /// Convert the frame's content to a Markdown string.
     pub fn to_markdown(&self) -> String {
-        self.document.to_markdown()
+        crate::css::render_to_markdown(&self.snapshot)
     }
 
-    /// Convert the frame to a DomSnapshot for JS rendering and CSS text output.
-    pub fn to_dom_snapshot(&self) -> crate::js::dom_snapshot::DomSnapshot {
-        crate::js::dom_snapshot::DomSnapshot::from_frame(self)
-    }
-
-    /// Query the DOM using a CSS selector (basic).
-    pub fn query_selector(&self, selector: &str) -> Option<NodeId> {
-        self.document.query_selector(selector)
-    }
-
-    /// Get the text content of a node.
-    pub fn text_content(&self, node_id: NodeId) -> Option<String> {
-        self.document.text_content(node_id)
+    /// Query the DOM using a CSS selector.
+    pub fn query_selector(&self, selector: &str) -> Option<u32> {
+        self.snapshot.query_selector(selector)
     }
 
     /// Extract sub-resource URLs from the DOM.
-    ///
-    /// Finds `<script src>`, `<link href>` (stylesheet), `<img src>`,
-    /// `<iframe src>` and returns their URLs.
-    pub fn extract_resource_urls(&self) -> Vec<oxibrowser_webapi::dom::ResourceUrl> {
-        self.document.extract_resource_urls()
+    pub fn extract_resource_urls(&self) -> Vec<ResourceUrl> {
+        self.snapshot.extract_resource_urls()
     }
 
     /// Extract iframe `src` URLs from this frame's document.
-    ///
-    /// Returns `(src_url, NodeId)` for every `<iframe>` with a `src`.
-    pub fn iframe_srcs(&self) -> Vec<(String, NodeId)> {
-        self.document.extract_iframe_srcs()
-    }
-
-    /// Set an attribute on a node in this frame's document.
-    pub fn set_attribute(&mut self, node_id: NodeId, name: &str, value: &str) {
-        self.document_mut().set_attribute(node_id, name, value);
-    }
-
-    /// Set the text content of a node in this frame's document.
-    pub fn set_text_content(&mut self, node_id: NodeId, text: &str) {
-        self.document_mut().set_text_content(node_id, text);
+    pub fn iframe_srcs(&self) -> Vec<String> {
+        self.snapshot.iframe_srcs()
     }
 }
 
@@ -197,17 +171,15 @@ mod tests {
         let srcs = frame.iframe_srcs();
 
         assert_eq!(srcs.len(), 2, "should find 2 iframes with src");
-        let urls: Vec<&str> = srcs.iter().map(|(u, _)| u.as_str()).collect();
-        assert!(urls.contains(&"/embed.html"));
-        assert!(urls.contains(&"https://other.com/widget"));
+        assert!(srcs.contains(&"/embed.html".to_string()));
+        assert!(srcs.contains(&"https://other.com/widget".to_string()));
     }
 
     #[test]
     fn test_iframe_srcs_empty() {
         let html = "<html><body><p>No iframes</p></body></html>";
         let frame = make_frame(html);
-        let srcs = frame.iframe_srcs();
-        assert!(srcs.is_empty(), "should find no iframes");
+        assert!(frame.iframe_srcs().is_empty(), "should find no iframes");
     }
 
     #[test]

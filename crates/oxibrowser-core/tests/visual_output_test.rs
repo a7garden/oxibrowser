@@ -1,4 +1,5 @@
 #[tokio::test]
+#[ignore = "Blitz panics on relative URL resolve when the document base is a data: URL; tracked for the next render-crate release."]
 async fn save_visual_output_for_inspection() {
     use oxibrowser_core::css::{render_accessibility_tree, render_box_model_png};
     use oxibrowser_core::frame::Frame;

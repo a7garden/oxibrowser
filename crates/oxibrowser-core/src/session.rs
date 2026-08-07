@@ -971,16 +971,16 @@ impl Session {
             };
 
             let resource_type = match res.kind {
-                oxibrowser_webapi::dom::ResourceKind::Script => {
+                crate::js::dom_snapshot::ResourceKind::Script => {
                     crate::network::resource::ResourceType::Script
                 }
-                oxibrowser_webapi::dom::ResourceKind::Stylesheet => {
+                crate::js::dom_snapshot::ResourceKind::Stylesheet => {
                     crate::network::resource::ResourceType::Stylesheet
                 }
-                oxibrowser_webapi::dom::ResourceKind::Image => {
+                crate::js::dom_snapshot::ResourceKind::Image => {
                     crate::network::resource::ResourceType::Image
                 }
-                oxibrowser_webapi::dom::ResourceKind::Iframe => {
+                crate::js::dom_snapshot::ResourceKind::Iframe => {
                     crate::network::resource::ResourceType::Document
                 }
             };
