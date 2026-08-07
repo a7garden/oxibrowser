@@ -379,6 +379,15 @@ async fn main() {
     }
 }
 
+/// Recursively-joined text of the document's `<body>`, used by `extract --text`.
+/// Lives here (rather than on `DomSnapshot`) because it is purely a CLI concern.
+fn body_text(
+    doc: &oxibrowser_core::js::dom_snapshot::DomSnapshot,
+) -> Option<String> {
+    let body_id = doc.body_id?;
+    doc.text_content(body_id)
+}
+
 // ---------------------------------------------------------------------------
 // Error output — human vs JSON
 // ---------------------------------------------------------------------------
@@ -593,7 +602,8 @@ async fn fetch_direct(
             }
         } else {
             let text = doc
-                .query_text(sel)
+                .query_selector(sel)
+                .and_then(|id| doc.text_content(id))
                 .map(|t| t.trim().to_string())
                 .unwrap_or_default();
             if json {
@@ -909,23 +919,19 @@ async fn run_extract(
             return print_error("no page loaded", "PAGE_NOT_LOADED", json);
         }
     };
-
-    let doc = page.root_frame().document();
     let mut json_map = serde_json::Map::new();
 
-    if title {
-        json_map.insert(
-            "title".into(),
-            Value::String(page.title().unwrap_or("").to_string()),
-        );
-    }
+    let doc = page.root_frame().document();
+
     if links {
         let hrefs: Vec<Value> = doc
             .query_selector_all("a[href]")
             .iter()
             .filter_map(|id| {
-                doc.get_node(*id)
-                    .and_then(|n| n.href().map(|h| Value::String(h.to_string())))
+                doc.nodes
+                    .get(id)
+                    .and_then(|n| n.attributes.get("href").cloned())
+                    .map(Value::String)
             })
             .collect();
         json_map.insert("links".into(), Value::Array(hrefs));
@@ -933,7 +939,7 @@ async fn run_extract(
     if text {
         json_map.insert(
             "text".into(),
-            Value::String(doc.query_text("body").unwrap_or_default()),
+            Value::String(body_text(doc).unwrap_or_default()),
         );
     }
     if markdown {
@@ -953,8 +959,9 @@ async fn run_extract(
                                 .map(|t| t.trim().to_string())
                                 .unwrap_or_default()
                         } else {
-                            doc.get_node(*id)
-                                .and_then(|n| n.get_attribute(attr).map(|v| v.to_string()))
+                            doc.nodes
+                                .get(id)
+                                .and_then(|n| n.attributes.get(attr).cloned())
                                 .unwrap_or_default()
                         };
                         item.insert(attr.into(), Value::String(val));
@@ -981,9 +988,10 @@ async fn run_extract(
                             .map(|t| t.trim().to_string())
                             .unwrap_or_default()
                     } else {
-                        doc.get_node(*id)
-                            .and_then(|n| n.get_attribute(attr).map(|v| v.to_string()))
-                            .unwrap_or_default()
+                            doc.nodes
+                                .get(id)
+                                .and_then(|n| n.attributes.get(attr).cloned())
+                                .unwrap_or_default()
                     };
                     item.insert(attr.into(), Value::String(val));
                 }
@@ -1001,7 +1009,7 @@ async fn run_extract(
         );
         json_map.insert(
             "text".into(),
-            Value::String(doc.query_text("body").unwrap_or_default()),
+            Value::String(body_text(doc).unwrap_or_default()),
         );
     }
 

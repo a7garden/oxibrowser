@@ -344,7 +344,11 @@ pub fn build_summary(page: &oxibrowser_core::page::Page) -> Value {
     let links_count = doc.query_selector_all("a[href]").len();
     let forms_count = doc.query_selector_all("form").len();
     let images_count = doc.query_selector_all("img").len();
-    let text_length = doc.query_text("body").map(|t| t.len()).unwrap_or(0);
+    let text_length = doc
+        .body_id
+        .and_then(|bid| doc.text_content(bid))
+        .map(|t| t.len())
+        .unwrap_or(0);
 
     serde_json::json!({
         "url": page.url().to_string(),

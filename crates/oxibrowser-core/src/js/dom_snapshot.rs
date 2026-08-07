@@ -1463,7 +1463,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_remove_subtree_detaches_and_purges() {
         let html = r#"<html><body>
             <div id="root"><p id="child">a<span id="leaf">b</span></p></div>

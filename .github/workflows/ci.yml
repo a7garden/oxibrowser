@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --workspace --features oxibrowser/browser
       # Integration tests (require network) are marked #[ignore] — run only on main pushes
       # Note: integration tests require actual network access and external servers,
       # so they are intentionally ignored by default. Run manually with -- --ignored.
