@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Page `<script>` execution on navigation (Phase 1 keystone)** — `Session::navigate` now runs the page's `<script>` tags in document order, fires `DOMContentLoaded`/`load`, and settles the timer/microtask queue. Previously navigation built a `RenderDocument` but never executed scripts — the single biggest gap vs headless Chrome. External `<script src>` are fetched (in order) and executed; inline + external ordering preserved; a thrown script does not abort siblings. Dedicated nav-script runtime limits (`nav_script_max_loop_iterations` 500M / `max_recursion` 4096 / `max_stack_size` 16384 / `timeout_ms` 30s on `BrowserConfig` + `JsRuntimeConfig`) — separate from `evaluate()`'s 100k cap so real SPA bundles are not silently skipped. `document.readyState` transitions loading → interactive → complete.
+- **`window.matchMedia`** — minimal `MediaQueryList` (min/max-width derived from viewport; other queries default to `matches:false`). Installed on both `window` and `globalThis`. Was missing entirely, breaking responsive/CSS-in-JS/dark-mode SPAs that call it at init.
+
+### Fixed
+
+- **`wait_for` observes the live DOM + advances the event loop (Phase 2)** — `Tab::wait_for` and `Session::wait_for` polled the static navigate-time snapshot, so elements rendered after load by JS (the common SPA case) were invisible to them. Both now check via `evaluate`, which queries the live `RenderDocument` AND drains microtasks + due timers, so `setTimeout`-driven renders surface during the wait (Playwright-style auto-waiting).
+- **`inject_dom_snapshot` order** — `set_page_url` now runs BEFORE script execution. `SetPageUrl` re-registers the whole `window` global, so running it after scripts wiped any `window.*` properties the scripts set (`window.onload`, framework globals). DOM mutations survived either order; window globals did not.
+
 ## [0.16.0] - 2026-06-26
 
 ### Added
