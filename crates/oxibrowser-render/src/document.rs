@@ -162,6 +162,20 @@ impl RenderDocument {
             .map(|a| a.value.clone())
     }
 
+    /// All attributes of `node` as `(name, value)` pairs, or empty.
+    pub fn node_attributes(&self, node: NodeId) -> Vec<(String, String)> {
+        self.doc
+            .get_node(node)
+            .and_then(|n| n.attrs())
+            .map(|attrs| {
+                attrs
+                    .iter()
+                    .map(|a| (a.name.local.to_string(), a.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Recursive text content of `node` (text node's content, or concatenation
     /// of descendant text for an element).
     pub fn node_text(&self, node: NodeId) -> String {

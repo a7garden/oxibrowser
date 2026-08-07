@@ -42,6 +42,7 @@ use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
+use oxibrowser_render::{CaptureOpts, RenderDocument, Viewport};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -163,6 +164,20 @@ impl JsEvalResult {
 // ---------------------------------------------------------------------------
 // Command / Response types (channel messages)
 // ---------------------------------------------------------------------------
+/// Serializable info about a node in the [`RenderDocument`], returned by the
+/// async query façades. `id` is the opaque `NodeId` valid on the JS thread.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NodeInfo {
+    /// Opaque node id (valid only on the JS thread's `RenderDocument`).
+    pub id: usize,
+    /// Lowercased tag name, or `None` for non-element nodes.
+    pub tag: Option<String>,
+    /// Recursive text content of the node.
+    pub text: String,
+    /// `(name, value)` attribute pairs (empty for non-elements / text nodes).
+    pub attributes: Vec<(String, String)>,
+}
+
 
 /// Commands sent from the async main thread to the JS thread.
 enum JsCommand {
@@ -207,6 +222,23 @@ enum JsCommand {
         jar: Arc<RwLock<CookieJar>>,
         response_tx: Sender<JsResponse>,
     },
+    /// Build (or replace) the `RenderDocument` on the JS thread from HTML.
+    SetDocument {
+        html: String,
+        base_url: Option<String>,
+        viewport: (u32, u32),
+        response_tx: Sender<JsResponse>,
+    },
+    /// Capture a PNG of the current `RenderDocument`.
+    Capture {
+        opts: CaptureOpts,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Query all nodes matching a CSS selector against the `RenderDocument`.
+    Query {
+        selector: String,
+        response_tx: Sender<JsResponse>,
+    },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -222,6 +254,12 @@ enum JsResponse {
     },
     /// Ack for SetGlobal / SetDom / Shutdown.
     Done,
+    /// PNG bytes returned by a `Capture` command.
+    CaptureResult { png: Vec<u8> },
+    /// Nodes returned by a `Query` command.
+    QueryResult { nodes: Vec<NodeInfo> },
+    /// Error from a `SetDocument` / `Capture` / `Query` command.
+    Error { message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +531,9 @@ impl JsRuntime {
                     timed_out: false,
                 })
             }
-            JsResponse::Done => Ok(JsEvalResult::void()),
+            _ => Err(CoreError::JsError(
+                "unexpected response from JS thread".into(),
+            )),
         }
     }
 
@@ -575,6 +615,84 @@ impl JsRuntime {
         }
         let _ = response_rx.recv();
     }
+
+    // ── Render façades (ship a command to the JS thread, await a response) ────
+    //
+    // These reach the `!Send` `RenderDocument` that lives on the JS thread —
+    // the single source of truth for the DOM after unification. The JS thread
+    // builds/captures/queries it synchronously between JS ticks.
+
+    /// Build (or replace) the renderable document on the JS thread from HTML.
+    ///
+    /// The `RenderDocument` is constructed on the JS thread (it is `!Send`),
+    /// then mutated by JS bindings and captured/queried via the façades below.
+    pub async fn set_document(
+        &mut self,
+        html: &str,
+        base_url: Option<&str>,
+        viewport: (u32, u32),
+    ) -> Result<()> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::SetDocument {
+                html: html.to_string(),
+                base_url: base_url.map(|s| s.to_string()),
+                viewport,
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Done => Ok(()),
+            JsResponse::Error { message } => {
+                Err(CoreError::ScreenshotError(message))
+            }
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Capture a full-page PNG screenshot of the current render document.
+    ///
+    /// The render runs synchronously on the JS thread, so the captured frame
+    /// is a consistent snapshot (no half-applied JS mutations).
+    pub async fn capture_png(&mut self, opts: CaptureOpts) -> Result<Vec<u8>> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::Capture { opts, response_tx })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::CaptureResult { png } => Ok(png),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Query all nodes matching a CSS selector against the render document.
+    ///
+    /// Returns serializable [`NodeInfo`] (the async side never touches the
+    /// `!Send` `RenderDocument` directly).
+    pub async fn query_selector_all(&mut self, selector: &str) -> Result<Vec<NodeInfo>> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::Query {
+                selector: selector.to_string(),
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::QueryResult { nodes } => Ok(nodes),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
 }
 
 impl Default for JsRuntime {
@@ -622,6 +740,12 @@ fn js_thread_loop(
         &fetch_tx_arc,
         &cookie_jar_arc,
     );
+
+    // The Blitz-backed render document. `BaseDocument` is effectively `!Send`,
+    // so this lives here on the JS thread (co-located with boa's `Context`),
+    // mirroring a real browser's main thread. Set via `SetDocument`, mutated by
+    // JS bindings (Task 2), captured/queried via `Capture`/`Query`.
+    let mut render_doc: Option<RenderDocument> = None;
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -821,6 +945,65 @@ fn js_thread_loop(
             JsCommand::SetCookieJar { jar, response_tx } => {
                 *cookie_jar_arc.write() = Some(jar);
                 let _ = response_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetDocument {
+                html,
+                base_url,
+                viewport,
+                response_tx,
+            } => {
+                let vp = Viewport {
+                    width: viewport.0.max(64),
+                    height: viewport.1.max(64),
+                    scale: 1.0,
+                };
+                match RenderDocument::from_html(&html, base_url.as_deref(), vp) {
+                    Ok(doc) => {
+                        render_doc = Some(doc);
+                        let _ = response_tx.send(JsResponse::Done);
+                    }
+                    Err(e) => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            JsCommand::Capture { opts, response_tx } => match render_doc.as_mut() {
+                Some(doc) => match doc.capture_png(&opts) {
+                    Ok(png) => {
+                        let _ = response_tx.send(JsResponse::CaptureResult { png });
+                    }
+                    Err(e) => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: e.to_string(),
+                        });
+                    }
+                },
+                None => {
+                    let _ = response_tx.send(JsResponse::Error {
+                        message: "no render document set".into(),
+                    });
+                }
+            },
+            JsCommand::Query {
+                selector,
+                response_tx,
+            } => {
+                let nodes = match render_doc.as_ref() {
+                    Some(doc) => doc
+                        .query_selector_all(&selector)
+                        .into_iter()
+                        .map(|id| NodeInfo {
+                            id,
+                            tag: doc.tag_name(id),
+                            text: doc.node_text(id),
+                            attributes: doc.node_attributes(id),
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let _ = response_tx.send(JsResponse::QueryResult { nodes });
             }
             JsCommand::Shutdown => {
                 break;
@@ -7110,6 +7293,78 @@ mod tests {
     use super::*;
     use crate::frame::Frame;
     use url::Url;
+
+    // --- Render façades (RenderDocument on the JS thread) ---
+
+    #[tokio::test]
+    async fn test_set_document_then_capture_png() {
+        // set_document builds a RenderDocument on the JS thread; capture_png
+        // returns a valid PNG of the rendered HTML — no JS involved.
+        let mut rt = JsRuntime::new();
+        let html = concat!(
+            "<!DOCTYPE html><html><head><style>",
+            "body { margin: 0; } .box { width: 40px; height: 40px; background: red; }",
+            "</style></head><body><div class=\"box\"></div></body></html>"
+        );
+        rt.set_document(html, Some("https://example.com/"), (400, 300))
+            .await
+            .expect("set_document should build the render doc");
+
+        let png = rt
+            .capture_png(CaptureOpts {
+                full_page: true,
+                ..Default::default()
+            })
+            .await
+            .expect("capture_png should render a PNG");
+
+        // PNG magic header.
+        assert!(png.len() > 8, "PNG data should be more than 8 bytes");
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        // Decode and confirm real (non-blank) CSS-rendered content.
+        let img = image::load_from_memory(&png).expect("decode captured png");
+        let rgba = img.to_rgba8();
+        let has_red = rgba
+            .pixels()
+            .any(|p| p[0] > 200 && p[1] < 80 && p[2] < 80);
+        assert!(has_red, "the red .box should be rendered");
+    }
+
+    #[tokio::test]
+    async fn test_capture_without_document_errors() {
+        let mut rt = JsRuntime::new();
+        let err = rt
+            .capture_png(CaptureOpts::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::ScreenshotError(_)),
+            "capture without a document should be a screenshot error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_selector_all_returns_nodes() {
+        let mut rt = JsRuntime::new();
+        let html = "<!DOCTYPE html><html><body>\
+                    <div class=\"item\" data-n=\"1\">one</div>\
+                    <div class=\"item\" data-n=\"2\">two</div>\
+                    <span class=\"item\">three</span>\
+                    </body></html>";
+        rt.set_document(html, None, (400, 300)).await.unwrap();
+
+        let nodes = rt.query_selector_all(".item").await.unwrap();
+        assert_eq!(nodes.len(), 3, "three .item elements");
+        assert_eq!(nodes[0].tag.as_deref(), Some("div"));
+        assert_eq!(nodes[0].text, "one");
+        assert_eq!(
+            nodes[0].attributes.iter().find(|(k, _)| k == "data-n").map(|(_, v)| v.as_str()),
+            Some("1"),
+            "first item data-n attribute"
+        );
+        assert_eq!(nodes[2].tag.as_deref(), Some("span"));
+    }
 
     // --- Basic types ---
 

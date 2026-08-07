@@ -16,4 +16,4 @@
 mod document;
 mod paint;
 
-pub use document::{CaptureOpts, RenderDocument, RenderError, Viewport};
+pub use document::{CaptureOpts, NodeId, RenderDocument, RenderError, Viewport};
