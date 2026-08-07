@@ -40,6 +40,7 @@ chrono = "0.4"
 
 oxibrowser-render = { version = "0.18.0", path = "../oxibrowser-render" }
 getrandom = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

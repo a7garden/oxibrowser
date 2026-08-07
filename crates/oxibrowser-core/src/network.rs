@@ -6,6 +6,7 @@ pub mod intercept;
 pub mod ip_filter;
 pub mod resource;
 pub mod robots;
+pub mod ws;
 
 pub use client::HttpClient;
 pub use cookie::CookieJar;
