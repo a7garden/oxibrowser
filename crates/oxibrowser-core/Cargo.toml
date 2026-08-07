@@ -38,7 +38,7 @@ serde_yaml = "0.9"
 regex = "1.10"
 chrono = "0.4"
 
-oxibrowser-render = { path = "../oxibrowser-render" }
+oxibrowser-render = { version = "0.18.0", path = "../oxibrowser-render" }
 getrandom = { workspace = true }
 
 [dev-dependencies]
