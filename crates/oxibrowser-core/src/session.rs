@@ -9,8 +9,9 @@ use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
 use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
-use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
+use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg, WsReqMsg};
 use crate::network::HttpClient;
+use crate::network::ws::{run_ws_connection, WsCmd, WsEvent};
 use crate::network::cookie::CookieJar;
 use crate::page::Page;
 use parking_lot::RwLock;
@@ -78,6 +79,9 @@ pub struct Session {
     /// LocalStorage sync handler task handle (for cleanup).
     #[allow(dead_code)]
     local_storage_task: Option<std::thread::JoinHandle<()>>,
+    /// WebSocket bridge task handle (for cleanup).
+    #[allow(dead_code)]
+    ws_task: Option<std::thread::JoinHandle<()>>,
     /// Whether the session has been closed.
     closed: AtomicBool,
     /// In-flight HTTP request counter shared with the fetch handler thread.
@@ -243,6 +247,55 @@ fn handle_fetch_requests(
         }
     });
 }
+/// Background WebSocket bridge: routes Connect/Send/Close from the JS thread
+/// to per-socket tokio tasks. Events flow straight to the JS-thread
+/// `WS_EVENT_RX` via the shared event channel (id-routed). Mirrors
+/// `handle_fetch_requests` (try_recv + sleep polling — never a blocking recv
+/// inside the current-thread runtime, or spawned socket tasks stall).
+fn handle_ws_requests(
+    ws_req_rx: std::sync::mpsc::Receiver<WsReqMsg>,
+    ws_event_tx: std::sync::mpsc::Sender<WsEvent>,
+) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("failed to create tokio runtime for ws: {}", e);
+            return;
+        }
+    };
+    let mut sockets: std::collections::HashMap<u64, tokio::sync::mpsc::Sender<WsCmd>> =
+        std::collections::HashMap::new();
+    rt.block_on(async move {
+        loop {
+            while let Ok(req) = ws_req_rx.try_recv() {
+                match req {
+                    WsReqMsg::Connect { id, url, protocols } => {
+                        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<WsCmd>(16);
+                        let event_tx = ws_event_tx.clone();
+                        sockets.insert(id, cmd_tx);
+                        tokio::spawn(async move {
+                            run_ws_connection(id, url, protocols, cmd_rx, event_tx).await;
+                        });
+                    }
+                    WsReqMsg::Send { id, data } => {
+                        if let Some(tx) = sockets.get(&id) {
+                            let _ = tx.try_send(WsCmd::Send(data));
+                        }
+                    }
+                    WsReqMsg::Close { id, code, reason } => {
+                        if let Some(tx) = sockets.get(&id) {
+                            let _ = tx.try_send(WsCmd::Close { code, reason });
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    });
+}
 
 // ---------------------------------------------------------------------------
 // LocalStorage sync handler
@@ -317,6 +370,11 @@ impl Session {
         let mut js_runtime = JsRuntime::with_config(js_config);
         js_runtime.set_fetch_channel(fetch_tx, fetch_resp_rx);
         js_runtime.set_local_storage_channel(ls_tx);
+        // WebSocket channels: request sender (JS→bridge) + shared event
+        // receiver (bridge→JS, id-routed). Phase 4 WebSocket.
+        let (ws_req_tx, ws_req_rx) = std::sync::mpsc::channel::<WsReqMsg>();
+        let (ws_event_tx, ws_event_rx) = std::sync::mpsc::channel::<WsEvent>();
+        js_runtime.set_ws_channel(ws_req_tx, ws_event_rx);
 
         // Spawn fetch handler on a blocking thread
         let http_client_clone = http_client.clone();
@@ -333,6 +391,10 @@ impl Session {
                 max_body_bytes,
                 in_flight_clone,
             );
+        }));
+        // Spawn WebSocket bridge handler thread (Phase 4)
+        let ws_task = Some(std::thread::spawn(move || {
+            handle_ws_requests(ws_req_rx, ws_event_tx);
         }));
 
         // Spawn localStorage sync handler thread
@@ -361,6 +423,7 @@ impl Session {
             js_runtime,
             fetch_task,
             local_storage_task,
+            ws_task,
             closed: AtomicBool::new(false),
             in_flight,
         })
