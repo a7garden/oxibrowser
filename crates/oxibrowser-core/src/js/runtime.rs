@@ -91,39 +91,13 @@ enum PendingFetch {
         onrsc: Arc<RwLock<Option<JsValue>>>,
     },
 }
-#[derive(Clone, Default)]
-enum BinaryType {
-    #[default]
-    ArrayBuffer,
-}
-
-/// JS-side per-socket WebSocket state. Callbacks (`on*`) are re-read at settle
-/// time because JS may reassign them between pump cycles. Mirrors `PendingFetch`.
+/// JS-side per-socket WebSocket state. The live JS object owns all properties
+/// (url, readyState, protocol, on*, hidden `__listeners_<type>` arrays); this
+/// wrapper exists only to track liveness for the idle condition
+/// (`pending_ws = any non-Closed`).
 enum WsState {
-    Connecting {
-        url: String,
-        onopen: Option<JsValue>,
-        onmessage: Option<JsValue>,
-        onclose: Option<JsValue>,
-        onerror: Option<JsValue>,
-        binary_type: BinaryType,
-        listeners: HashMap<String, Vec<JsValue>>,
-    },
-    Open {
-        url: String,
-        protocol: String,
-        extensions: String,
-        onopen: Option<JsValue>,
-        onmessage: Option<JsValue>,
-        onclose: Option<JsValue>,
-        onerror: Option<JsValue>,
-        binary_type: BinaryType,
-        listeners: HashMap<String, Vec<JsValue>>,
-    },
-    Closing {
-        onclose: Option<JsValue>,
-        onerror: Option<JsValue>,
-        listeners: HashMap<String, Vec<JsValue>>,
+    Live {
+        obj: JsObject,
     },
     Closed,
 }
@@ -2428,6 +2402,137 @@ fn create_context(
         })
     };
     let _ = context.register_global_callable(js_string!("XMLHttpRequest"), 0, xhr_ctor);
+    // --- WebSocket (Phase 4) ---
+    let ws_ctor = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let url = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let protocols: Vec<String> = match args.get(1) {
+                Some(JsValue::String(s)) => vec![s.to_std_string_escaped()],
+                _ => vec![],
+            };
+
+            let id = next_ws_id();
+
+            // ws.send(data): text from a JS string, binary otherwise (best-effort).
+            let send_id = id;
+            let send_fn = NativeFunction::from_closure(move |_this, args, _| {
+                let data = match args.first() {
+                    Some(JsValue::String(s)) => WsData::Text(s.to_std_string_escaped()),
+                    Some(v) => WsData::Text(format!("{}", v.display())),
+                    None => return Ok(JsValue::undefined()),
+                };
+                let _ = WS_REQ_TX.with(|c| {
+                    c.borrow()
+                        .as_ref()
+                        .map(|tx| tx.send(WsReqMsg::Send { id: send_id, data }))
+                });
+                Ok(JsValue::undefined())
+            });
+            // ws.close(code?, reason?)
+            let close_id = id;
+            let close_fn = NativeFunction::from_closure(move |_this, args, _| {
+                let code = args.get(0).and_then(|v| v.as_number()).map(|n| n as u16);
+                let reason = args
+                    .get(1)
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_std_string_escaped());
+                let _ = WS_REQ_TX.with(|c| {
+                    c.borrow().as_ref().map(|tx| {
+                        tx.send(WsReqMsg::Close {
+                            id: close_id,
+                            code,
+                            reason,
+                        })
+                    })
+                });
+                Ok(JsValue::undefined())
+            });
+            // ws.addEventListener(type, cb): store on a hidden array on the
+            // live object, read back at settle time alongside the on* property.
+            let ael_id = id;
+            let ael_fn = NativeFunction::from_closure(move |_this, args, ctx| {
+                let (t, cb) = match (args.get(0), args.get(1)) {
+                    (Some(t), Some(cb)) => (t, cb),
+                    _ => return Ok(JsValue::undefined()),
+                };
+                let t = t
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                PENDING_WS.with(|m| {
+                    let borrowed = m.borrow();
+                    if let Some(WsState::Live { obj }) = borrowed.get(&ael_id) {
+                        let key = JsString::from(format!("__listeners_{t}").as_str());
+                        let existing = obj.get(key.clone(), ctx).unwrap_or(JsValue::null());
+                        let arr = if let Some(o) = existing.as_object() {
+                            JsArray::from_object(o.clone())
+                                .unwrap_or_else(|_| JsArray::new(ctx))
+                        } else {
+                            JsArray::new(ctx)
+                        };
+                        let _ = arr.push(cb.clone(), ctx);
+                        let _ = obj.set(key, JsValue::from(arr), false, ctx);
+                    }
+                });
+                Ok(JsValue::undefined())
+            });
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("url"),
+                    JsValue::from(JsString::from(url.as_str())),
+                    Attribute::all(),
+                )
+                .property(js_string!("readyState"), JsValue::from(0), Attribute::all())
+                .property(
+                    js_string!("protocol"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("extensions"),
+                    JsValue::from(JsString::from("")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("binaryType"),
+                    JsValue::from(JsString::from("arraybuffer")),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("bufferedAmount"),
+                    JsValue::from(0),
+                    Attribute::all(),
+                )
+                .property(js_string!("onopen"), JsValue::null(), Attribute::all())
+                .property(js_string!("onmessage"), JsValue::null(), Attribute::all())
+                .property(js_string!("onclose"), JsValue::null(), Attribute::all())
+                .property(js_string!("onerror"), JsValue::null(), Attribute::all())
+                .function(send_fn, js_string!("send"), 1)
+                .function(close_fn, js_string!("close"), 0)
+                .function(ael_fn, js_string!("addEventListener"), 2)
+                .build();
+
+            PENDING_WS.with(|m| {
+                m.borrow_mut().insert(id, WsState::Live { obj: obj.clone() });
+            });
+            let _ = WS_REQ_TX.with(|cell| {
+                cell.borrow().as_ref().map(|tx| {
+                    tx.send(WsReqMsg::Connect {
+                        id,
+                        url: url.clone(),
+                        protocols: protocols.clone(),
+                    })
+                })
+            });
+
+            Ok(obj.into())
+        })
+    };
+    let _ = context.register_global_callable(js_string!("WebSocket"), 1, ws_ctor);
 
     // --- MutationObserver ---
     let mo_ctor = unsafe {
