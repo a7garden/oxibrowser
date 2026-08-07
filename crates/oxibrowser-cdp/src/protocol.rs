@@ -39,6 +39,15 @@ pub struct CdpError {
     pub message: String,
 }
 
+impl From<oxibrowser_core::error::CoreError> for CdpError {
+    fn from(e: oxibrowser_core::error::CoreError) -> Self {
+        CdpError {
+            code: -32000,
+            message: e.to_string(),
+        }
+    }
+}
+
 /// A CDP event notification.
 #[derive(Debug, Serialize)]
 pub struct CdpEvent {

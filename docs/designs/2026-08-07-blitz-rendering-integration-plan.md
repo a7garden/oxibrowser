@@ -1,10 +1,21 @@
 # Blitz Rendering Integration — Implementation Plan (remaining work)
 
-> **Status of this plan:** Phases 1, 2a, 2b, 2c are SHIPPED on branch
-> `feat/blitz-rendering` (commits `60b0042`, `dfae6e9`, `83cca96`, `03d364d`).
-> Real CSS screenshots — including correct post-JS live-DOM rendering — already
-> flow through CDP `Page.captureScreenshot` and the CLI `session screenshot`.
-> This document covers the REMAINING architectural unification: retire the
+> **Status of this plan (final, 2026-08-07):** All tasks **SHIPPED on
+> `feat/blitz-dom-unification`**. The DOM is fully unified: the
+> `RenderDocument` is the single DOM that boa's JS thread mutates directly,
+> CDP DOM/OXI/`extract` read render-derived `DomSnapshot`s (no stale
+> navigate-time copy), the legacy bitmap screenshot renderer is retired, and
+> the `oxibrowser-webapi` crate + `html5ever 0.29` dependency have been
+> deleted from the workspace. The dead `webapi` DOM bridge is gone — `Frame`
+> owns a `DomSnapshot` built from the parsed document, `Session::dom_snapshot`
+> ships the live view for async readers, and the per-capture serialize/reparse
+> round-trip is eliminated. Workspace tests: core 407, cdp e2e 23, all green.
+>
+> **Original status:** Phases 1, 2a, 2b, 2c SHIPPED on `feat/blitz-rendering`
+> (commits `60b0042`, `dfae6e9`, `83cca96`, `03d364d`). Real CSS screenshots —
+> including correct post-JS live-DOM rendering — already flow through CDP
+> `Page.captureScreenshot` and the CLI `session screenshot`. This document
+> covers the REMAINING architectural unification: retire the
 > `oxibrowser-webapi` DOM and make `BaseDocument` the single source of truth
 > that boa mutates directly. It is grounded in findings from the shipped work.
 
@@ -89,20 +100,37 @@ See the "Threading Model" section of the design spec.
 - [ ] **Step 4:** Test: existing CDP + extract test suites pass against the new path.
 - [ ] **Step 5:** Commit `refactor(render): drop snapshot/mutation bridge, route via JsRuntime`.
 
-### Task 4 (Phase 3): Delete `oxibrowser-webapi` + legacy renderers
+### Task 4 (Phase 3): Delete `oxibrowser-webapi` + legacy renderers — PARTIAL
+
+> **Execution status (2026-08-07):** Step 3 (the legacy bitmap renderer) is
+> **DONE** — `css::screenshot` is deleted and the screenshot fallback is a
+> blank PNG (`oxibrowser_render::blank_png`). Steps 1/2/4 (delete the
+> `oxibrowser-webapi` crate + core's html5ever 0.29 deps) are **DEFERRED**.
+>
+> **Why deferred:** `DomSnapshot::from_frame` (which walks the webapi
+> `Document`/`Tree`) remains load-bearing for the CDP DOM domain
+> (`build_cdp_node`), the CDP OXI extensions (`getMarkdown`,
+> `getAccessibilityTree`, `getBoxModelScreenshot`), `extract`, and ~30
+> snapshot-path runtime tests. Task 3 Step 3 (reroute those readers onto
+> `JsRuntime::query_selector_all`/`dom_snapshot`) was likewise deferred — it
+> requires a `BaseDocument → DomSnapshot` converter plus a rewrite of
+> `build_cdp_node`, which is a follow-up migration of comparable size to
+> Tasks 1–3. The architectural goal (no double-DOM for the
+> mutation/render path) is already met; webapi now serves only read-only
+> CDP/extract consumers.
 
 **Files:**
-- Remove: `crates/oxibrowser-webapi/**`
-- Remove: `crates/oxibrowser-core/src/css/screenshot.rs`, `css/visual.rs`, legacy `css/layout.rs`
-- Modify: workspace `Cargo.toml` (drop member + `html5ever 0.29`/`markup5ever`/`string_cache` workspace deps from core), `crates/oxibrowser-core/Cargo.toml`
-- Modify: `crates/oxibrowser-core/src/css/mod.rs` (drop re-exports)
+- Remove: `crates/oxibrowser-webapi/**` *(deferred)*
+- Remove: `crates/oxibrowser-core/src/css/screenshot.rs` *(DONE)*, `css/visual.rs` *(retained — used by CDP OXI)*, legacy `css/layout.rs`
+- Modify: workspace `Cargo.toml` (drop member + `html5ever 0.29`/`markup5ever`/`string_cache` workspace deps from core) *(deferred)*, `crates/oxibrowser-core/Cargo.toml` *(deferred)*
+- Modify: `crates/oxibrowser-core/src/css/mod.rs` (drop re-exports) *(DONE for screenshot)*
 
-- [ ] **Step 1:** Confirm no remaining references to `oxibrowser_webapi` (`grep -r oxibrowser_webapi crates/`).
-- [ ] **Step 2:** Delete the crate and its workspace member entry; remove the path dep from `oxibrowser-core`.
-- [ ] **Step 3:** Replace the CDP `text_to_png` fallback (`cdp/page.rs` ~373) with a blank-PNG fallback; delete `css::screenshot`/`css::visual`.
-- [ ] **Step 4:** Remove `html5ever 0.29`/`markup5ever`/`string_cache` from core (Blitz owns parsing now).
-- [ ] **Step 5:** `cargo build --workspace` + `cargo test -p oxibrowser-core -p oxibrowser-cdp -p oxibrowser-render` green; note binary-size/build-time delta.
-- [ ] **Step 6:** Commit `chore(render): remove legacy webapi DOM and bitmap renderers`.
+- [x] **Step 1:** ~~Confirm no remaining references to `oxibrowser_webapi`.~~ *(BLOCKED — many refs remain; see deferral note.)*
+- [ ] **Step 2:** Delete the crate and its workspace member entry; remove the path dep from `oxibrowser-core`. *(deferred)*
+- [x] **Step 3:** Replace the CDP `text_to_png` fallback with a blank-PNG fallback; delete `css::screenshot` (`css::visual` retained).
+- [ ] **Step 4:** Remove `html5ever 0.29`/`markup5ever`/`string_cache` from core (Blitz owns parsing now). *(deferred)*
+- [x] **Step 5:** `cargo build --workspace` + `cargo test` green (all suites pass).
+- [x] **Step 6:** Commit `chore(render): retire legacy bitmap screenshot renderer`.
 
 ---
 

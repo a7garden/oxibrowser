@@ -3,7 +3,8 @@
 //! Run with: cargo bench
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use oxibrowser_webapi::Document;
+use oxibrowser_core::frame::Frame;
+use oxibrowser_core::js::dom_snapshot::DomSnapshot;
 
 fn bench_html_parsing(c: &mut Criterion) {
     let simple_html =
@@ -11,9 +12,28 @@ fn bench_html_parsing(c: &mut Criterion) {
     let complex_html = include_str!("../benches/fixtures/complex.html");
 
     let mut group = c.benchmark_group("html_parsing");
-    group.bench_function("simple", |b| b.iter(|| Document::parse(simple_html)));
-    group.bench_function("complex", |b| b.iter(|| Document::parse(complex_html)));
+    let url = url::Url::parse("https://example.com/").unwrap();
+    group.bench_function("simple", |b| {
+        b.iter(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(Frame::from_html(url.clone(), simple_html)).unwrap()
+        })
+    });
+    group.bench_function("complex", |b| {
+        b.iter(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(Frame::from_html(url.clone(), complex_html)).unwrap()
+        })
+    });
     group.finish();
+}
+
+fn build_snapshot(html: &str) -> (Frame, DomSnapshot) {
+    let url = url::Url::parse("https://example.com/").unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let frame = rt.block_on(Frame::from_html(url, html)).unwrap();
+    let snap = frame.document().clone();
+    (frame, snap)
 }
 
 fn bench_dom_queries(c: &mut Criterion) {
@@ -28,22 +48,18 @@ fn bench_dom_queries(c: &mut Criterion) {
         </div>
     </body></html>"#;
 
-    let doc = Document::parse(html);
+    let (_frame, snap) = build_snapshot(html);
 
     let mut group = c.benchmark_group("dom_queries");
-    group.bench_function("query_selector_id", |b| {
-        b.iter(|| doc.query_selector("#main"))
-    });
-    group.bench_function("query_selector_tag", |b| {
-        b.iter(|| doc.query_selector("h1"))
-    });
+    group.bench_function("query_selector_id", |b| b.iter(|| snap.query_selector("#main")));
+    group.bench_function("query_selector_tag", |b| b.iter(|| snap.query_selector("h1")));
     group.bench_function("query_selector_class", |b| {
-        b.iter(|| doc.query_selector(".text"))
+        b.iter(|| snap.query_selector(".text"))
     });
     group.bench_function("query_selector_all_p", |b| {
-        b.iter(|| doc.query_selector_all("p"))
+        b.iter(|| snap.query_selector_all("p"))
     });
-    group.bench_function("query_text", |b| b.iter(|| doc.query_text("h1")));
+    group.bench_function("query_text", |b| b.iter(|| snap.query_selector("h1")));
     group.finish();
 }
 
@@ -65,9 +81,11 @@ fn bench_to_markdown(c: &mut Criterion) {
         </article>
     </body></html>"#;
 
-    let doc = Document::parse(html);
+    let (_frame, snap) = build_snapshot(html);
 
-    c.bench_function("to_markdown", |b| b.iter(|| doc.to_markdown()));
+    c.bench_function("to_markdown", |b| {
+        b.iter(|| oxibrowser_core::css::render_to_markdown(&snap))
+    });
 }
 
 criterion_group!(

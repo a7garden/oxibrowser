@@ -1,12 +1,12 @@
+#![cfg(feature = "browser")]
 //! Real-website integration tests.
 //!
 //! These tests require an active internet connection.
 //! Run with: `cargo test --test integration -- --ignored`
 //!
 //! Note: assertions are intentionally lenient since external sites may change.
-
-use oxibrowser_core::Browser;
-use oxibrowser_core::config::BrowserConfig;
+use oxibrowser::Browser;
+use oxibrowser::BrowserConfig;
 
 #[tokio::test]
 #[ignore]

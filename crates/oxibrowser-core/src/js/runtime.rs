@@ -42,6 +42,7 @@ use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
+use oxibrowser_render::{CaptureOpts, RenderDocument, RenderError, Viewport};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -163,6 +164,20 @@ impl JsEvalResult {
 // ---------------------------------------------------------------------------
 // Command / Response types (channel messages)
 // ---------------------------------------------------------------------------
+/// Serializable info about a node in the [`RenderDocument`], returned by the
+/// async query façades. `id` is the opaque `NodeId` valid on the JS thread.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NodeInfo {
+    /// Opaque node id (valid only on the JS thread's `RenderDocument`).
+    pub id: usize,
+    /// Lowercased tag name, or `None` for non-element nodes.
+    pub tag: Option<String>,
+    /// Recursive text content of the node.
+    pub text: String,
+    /// `(name, value)` attribute pairs (empty for non-elements / text nodes).
+    pub attributes: Vec<(String, String)>,
+}
+
 
 /// Commands sent from the async main thread to the JS thread.
 enum JsCommand {
@@ -207,6 +222,29 @@ enum JsCommand {
         jar: Arc<RwLock<CookieJar>>,
         response_tx: Sender<JsResponse>,
     },
+    /// Build (or replace) the `RenderDocument` on the JS thread from HTML.
+    SetDocument {
+        html: String,
+        base_url: Option<String>,
+        viewport: (u32, u32),
+        response_tx: Sender<JsResponse>,
+    },
+    /// Capture a PNG of the current `RenderDocument`.
+    Capture {
+        opts: CaptureOpts,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Query all nodes matching a CSS selector against the `RenderDocument`.
+    Query {
+        selector: String,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Serialize the current RenderDocument to a DomSnapshot for async-side
+    /// readers (CDP DOM/OXI, extract). Reflects all JS mutations.
+    GetDocumentSnapshot {
+        url: String,
+        response_tx: Sender<JsResponse>,
+    },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -222,6 +260,14 @@ enum JsResponse {
     },
     /// Ack for SetGlobal / SetDom / Shutdown.
     Done,
+    /// PNG bytes returned by a `Capture` command.
+    CaptureResult { png: Vec<u8> },
+    /// Serialized DomSnapshot of the current RenderDocument.
+    Snapshot(Box<crate::js::dom_snapshot::DomSnapshot>),
+    /// Nodes returned by a `Query` command.
+    QueryResult { nodes: Vec<NodeInfo> },
+    /// Error from a `SetDocument` / `Capture` / `Query` command.
+    Error { message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +539,9 @@ impl JsRuntime {
                     timed_out: false,
                 })
             }
-            JsResponse::Done => Ok(JsEvalResult::void()),
+            _ => Err(CoreError::JsError(
+                "unexpected response from JS thread".into(),
+            )),
         }
     }
 
@@ -575,6 +623,107 @@ impl JsRuntime {
         }
         let _ = response_rx.recv();
     }
+
+    // ── Render façades (ship a command to the JS thread, await a response) ────
+    //
+    // These reach the `!Send` `RenderDocument` that lives on the JS thread —
+    // the single source of truth for the DOM after unification. The JS thread
+    // builds/captures/queries it synchronously between JS ticks.
+
+    /// Build (or replace) the renderable document on the JS thread from HTML.
+    ///
+    /// The `RenderDocument` is constructed on the JS thread (it is `!Send`),
+    /// then mutated by JS bindings and captured/queried via the façades below.
+    pub async fn set_document(
+        &mut self,
+        html: &str,
+        base_url: Option<&str>,
+        viewport: (u32, u32),
+    ) -> Result<()> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::SetDocument {
+                html: html.to_string(),
+                base_url: base_url.map(|s| s.to_string()),
+                viewport,
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Done => Ok(()),
+            JsResponse::Error { message } => {
+                Err(CoreError::ScreenshotError(message))
+            }
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Capture a full-page PNG screenshot of the current render document.
+    ///
+    /// The render runs synchronously on the JS thread, so the captured frame
+    /// is a consistent snapshot (no half-applied JS mutations).
+    pub async fn capture_png(&mut self, opts: CaptureOpts) -> Result<Vec<u8>> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::Capture { opts, response_tx })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::CaptureResult { png } => Ok(png),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Query all nodes matching a CSS selector against the render document.
+    ///
+    /// Returns serializable [`NodeInfo`] (the async side never touches the
+    /// `!Send` `RenderDocument` directly).
+    pub async fn query_selector_all(&mut self, selector: &str) -> Result<Vec<NodeInfo>> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::Query {
+                selector: selector.to_string(),
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::QueryResult { nodes } => Ok(nodes),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Serialize the live RenderDocument to a [`DomSnapshot`].
+    ///
+    /// The snapshot reflects every JS mutation (it is built from the
+    /// `RenderDocument` on the JS thread, not a navigate-time copy), so CDP
+    /// DOM/OXI and `extract` reads stay correct after JS interaction.
+    pub async fn dom_snapshot(&mut self, url: &str) -> Result<crate::js::dom_snapshot::DomSnapshot> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::GetDocumentSnapshot {
+                url: url.to_string(),
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = response_rx
+            .recv()
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Snapshot(snap) => Ok(*snap),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
 }
 
 impl Default for JsRuntime {
@@ -612,6 +761,12 @@ fn js_thread_loop(
         Arc::new(RwLock::new(None));
     let cookie_jar_arc: Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>> = Arc::new(RwLock::new(None));
     let dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> = Arc::new(RwLock::new(None));
+    // The Blitz-backed render document. `BaseDocument` is effectively `!Send`,
+    // so it lives here on the JS thread (co-located with boa's `Context`),
+    // mirroring a real browser's main thread. Shared (via `Rc<RefCell>`) with
+    // the JS DOM bindings so JS mutates it directly; set via `SetDocument`,
+    // captured/queried via `Capture`/`Query`.
+    let render_doc_cell: Rc<RefCell<Option<RenderDocument>>> = Rc::new(RefCell::new(None));
     let (mut ctx, mut job_queue) = create_context(
         &console_output,
         &dom_snapshot,
@@ -621,7 +776,9 @@ fn js_thread_loop(
         &user_agent,
         &fetch_tx_arc,
         &cookie_jar_arc,
+        &render_doc_cell,
     );
+
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
@@ -678,6 +835,7 @@ fn js_thread_loop(
                         &user_agent,
                         &fetch_tx_arc,
                         &cookie_jar_arc,
+                        &render_doc_cell,
                     );
                     ctx = new_ctx;
                     job_queue = new_queue;
@@ -821,6 +979,88 @@ fn js_thread_loop(
             JsCommand::SetCookieJar { jar, response_tx } => {
                 *cookie_jar_arc.write() = Some(jar);
                 let _ = response_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetDocument {
+                html,
+                base_url,
+                viewport,
+                response_tx,
+            } => {
+                let vp = Viewport {
+                    width: viewport.0.max(64),
+                    height: viewport.1.max(64),
+                    scale: 1.0,
+                };
+                match RenderDocument::from_html(&html, base_url.as_deref(), vp) {
+                    Ok(doc) => {
+                        *render_doc_cell.borrow_mut() = Some(doc);
+                        let _ = response_tx.send(JsResponse::Done);
+                    }
+                    Err(e) => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            JsCommand::Capture { opts, response_tx } => {
+                let mut guard = render_doc_cell.borrow_mut();
+                let result = match guard.as_mut() {
+                    Some(doc) => doc.capture_png(&opts),
+                    None => Err(RenderError::Render("no render document set".into())),
+                };
+                drop(guard);
+                match result {
+                    Ok(bytes) => {
+                        let _ = response_tx.send(JsResponse::CaptureResult { png: bytes });
+                    }
+                    Err(e) => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            JsCommand::Query {
+                selector,
+                response_tx,
+            } => {
+                let nodes = match render_doc_cell.borrow().as_ref() {
+                    Some(doc) => doc
+                        .query_selector_all(&selector)
+                        .into_iter()
+                        .map(|id| NodeInfo {
+                            id,
+                            tag: doc.tag_name(id),
+                            text: doc.node_text(id),
+                            attributes: doc.node_attributes(id),
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let _ = response_tx.send(JsResponse::QueryResult { nodes });
+            }
+            JsCommand::GetDocumentSnapshot { url, response_tx } => {
+                let snap = {
+                    let guard = render_doc_cell.borrow();
+                    guard.as_ref().map(|doc| {
+                        let title = doc
+                            .query_selector("title")
+                            .map(|id| doc.node_text(id))
+                            .unwrap_or_default();
+                        crate::js::dom_snapshot::DomSnapshot::from_render_document(doc, &url, &title)
+                    })
+                };
+                match snap {
+                    Some(s) => {
+                        let _ = response_tx.send(JsResponse::Snapshot(Box::new(s)));
+                    }
+                    None => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: "no render document set".into(),
+                        });
+                    }
+                }
             }
             JsCommand::Shutdown => {
                 break;
@@ -1023,6 +1263,7 @@ fn create_context(
     user_agent: &str,
     fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
     cookie_jar_arc: &Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>>,
+    render_doc_cell: &Rc<RefCell<Option<RenderDocument>>>,
 ) -> (Context, Rc<TokioJobQueue>) {
     let job_queue = Rc::new(TokioJobQueue::new());
     let mut context = Context::builder()
@@ -1828,7 +2069,7 @@ fn create_context(
 
     // --- Document object ---
 
-    register_document_object(&mut context, dom_snapshot, mutations, cookie_jar_arc);
+    register_document_object(&mut context, dom_snapshot, mutations, cookie_jar_arc, render_doc_cell);
 
     // --- Window global ---
 
@@ -3061,12 +3302,460 @@ fn create_context(
 // Document object registration
 // ---------------------------------------------------------------------------
 
+/// Build a JS element object backed by a node in the [`RenderDocument`].
+///
+/// The object exposes the Web API subset that mutates the render document
+/// *directly* (no `DomMutation` log): `setAttribute`/`getAttribute`/
+/// `removeAttribute`, `appendChild`, `remove`, `style.setProperty`,
+/// `textContent`, `id`, `className`. Each method takes a short borrow of the
+/// shared `Rc<RefCell<Option<RenderDocument>>>` — never held across a JS
+/// callback — so the document stays borrowable for the next operation.
+fn create_render_element_object(
+    ctx: &mut Context,
+    render_doc: Rc<RefCell<Option<RenderDocument>>>,
+    node_id: usize,
+) -> JsValue {
+    // Read the (immutable) tag up front; tag names never change.
+    let tag = render_doc
+        .borrow()
+        .as_ref()
+        .and_then(|d| d.tag_name(node_id))
+        .unwrap_or_default();
+    let tag_upper = tag.to_uppercase();
+
+    // ── attribute methods ──
+    let rd_set = render_doc.clone();
+    let set_attr_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let value = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_set.borrow_mut().as_mut() {
+                doc.set_attribute(node_id, &name, &value);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let rd_get = render_doc.clone();
+    let get_attr_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let val = rd_get
+                .borrow()
+                .as_ref()
+                .and_then(|d| d.node_attr(node_id, &name));
+            match val {
+                Some(v) => Ok(JsValue::from(JsString::from(v.as_str()))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+
+    let rd_rm = render_doc.clone();
+    let remove_attr_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let name = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_rm.borrow_mut().as_mut() {
+                doc.remove_attribute(node_id, &name);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── appendChild / remove ──
+    let rd_ac = render_doc.clone();
+    let append_child_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let child = args.first().cloned().unwrap_or(JsValue::undefined());
+            let child_id = child
+                .as_object()
+                .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                .and_then(|v| v.as_number().map(|n| n as usize));
+            if let (Some(cid), Some(doc)) = (child_id, rd_ac.borrow_mut().as_mut()) {
+                doc.append_child(node_id, cid);
+                notify_mutation_observers(ctx, "childList", node_id as u32);
+            }
+            Ok(child)
+        })
+    };
+
+    let rd_rem = render_doc.clone();
+    let remove_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            if let Some(doc) = rd_rem.borrow_mut().as_mut() {
+                doc.remove_node(node_id);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── style accessor (returns a CSSStyleDeclaration-like object) ──
+    let rd_style = render_doc.clone();
+    let style_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let sp = rd_style.clone();
+            let set_prop = NativeFunction::from_closure(move |_this, args, _ctx| {
+                let prop = args
+                    .first()
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let val = args
+                    .get(1)
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                if let Some(doc) = sp.borrow_mut().as_mut() {
+                    doc.set_inline_style(node_id, &prop, &val);
+                }
+                Ok(JsValue::undefined())
+            });
+            let gp = rd_style.clone();
+            let get_prop = NativeFunction::from_closure(move |_this, _args, _ctx| {
+                // Inline-style reads aren't tracked separately; return "".
+                let _ = gp;
+                Ok(JsValue::from(JsString::from("")))
+            });
+            let style_obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .function(set_prop, js_string!("setProperty"), 2)
+                .function(get_prop, js_string!("getPropertyValue"), 1)
+                .build();
+            Ok(JsValue::from(style_obj))
+        })
+    };
+    let style_getter_fn = FunctionObjectBuilder::new(ctx.realm(), style_fn)
+        .name(js_string!("get style"))
+        .build();
+
+    // ── textContent getter/setter ──
+    let rd_tc_get = render_doc.clone();
+    let text_get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let text = rd_tc_get
+                .borrow()
+                .as_ref()
+                .map(|d| d.node_text(node_id))
+                .unwrap_or_default();
+            Ok(JsValue::from(JsString::from(text.as_str())))
+        })
+    };
+    let text_getter_fn = FunctionObjectBuilder::new(ctx.realm(), text_get_fn)
+        .name(js_string!("get textContent"))
+        .build();
+
+    let rd_tc_set = render_doc.clone();
+    let text_set_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let text = args
+                .first()
+                .and_then(|v| v.to_string(_ctx).ok())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_tc_set.borrow_mut().as_mut() {
+                doc.set_text(node_id, &text);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let text_setter_fn = FunctionObjectBuilder::new(ctx.realm(), text_set_fn)
+        .name(js_string!("set textContent"))
+        .build();
+
+    // ── id / className (backed by attributes) ──
+    let rd_id_get = render_doc.clone();
+    let id_get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let v = rd_id_get
+                .borrow()
+                .as_ref()
+                .and_then(|d| d.node_attr(node_id, "id"))
+                .unwrap_or_default();
+            Ok(JsValue::from(JsString::from(v.as_str())))
+        })
+    };
+    let id_getter_fn = FunctionObjectBuilder::new(ctx.realm(), id_get_fn)
+        .name(js_string!("get id"))
+        .build();
+    let rd_id_set = render_doc.clone();
+    let id_set_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let v = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_id_set.borrow_mut().as_mut() {
+                doc.set_attribute(node_id, "id", &v);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let id_setter_fn = FunctionObjectBuilder::new(ctx.realm(), id_set_fn)
+        .name(js_string!("set id"))
+        .build();
+
+    let rd_cls_get = render_doc.clone();
+    let cls_get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let v = rd_cls_get
+                .borrow()
+                .as_ref()
+                .and_then(|d| d.node_attr(node_id, "class"))
+                .unwrap_or_default();
+            Ok(JsValue::from(JsString::from(v.as_str())))
+        })
+    };
+    let cls_getter_fn = FunctionObjectBuilder::new(ctx.realm(), cls_get_fn)
+        .name(js_string!("get className"))
+        .build();
+    let rd_cls_set = render_doc.clone();
+    let cls_set_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let v = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_cls_set.borrow_mut().as_mut() {
+                doc.set_attribute(node_id, "class", &v);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let cls_setter_fn = FunctionObjectBuilder::new(ctx.realm(), cls_set_fn)
+        .name(js_string!("set className"))
+        .build();
+
+    let click_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // Fire any registered click listeners directly (no mutation log).
+            for cb in registry_get(node_id as u32, "click") {
+                let evt = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(js_string!("type"), JsValue::from(JsString::from("click")), Attribute::all())
+                    .build();
+                let _ = cb.call(&JsValue::undefined(), &[JsValue::from(evt)], ctx);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    // ── layout + events + form helpers ──
+    let rd_rect = render_doc.clone();
+    let get_bounding_client_rect_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let (x, y, w, h) = rd_rect
+                .borrow()
+                .as_ref()
+                .map(|d| d.node_layout_rect(node_id))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0));
+            let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("left"), JsValue::from(x), Attribute::all())
+                .property(js_string!("top"), JsValue::from(y), Attribute::all())
+                .property(js_string!("right"), JsValue::from(x + w), Attribute::all())
+                .property(js_string!("bottom"), JsValue::from(y + h), Attribute::all())
+                .property(js_string!("width"), JsValue::from(w), Attribute::all())
+                .property(js_string!("height"), JsValue::from(h), Attribute::all())
+                .property(js_string!("x"), JsValue::from(x), Attribute::all())
+                .property(js_string!("y"), JsValue::from(y), Attribute::all())
+                .build();
+            Ok(JsValue::from(obj))
+        })
+    };
+
+    let ael_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(cb) = args.get(1).and_then(|v| v.as_object().cloned()) {
+                registry_add(node_id as u32, &event_type, cb);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let rel_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let event_type = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            registry_remove(node_id as u32, &event_type);
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let dispatch_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event = args.first().cloned().unwrap_or(JsValue::undefined());
+            let event_type = event
+                .as_object()
+                .and_then(|o| o.get(js_string!("type"), ctx).ok())
+                .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+                .unwrap_or_default();
+            if !event_type.is_empty() {
+                for cb in registry_get(node_id as u32, &event_type) {
+                    let _ = cb.call(&JsValue::undefined(), &[event.clone()], ctx);
+                }
+            }
+            Ok(JsValue::from(true))
+        })
+    };
+
+    let make_noop = || {
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) }
+    };
+    // value / checked / href / src (attribute-backed)
+    let attr_getter = |rd: Rc<RefCell<Option<RenderDocument>>>, name: &'static str| {
+        unsafe {
+            NativeFunction::from_closure(move |_this, _args, _ctx| {
+                let v = rd
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.node_attr(node_id, name))
+                    .unwrap_or_default();
+                Ok(JsValue::from(JsString::from(v.as_str())))
+            })
+        }
+    };
+    let val_get_fn = attr_getter(render_doc.clone(), "value");
+    let val_getter_fn = FunctionObjectBuilder::new(ctx.realm(), val_get_fn)
+        .name(js_string!("get value"))
+        .build();
+    let rd_val_set = render_doc.clone();
+    let val_set_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let v = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Some(doc) = rd_val_set.borrow_mut().as_mut() {
+                doc.set_attribute(node_id, "value", &v);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    let val_setter_fn = FunctionObjectBuilder::new(ctx.realm(), val_set_fn)
+        .name(js_string!("set value"))
+        .build();
+
+    let href_get_fn = attr_getter(render_doc.clone(), "href");
+    let href_getter_fn = FunctionObjectBuilder::new(ctx.realm(), href_get_fn)
+        .name(js_string!("get href"))
+        .build();
+    let src_get_fn = attr_getter(render_doc.clone(), "src");
+    let src_getter_fn = FunctionObjectBuilder::new(ctx.realm(), src_get_fn)
+        .name(js_string!("get src"))
+        .build();
+
+
+    let obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("tagName"),
+            JsValue::from(JsString::from(tag_upper.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("nodeName"),
+            JsValue::from(JsString::from(tag_upper.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("nodeType"),
+            JsValue::from(1),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("__nodeId"),
+            JsValue::from(node_id),
+            Attribute::all(),
+        )
+        .function(get_attr_fn, js_string!("getAttribute"), 1)
+        .function(set_attr_fn, js_string!("setAttribute"), 2)
+        .function(remove_attr_fn, js_string!("removeAttribute"), 1)
+        .function(append_child_fn, js_string!("appendChild"), 1)
+        .function(remove_fn, js_string!("remove"), 0)
+        .function(click_fn, js_string!("click"), 0)
+        .function(get_bounding_client_rect_fn, js_string!("getBoundingClientRect"), 0)
+        .function(ael_fn, js_string!("addEventListener"), 2)
+        .function(rel_fn, js_string!("removeEventListener"), 2)
+        .function(dispatch_fn, js_string!("dispatchEvent"), 1)
+        .function(make_noop(), js_string!("focus"), 0)
+        .function(make_noop(), js_string!("blur"), 0)
+        .function(make_noop(), js_string!("scrollIntoView"), 0)
+        .accessor(
+            js_string!("style"),
+            Some(style_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textContent"),
+            Some(text_getter_fn),
+            Some(text_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("id"),
+            Some(id_getter_fn),
+            Some(id_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("className"),
+            Some(cls_getter_fn),
+            Some(cls_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("value"),
+            Some(val_getter_fn),
+            Some(val_setter_fn),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("href"),
+            Some(href_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("src"),
+            Some(src_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .build();
+    JsValue::from(obj)
+}
+
 /// Register the `document` global object with DOM query methods.
 fn register_document_object(
     ctx: &mut Context,
     dom_snapshot: &Arc<RwLock<Option<DomSnapshot>>>,
     mutations: &Arc<RwLock<Vec<DomMutation>>>,
     cookie_jar_arc: &Arc<RwLock<Option<Arc<RwLock<CookieJar>>>>>,
+    render_doc_rc: &Rc<RefCell<Option<RenderDocument>>>,
 ) {
     let dom_capture_title = dom_snapshot.clone();
     let title_getter = unsafe {
@@ -3145,6 +3834,7 @@ fn register_document_object(
     // querySelector(selector)
     let dom_capture_qs = dom_snapshot.clone();
     let mutations_capture_qs = mutations.clone();
+    let rd_qs = render_doc_rc.clone();
     let query_selector_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector = args
@@ -3152,6 +3842,15 @@ fn register_document_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path (single source of truth when set).
+            let nid_opt = {
+                let guard = rd_qs.borrow();
+                guard.as_ref().and_then(|doc| doc.query_selector(&selector))
+            };
+            if let Some(nid) = nid_opt {
+                return Ok(create_render_element_object(ctx, rd_qs.clone(), nid));
+            }
 
             let dom = dom_capture_qs.read();
             if let Some(ref snapshot) = *dom
@@ -3173,6 +3872,7 @@ fn register_document_object(
     // querySelectorAll(selector)
     let dom_capture_qsa = dom_snapshot.clone();
     let mutations_capture_qsa = mutations.clone();
+    let rd_qsa = render_doc_rc.clone();
     let query_selector_all_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector = args
@@ -3180,6 +3880,23 @@ fn register_document_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path.
+            let ids: Vec<usize> = {
+                let guard = rd_qsa.borrow();
+                guard
+                    .as_ref()
+                    .map(|doc| doc.query_selector_all(&selector))
+                    .unwrap_or_default()
+            };
+            if !ids.is_empty() {
+                let js_values: Vec<JsValue> = ids
+                    .into_iter()
+                    .map(|nid| create_render_element_object(ctx, rd_qsa.clone(), nid))
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
 
             let dom = dom_capture_qsa.read();
             if let Some(ref snapshot) = *dom {
@@ -3209,6 +3926,7 @@ fn register_document_object(
     // getElementById(id)
     let dom_capture_gbi = dom_snapshot.clone();
     let mutations_capture_gbi = mutations.clone();
+    let rd_gbi = render_doc_rc.clone();
     let get_element_by_id_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let id = args
@@ -3216,6 +3934,17 @@ fn register_document_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path.
+            let nid_opt = {
+                let guard = rd_gbi.borrow();
+                guard
+                    .as_ref()
+                    .and_then(|doc| doc.query_selector(&format!("#{id}")))
+            };
+            if let Some(nid) = nid_opt {
+                return Ok(create_render_element_object(ctx, rd_gbi.clone(), nid));
+            }
 
             let dom = dom_capture_gbi.read();
             if let Some(ref snapshot) = *dom
@@ -3237,6 +3966,7 @@ fn register_document_object(
     // getElementsByTagName(tag)
     let dom_capture_gtn = dom_snapshot.clone();
     let mutations_capture_gtn = mutations.clone();
+    let rd_gtn = render_doc_rc.clone();
     let get_elements_by_tag_name_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let tag = args
@@ -3244,6 +3974,23 @@ fn register_document_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path.
+            let ids: Vec<usize> = {
+                let guard = rd_gtn.borrow();
+                guard
+                    .as_ref()
+                    .map(|doc| doc.query_selector_all(&tag))
+                    .unwrap_or_default()
+            };
+            if !ids.is_empty() {
+                let js_values: Vec<JsValue> = ids
+                    .into_iter()
+                    .map(|nid| create_render_element_object(ctx, rd_gtn.clone(), nid))
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
 
             let dom = dom_capture_gtn.read();
             if let Some(ref snapshot) = *dom {
@@ -3273,6 +4020,7 @@ fn register_document_object(
     // getElementsByClassName(class)
     let dom_capture_gcn = dom_snapshot.clone();
     let mutations_capture_gcn = mutations.clone();
+    let rd_gcn = render_doc_rc.clone();
     let get_elements_by_class_name_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let class = args
@@ -3280,6 +4028,23 @@ fn register_document_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path.
+            let ids: Vec<usize> = {
+                let guard = rd_gcn.borrow();
+                guard
+                    .as_ref()
+                    .map(|doc| doc.query_selector_all(&format!(".{class}")))
+                    .unwrap_or_default()
+            };
+            if !ids.is_empty() {
+                let js_values: Vec<JsValue> = ids
+                    .into_iter()
+                    .map(|nid| create_render_element_object(ctx, rd_gcn.clone(), nid))
+                    .collect();
+                let arr = JsArray::from_iter(js_values, ctx);
+                return Ok(arr.into());
+            }
 
             let dom = dom_capture_gcn.read();
             if let Some(ref snapshot) = *dom {
@@ -3428,12 +4193,22 @@ fn register_document_object(
     };
 
     // document.body / document.head / document.documentElement getters
+    let rd_body = render_doc_rc.clone();
     let dom_snap_body = dom_snapshot.clone();
     let dom_snap_body_clone = dom_snapshot.clone();
     let body_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
             NativeFunction::from_closure(move |_this, _args, ctx| {
+                // Render-document path.
+                let nid_opt = {
+                    let guard = rd_body.borrow();
+                    guard.as_ref().and_then(|doc| doc.query_selector("body"))
+                };
+                if let Some(nid) = nid_opt {
+                    return Ok(create_render_element_object(ctx, rd_body.clone(), nid));
+                }
+
                 let snap = dom_snap_body.read();
                 if let Some(ref s) = *snap
                     && let Some(bid) = s.body_id
@@ -3455,12 +4230,22 @@ fn register_document_object(
             .build()
     };
 
+    let rd_head = render_doc_rc.clone();
     let dom_snap_head = dom_snapshot.clone();
     let dom_snap_head_clone = dom_snapshot.clone();
     let head_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
             NativeFunction::from_closure(move |_this, _args, ctx| {
+                // Render-document path.
+                let nid_opt = {
+                    let guard = rd_head.borrow();
+                    guard.as_ref().and_then(|doc| doc.query_selector("head"))
+                };
+                if let Some(nid) = nid_opt {
+                    return Ok(create_render_element_object(ctx, rd_head.clone(), nid));
+                }
+
                 let snap = dom_snap_head.read();
                 if let Some(ref s) = *snap
                     && let Some(hid) = s.head_id
@@ -3482,11 +4267,21 @@ fn register_document_object(
             .build()
     };
 
+    let rd_de = render_doc_rc.clone();
     let dom_snap_de = dom_snapshot.clone();
     let document_element_getter_fn = {
         let mutations_clone = mutations.clone();
         let getter: NativeFunction = unsafe {
             NativeFunction::from_closure(move |_this, _args, ctx| {
+                // Render-document path: root element (<html>).
+                let nid_opt = {
+                    let guard = rd_de.borrow();
+                    guard.as_ref().map(|doc| doc.root_element_id())
+                };
+                if let Some(nid) = nid_opt {
+                    return Ok(create_render_element_object(ctx, rd_de.clone(), nid));
+                }
+
                 let snap = dom_snap_de.read();
                 if let Some(ref s) = *snap {
                     // document.documentElement should be the <html> element,
@@ -3578,6 +4373,7 @@ fn register_document_object(
     // === DOM Mutation: createElement ===
     let dom_snap_ce = dom_snapshot.clone();
     let mutations_ce = mutations.clone();
+    let rd_ce = render_doc_rc.clone();
     let create_element_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let tag = args
@@ -3588,6 +4384,17 @@ fn register_document_object(
             if tag.is_empty() {
                 return Ok(JsValue::undefined());
             }
+
+            // Render-document path: create the element directly in the
+            // RenderDocument (detached until appendChild attaches it).
+            let nid_opt = {
+                let mut guard = rd_ce.borrow_mut();
+                guard.as_mut().map(|doc| doc.create_element(&tag))
+            };
+            if let Some(nid) = nid_opt {
+                return Ok(create_render_element_object(ctx, rd_ce.clone(), nid));
+            }
+
 
             // Generate a unique node ID using an atomic counter (avoids collisions in tight loops)
             let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -3785,6 +4592,7 @@ fn register_document_object(
     // === DOM Mutation: createTextNode ===
     let dom_snap_ct = dom_snapshot.clone();
     let mutations_ct = mutations.clone();
+    let rd_ct = render_doc_rc.clone();
     let create_text_node_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let text = args
@@ -3792,6 +4600,24 @@ fn register_document_object(
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+
+            // Render-document path.
+            let nid_opt = {
+                let mut guard = rd_ct.borrow_mut();
+                guard.as_mut().map(|doc| doc.create_text_node(&text))
+            };
+            if let Some(nid) = nid_opt {
+                let obj = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(
+                        js_string!("textContent"),
+                        JsValue::from(JsString::from(text.as_str())),
+                        Attribute::all(),
+                    )
+                    .property(js_string!("nodeType"), JsValue::from(3), Attribute::all())
+                    .property(js_string!("__nodeId"), JsValue::from(nid), Attribute::all())
+                    .build();
+                return Ok(JsValue::from(obj));
+            }
 
             let new_id = NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed) as u32;
 
@@ -7111,6 +7937,139 @@ mod tests {
     use crate::frame::Frame;
     use url::Url;
 
+    // --- Render façades (RenderDocument on the JS thread) ---
+
+    #[tokio::test]
+    async fn test_set_document_then_capture_png() {
+        // set_document builds a RenderDocument on the JS thread; capture_png
+        // returns a valid PNG of the rendered HTML — no JS involved.
+        let mut rt = JsRuntime::new();
+        let html = concat!(
+            "<!DOCTYPE html><html><head><style>",
+            "body { margin: 0; } .box { width: 40px; height: 40px; background: red; }",
+            "</style></head><body><div class=\"box\"></div></body></html>"
+        );
+        rt.set_document(html, Some("https://example.com/"), (400, 300))
+            .await
+            .expect("set_document should build the render doc");
+
+        let png = rt
+            .capture_png(CaptureOpts {
+                full_page: true,
+                ..Default::default()
+            })
+            .await
+            .expect("capture_png should render a PNG");
+
+        // PNG magic header.
+        assert!(png.len() > 8, "PNG data should be more than 8 bytes");
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        // Decode and confirm real (non-blank) CSS-rendered content.
+        let img = image::load_from_memory(&png).expect("decode captured png");
+        let rgba = img.to_rgba8();
+        let has_red = rgba
+            .pixels()
+            .any(|p| p[0] > 200 && p[1] < 80 && p[2] < 80);
+        assert!(has_red, "the red .box should be rendered");
+    }
+
+    #[tokio::test]
+    async fn test_capture_without_document_errors() {
+        let mut rt = JsRuntime::new();
+        let err = rt
+            .capture_png(CaptureOpts::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::ScreenshotError(_)),
+            "capture without a document should be a screenshot error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_selector_all_returns_nodes() {
+        let mut rt = JsRuntime::new();
+        let html = "<!DOCTYPE html><html><body>\
+                    <div class=\"item\" data-n=\"1\">one</div>\
+                    <div class=\"item\" data-n=\"2\">two</div>\
+                    <span class=\"item\">three</span>\
+                    </body></html>";
+        rt.set_document(html, None, (400, 300)).await.unwrap();
+
+        let nodes = rt.query_selector_all(".item").await.unwrap();
+        assert_eq!(nodes.len(), 3, "three .item elements");
+        assert_eq!(nodes[0].tag.as_deref(), Some("div"));
+        assert_eq!(nodes[0].text, "one");
+        assert_eq!(
+            nodes[0].attributes.iter().find(|(k, _)| k == "data-n").map(|(_, v)| v.as_str()),
+            Some("1"),
+            "first item data-n attribute"
+        );
+        assert_eq!(nodes[2].tag.as_deref(), Some("span"));
+    }
+
+    #[tokio::test]
+    async fn test_js_create_element_reflected_in_capture() {
+        // JS mutates the RenderDocument directly (Task 2): createElement, inline
+        // style, appendChild — then capture_png renders the live DOM.
+        let mut rt = JsRuntime::new();
+        let html = "<!DOCTYPE html><html><head></head><body></body></html>";
+        rt.set_document(html, Some("https://example.com/"), (400, 300))
+            .await
+            .unwrap();
+
+        rt.execute(
+            "var el = document.createElement('div');\
+             el.style.setProperty('background-color', 'red');\
+             el.style.setProperty('width', '50px');\
+             el.style.setProperty('height', '50px');\
+             document.body.appendChild(el);",
+        )
+        .await
+        .expect("JS createElement+appendChild should succeed");
+
+        let png = rt
+            .capture_png(CaptureOpts {
+                full_page: true,
+                ..Default::default()
+            })
+            .await
+            .expect("capture_png should reflect the JS-created element");
+
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        let img = image::load_from_memory(&png).expect("decode captured png");
+        let has_red = img
+            .to_rgba8()
+            .pixels()
+            .any(|p| p[0] > 200 && p[1] < 80 && p[2] < 80);
+        assert!(has_red, "the JS-created red div should render in capture");
+    }
+
+    #[tokio::test]
+    async fn test_js_query_selector_reads_render_document() {
+        // document.querySelector reads from the RenderDocument when set.
+        let mut rt = JsRuntime::new();
+        let html = "<!DOCTYPE html><html><body>\
+                    <div id=\"target\" class=\"x\">hello</div>\
+                    </body></html>";
+        rt.set_document(html, None, (400, 300)).await.unwrap();
+
+        let res = rt
+            .evaluate("document.getElementById('target').textContent")
+            .await
+            .unwrap();
+        assert!(res.is_ok(), "getElementById should find the node");
+        assert_eq!(res.value, Some(Value::String("hello".into())));
+
+        let res = rt
+            .evaluate("document.querySelectorAll('.x').length")
+            .await
+            .unwrap();
+        assert_eq!(res.value, Some(Value::Number(1.into())));
+    }
+
+
     // --- Basic types ---
 
     #[tokio::test]
@@ -7497,13 +8456,10 @@ mod tests {
     // DOM snapshot + document object tests
     // ========================================
 
-    fn make_frame(html: &str) -> Frame {
+    async fn make_frame(html: &str) -> Frame {
         let url = Url::parse("https://example.com").unwrap();
-        let doc = oxibrowser_webapi::dom::Document::parse(html);
-        // Recreate what Frame::from_html does, but synchronously
-        Frame::from_doc(url, doc, html)
+        Frame::from_html(url, html).await.unwrap()
     }
-
     #[tokio::test]
     async fn test_document_title_no_snapshot() {
         let mut rt = JsRuntime::new();
@@ -7516,7 +8472,7 @@ mod tests {
     async fn test_document_title_with_snapshot() {
         let mut rt = JsRuntime::new();
         let html = "<html><head><title>My Page</title></head><body><p>Hello</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7529,7 +8485,7 @@ mod tests {
     async fn test_document_url() {
         let mut rt = JsRuntime::new();
         let html = "<html><body></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7546,7 +8502,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><p class="intro">Hello</p><a href="/link">click</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7562,7 +8518,7 @@ mod tests {
     async fn test_document_query_selector_not_found() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7578,7 +8534,7 @@ mod tests {
     async fn test_element_query_selector() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div><p class="intro">Hello</p><a href="/link">click</a></div><a href="/other">other</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7603,7 +8559,7 @@ mod tests {
     async fn test_element_query_selector_all() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><ul><li>a</li><li>b</li></ul><li>c</li></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7628,7 +8584,7 @@ mod tests {
     async fn test_element_query_selector_class() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div class="outer"><span class="inner">yes</span><span class="other">no</span></div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7644,7 +8600,7 @@ mod tests {
     async fn test_document_query_selector_all() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7660,7 +8616,7 @@ mod tests {
     async fn test_document_get_element_by_id() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div id="main">content</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7676,7 +8632,7 @@ mod tests {
     async fn test_document_get_elements_by_tag_name() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>a</p><p>b</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7693,7 +8649,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><div class="item">a</div><div class="item">b</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7710,7 +8666,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r#"<html><body><a href="https://example.com" class="link">click</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7729,7 +8685,7 @@ mod tests {
     async fn test_element_get_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7745,7 +8701,7 @@ mod tests {
     async fn test_element_has_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7761,7 +8717,7 @@ mod tests {
     async fn test_element_class_name() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div class="foo bar">content</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7777,7 +8733,7 @@ mod tests {
     async fn test_element_text_content() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello World</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7798,7 +8754,7 @@ mod tests {
     async fn test_element_inner_text_matches_text_content() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><p>Hello World</p></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7827,7 +8783,7 @@ mod tests {
     async fn test_element_children() {
         let mut rt = JsRuntime::new();
         let html = "<html><body><div><p>a</p><p>b</p></div></body></html>";
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -7845,7 +8801,7 @@ mod tests {
 
         // First snapshot
         let html1 = "<html><head><title>Page 1</title></head><body></body></html>";
-        let frame1 = make_frame(html1);
+        let frame1 = make_frame(html1).await;
         let snapshot1 = DomSnapshot::from_frame(&frame1);
         rt.set_dom_snapshot(Some(snapshot1));
 
@@ -7854,7 +8810,7 @@ mod tests {
 
         // Second snapshot replaces
         let html2 = "<html><head><title>Page 2</title></head><body></body></html>";
-        let frame2 = make_frame(html2);
+        let frame2 = make_frame(html2).await;
         let snapshot2 = DomSnapshot::from_frame(&frame2);
         rt.set_dom_snapshot(Some(snapshot2));
 
@@ -8079,7 +9035,7 @@ mod tests {
     async fn test_element_add_event_listener_noop() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><div id="test">hi</div></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8095,7 +9051,7 @@ mod tests {
     async fn test_element_dispatch_event_noop() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8126,7 +9082,7 @@ mod tests {
     async fn test_mutation_set_attribute() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="q" value="old"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8149,7 +9105,7 @@ mod tests {
     async fn test_mutation_click() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8504,7 +9460,7 @@ mod tests {
     async fn test_mutation_input_value_setter() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="inp" value="old"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8525,7 +9481,7 @@ mod tests {
     async fn test_mutation_value_getter() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><input id="inp" value="hello"></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8541,7 +9497,7 @@ mod tests {
     async fn test_drain_mutations_clears_buffer() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8559,7 +9515,7 @@ mod tests {
     async fn test_set_dom_snapshot_clears_mutations() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><button id="btn">Click</button></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8577,7 +9533,7 @@ mod tests {
     async fn test_mutation_set_attribute_via_query_selector() {
         let mut rt = JsRuntime::new();
         let html = r#"<html><body><a href="/page" id="link">go</a></body></html>"#;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         let snapshot = DomSnapshot::from_frame(&frame);
         rt.set_dom_snapshot(Some(snapshot));
 
@@ -8667,7 +9623,7 @@ mod tests {
     async fn test_get_computed_style_display_none() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="display:none">hidden</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8682,7 +9638,7 @@ mod tests {
     async fn test_get_computed_style_visible_div() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box">visible</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8697,7 +9653,7 @@ mod tests {
     async fn test_get_computed_style_color() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><p id="red" style="color:red">Red</p></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8712,7 +9668,7 @@ mod tests {
     async fn test_get_computed_style_interactive_button() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><button id="btn">Click</button></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8727,7 +9683,7 @@ mod tests {
     async fn test_get_computed_style_disabled_button() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><button id="btn" disabled>Click</button></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8743,7 +9699,7 @@ mod tests {
         let mut rt = JsRuntime::new();
         let html =
             r##"<html><body><div id="box" style="position:absolute">Abs</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8760,7 +9716,7 @@ mod tests {
     async fn test_get_bounding_client_rect() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="width:200px;height:100px">Box</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt
@@ -8775,7 +9731,7 @@ mod tests {
     async fn test_offset_width_height() {
         let mut rt = JsRuntime::new();
         let html = r##"<html><body><div id="box" style="width:300px;height:150px">Box</div></body></html>"##;
-        let frame = make_frame(html);
+        let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
         let result = rt

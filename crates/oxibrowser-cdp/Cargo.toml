@@ -28,7 +28,6 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 oxibrowser-core = { version = "0.17.0", path = "../oxibrowser-core" }
-oxibrowser-webapi = { version = "0.17.0", path = "../oxibrowser-webapi" }
 sha1 = { workspace = true }
 base64 = { workspace = true }
 

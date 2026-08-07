@@ -125,7 +125,7 @@ impl Page {
 
     /// Render the page as text/ASCII art for terminal output.
     pub fn to_text_screenshot(&self) -> String {
-        let snapshot = self.root_frame.to_dom_snapshot();
+        let snapshot = self.root_frame.document().clone();
         crate::css::render_to_text(&snapshot)
     }
 
@@ -161,7 +161,7 @@ impl Page {
     /// Blitz pipeline. The correct path for dynamic/SPA content. Falls back to
     /// the page source HTML if the serialized DOM is empty.
     pub fn to_screenshot_png_live(&self, viewport_width: u32) -> Result<Vec<u8>> {
-        let snapshot = self.root_frame.to_dom_snapshot();
+        let snapshot = self.root_frame.document().clone();
         let mut html_buf = String::new();
         if let Some(root) = snapshot.nodes.get(&snapshot.root_id) {
             crate::js::dom_serializer::serialize_node(root, &snapshot, &mut html_buf);

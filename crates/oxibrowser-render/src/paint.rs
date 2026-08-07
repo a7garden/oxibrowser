@@ -76,3 +76,14 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, RenderErr
         .map_err(|e| RenderError::Encode(e.to_string()))?;
     Ok(out)
 }
+
+/// Encode a blank white PNG of the given size.
+///
+/// Used as a fallback when the render document cannot be captured — preserves
+/// the "never hard-fail a screenshot" contract with a minimal valid PNG.
+pub fn blank_png(width: u32, height: u32) -> Vec<u8> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let rgba = vec![0xFFu8; (width as usize) * (height as usize) * 4];
+    encode_png(&rgba, width, height).unwrap_or_default()
+}

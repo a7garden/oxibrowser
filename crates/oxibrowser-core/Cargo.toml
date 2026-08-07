@@ -31,9 +31,6 @@ parking_lot = { workspace = true }
 wreq = { workspace = true }
 wreq-util = { workspace = true }
 encoding_rs = { workspace = true }
-html5ever = { workspace = true }
-markup5ever = { workspace = true }
-string_cache = { workspace = true }
 boa_engine = { workspace = true }
 boa_gc = { workspace = true }
 pollster = "0.4"
@@ -41,7 +38,6 @@ serde_yaml = "0.9"
 regex = "1.10"
 chrono = "0.4"
 
-oxibrowser-webapi = { version = "0.17.0", path = "../oxibrowser-webapi" }
 oxibrowser-render = { path = "../oxibrowser-render" }
 getrandom = { workspace = true }
 

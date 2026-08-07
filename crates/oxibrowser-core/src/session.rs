@@ -7,7 +7,7 @@ use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::js::JsRuntime;
-use crate::js::dom_snapshot::{DomMutation, DomSnapshot};
+use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
 use crate::js::runtime::{FetchRequestMsg, FetchResponseMsg, LocalStorageMsg};
 use crate::network::HttpClient;
@@ -418,7 +418,7 @@ impl Session {
         self.active_page = Some(page);
 
         // Inject DOM snapshot into JS runtime
-        self.inject_dom_snapshot();
+        self.inject_dom_snapshot().await;
 
         Ok(())
     }
@@ -451,7 +451,7 @@ impl Session {
         self.history.push(url.clone());
         self.history_index = self.history.len() - 1;
         self.active_page = Some(page);
-        self.inject_dom_snapshot();
+        self.inject_dom_snapshot().await;
         Ok(())
     }
 
@@ -469,7 +469,7 @@ impl Session {
         self.history.push(about_url.clone());
         self.history_index = self.history.len() - 1;
         self.active_page = Some(page);
-        self.inject_dom_snapshot();
+        self.inject_dom_snapshot().await;
         Ok(())
     }
     #[tracing::instrument(skip(self), fields(session = %self.id), err)]
@@ -532,7 +532,7 @@ impl Session {
             }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
-            self.inject_dom_snapshot();
+            self.inject_dom_snapshot().await;
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no previous page".into()))
@@ -563,7 +563,7 @@ impl Session {
             }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url, &html, 200, ct_header).await?);
-            self.inject_dom_snapshot();
+            self.inject_dom_snapshot().await;
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no next page".into()))
@@ -591,7 +591,7 @@ impl Session {
             }
             let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
             self.active_page = Some(Page::from_html(url.clone(), &html, 200, ct_header).await?);
-            self.inject_dom_snapshot();
+            self.inject_dom_snapshot().await;
             Ok(())
         } else {
             Err(CoreError::NavigationFailed("no current page".into()))
@@ -665,7 +665,7 @@ impl Session {
         self.active_page = Some(page);
 
         // Inject DOM snapshot into JS runtime
-        self.inject_dom_snapshot();
+        self.inject_dom_snapshot().await;
 
         Ok(())
     }
@@ -702,24 +702,11 @@ impl Session {
             .evaluate_with_await(expression, await_promise)
             .await?;
 
-        // Collect DOM mutations; separate async navigation from sync DOM edits.
-        let mut mutations = self.js_runtime.drain_mutations();
-        let mut navigation: Vec<DomMutation> = Vec::new();
-        let mut dom_edits: Vec<DomMutation> = Vec::new();
-        for m in mutations.drain(..) {
-            match m {
-                DomMutation::Navigate { .. } | DomMutation::Reload => navigation.push(m),
-                other => dom_edits.push(other),
-            }
-        }
-        if !dom_edits.is_empty() {
-            tracing::debug!(mutations = dom_edits.len(), "DOM mutations applied");
-            self.apply_mutations(&dom_edits);
-            self.inject_dom_snapshot();
-        }
-        // JS-triggered navigation needs network I/O, so it runs asynchronously
-        // after the synchronous DOM mutations have been applied.
-        for m in navigation {
+        // DOM edits are now applied live to the RenderDocument by the JS
+        // bindings themselves — no mutation log to drain/apply. Only
+        // JS-triggered navigation (location.href / assign / reload) is still
+        // signalled via the mutation channel, because it needs async network I/O.
+        for m in self.js_runtime.drain_mutations() {
             match m {
                 DomMutation::Navigate { url } => {
                     tracing::debug!(url = %url, "JS-triggered navigation");
@@ -729,139 +716,83 @@ impl Session {
                     tracing::debug!("JS-triggered reload");
                     self.reload().await?;
                 }
-                _ => {}
+                _ => {} // DOM edits handled directly on the RenderDocument.
             }
         }
 
         Ok(result)
     }
 
-    /// Apply recorded DOM mutations to the active page's DOM tree.
-    fn apply_mutations(&mut self, mutations: &[DomMutation]) {
-        for m in mutations {
-            tracing::trace!(mutation = ?m, "applying DOM mutation");
-            match m {
-                DomMutation::SetAttribute {
-                    node_id,
-                    name,
-                    value,
-                } => {
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().set_attribute(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            name,
-                            value,
-                        );
-                    }
-                }
-                DomMutation::SetTextContent { node_id, text } => {
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().set_text_content(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            text,
-                        );
-                        // Also set data-oxi-text so from_frame snapshot picks it up
-                        page.root_frame_mut().set_attribute(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            "data-oxi-text",
-                            text,
-                        );
-                    }
-                }
-                DomMutation::ClickElement { node_id } => {
-                    // Click doesn't modify DOM directly, but could trigger navigation
-                    tracing::info!(node_id, "element clicked");
-                }
-                DomMutation::InputElement { node_id, value } => {
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().set_attribute(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            "value",
-                            value,
-                        );
-                    }
-                }
-                // DOM structure mutations — apply to webapi DOM
-                DomMutation::CreateElement { node_id, tag } => {
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().document_mut().create_element_node(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            tag,
-                        );
-                    }
-                }
-                DomMutation::CreateTextNode { node_id, text } => {
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().document_mut().create_text_node(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            text,
-                        );
-                    }
-                }
-                DomMutation::AppendChild {
-                    parent_id,
-                    child_id,
-                } => {
-                    if let Some(page) = &mut self.active_page {
-                        let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
-                        let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
-                        page.root_frame_mut()
-                            .document_mut()
-                            .tree_mut()
-                            .append_child(pid, cid);
-                    }
-                }
-                DomMutation::RemoveChild {
-                    parent_id,
-                    child_id,
-                } => {
-                    if let Some(page) = &mut self.active_page {
-                        let pid = oxibrowser_webapi::dom::NodeId(*parent_id as usize);
-                        let cid = oxibrowser_webapi::dom::NodeId(*child_id as usize);
-                        if let Some(children) = page
-                            .root_frame_mut()
-                            .document_mut()
-                            .tree_mut()
-                            .children_mut(pid)
-                        {
-                            children.retain(|&c| c != cid);
-                        }
-                        page.root_frame_mut()
-                            .document_mut()
-                            .tree_mut()
-                            .remove_parent(cid);
-                    }
-                }
-                DomMutation::SetInnerHtml { node_id, html } => {
-                    // Simplified: treat as text content update
-                    if let Some(page) = &mut self.active_page {
-                        page.root_frame_mut().set_text_content(
-                            oxibrowser_webapi::dom::NodeId(*node_id as usize),
-                            html,
-                        );
-                    }
-                }
-                // Navigation mutations are executed asynchronously in
-                // `evaluate_js_with_await` (network I/O); they never reach this
-                // synchronous helper, but the match must stay exhaustive.
-                DomMutation::Navigate { .. } | DomMutation::Reload => {}
-            }
-        }
+    /// Capture a full-page PNG screenshot of the live (post-JS) document.
+    ///
+    /// Renders the current `RenderDocument` — which JS mutates directly — via
+    /// the JS thread. This is a consistent snapshot between JS ticks, with no
+    /// serialize/reparse round-trip (the legacy `DomSnapshot` bridge is gone).
+    /// The document is laid out at the session's configured viewport.
+    pub async fn capture_screenshot_png(&mut self, _viewport_width: u32) -> Result<Vec<u8>> {
+        let opts = oxibrowser_render::CaptureOpts {
+            viewport: None,
+            full_page: true,
+        };
+        self.js_runtime.capture_png(opts).await
     }
 
-    /// Inject the current page's DOM snapshot into the JS runtime.
-    fn inject_dom_snapshot(&mut self) {
-        if let Some(page) = &self.active_page {
-            let snapshot = DomSnapshot::from_frame(page.root_frame());
-            tracing::debug!(node_count = snapshot.nodes.len(), "DOM snapshot injected");
-            let url = self
-                .current_url()
-                .map(|u| u.as_str())
-                .unwrap_or("")
-                .to_string();
-            self.js_runtime.set_dom_snapshot(Some(snapshot));
-            // Update page URL for window.location
-            self.js_runtime.set_page_url(&url);
+
+    /// Inject the current page into the JS runtime.
+    ///
+    /// Builds the `RenderDocument` (the single DOM source of truth that JS
+    /// mutates directly) from the page HTML, then also seeds the legacy
+    /// `DomSnapshot` (still used by `document.title`/`document.cookie`/window
+    /// globals until the webapi DOM is retired) and the page URL.
+    async fn inject_dom_snapshot(&mut self) {
+        let (html, url) = match &self.active_page {
+            Some(page) => {
+                let html = page.content().to_string();
+                let url = self
+                    .current_url()
+                    .map(|u| u.as_str().to_string())
+                    .unwrap_or_default();
+                (html, url)
+            }
+            None => return,
+        };
+
+        // Build/replace the render document that JS mutates and screenshots render.
+        let viewport = (self.config.viewport_width, self.config.viewport_height);
+        if let Err(e) = self.js_runtime.set_document(&html, Some(&url), viewport).await {
+            tracing::warn!(error = %e, "failed to build render document; falling back");
+        }
+        // Derive the DomSnapshot from the (now-current) RenderDocument so every
+        // reader — JS metadata bindings, CDP DOM/OXI, extract — reflects JS
+        // mutations, not a stale navigate-time copy.
+        let snapshot = match self.js_runtime.dom_snapshot(&url).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to derive DOM snapshot");
+                None
+            }
+        };
+        tracing::debug!(
+            node_count = snapshot.as_ref().map(|s| s.nodes.len()).unwrap_or(0),
+            "DOM snapshot injected"
+        );
+        self.js_runtime.set_dom_snapshot(snapshot);
+        self.js_runtime.set_page_url(&url);
+    }
+
+    /// Serialize the live (post-JS) document to a [`DomSnapshot`].
+    ///
+    /// For CDP DOM/OXI and `extract` readers — reflects JS mutations because it
+    /// is derived from the `RenderDocument` on the JS thread.
+    pub async fn dom_snapshot(&mut self) -> Result<Option<crate::js::dom_snapshot::DomSnapshot>> {
+        let url = self
+            .current_url()
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_default();
+        match self.js_runtime.dom_snapshot(&url).await {
+            Ok(s) => Ok(Some(s)),
+            Err(CoreError::ScreenshotError(_)) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -997,9 +928,9 @@ impl Session {
 
     /// Replace the active page and inject DOM snapshot (for testing).
     #[cfg(test)]
-    pub fn inject_dom_snapshot_for_test(&mut self, page: Page) {
+    pub async fn inject_dom_snapshot_for_test(&mut self, page: Page) {
         self.active_page = Some(page);
-        self.inject_dom_snapshot();
+        self.inject_dom_snapshot().await;
     }
 
     /// Test-only: clone the in-flight counter's `Arc` so tests can
@@ -1040,16 +971,16 @@ impl Session {
             };
 
             let resource_type = match res.kind {
-                oxibrowser_webapi::dom::ResourceKind::Script => {
+                crate::js::dom_snapshot::ResourceKind::Script => {
                     crate::network::resource::ResourceType::Script
                 }
-                oxibrowser_webapi::dom::ResourceKind::Stylesheet => {
+                crate::js::dom_snapshot::ResourceKind::Stylesheet => {
                     crate::network::resource::ResourceType::Stylesheet
                 }
-                oxibrowser_webapi::dom::ResourceKind::Image => {
+                crate::js::dom_snapshot::ResourceKind::Image => {
                     crate::network::resource::ResourceType::Image
                 }
-                oxibrowser_webapi::dom::ResourceKind::Iframe => {
+                crate::js::dom_snapshot::ResourceKind::Iframe => {
                     crate::network::resource::ResourceType::Document
                 }
             };

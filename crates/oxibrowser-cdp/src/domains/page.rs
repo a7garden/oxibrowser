@@ -365,15 +365,15 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
         .and_then(|v| v.as_f64())
         .unwrap_or(1280.0) as u32;
 
-    let guard = ctx.session.read().await;
-    let png_bytes: Vec<u8> = match guard.page() {
-        Some(page) => page
-            .to_screenshot_png_live(viewport_width.max(64))
-            .unwrap_or_else(|_| {
-                oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default()
-            }),
-        None => oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default(),
-    };
+    // Render the live (post-JS) RenderDocument via the JS thread. Falls back to
+    // a blank PNG if no document is loaded.
+    let mut guard = ctx.session.write().await;
+    let png_bytes: Vec<u8> = guard
+        .capture_screenshot_png(viewport_width.max(64))
+        .await
+        .unwrap_or_else(|_| {
+            oxibrowser_core::blank_png(viewport_width.max(64), 800)
+        });
 
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
