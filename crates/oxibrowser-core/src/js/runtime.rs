@@ -8099,6 +8099,36 @@ fn register_window_globals(
     if (typeof globalThis[onprop] === 'function') { try { globalThis[onprop].call(globalThis, ev); } catch (e) {} }
     return true;
   };
+  // window.matchMedia — minimal MediaQueryList. 'matches' is derived for
+  // common min/max-width queries against the viewport; other queries
+  // (prefers-color-scheme, hover, ...) default to false. Many SPAs only need
+  // matchMedia to EXIST and not throw (responsive/CSS-in-JS feature checks).
+  (function () {
+    // window.matchMedia — minimal MediaQueryList. 'matches' is derived for
+    // common min/max-width queries against the viewport; other queries
+    // (prefers-color-scheme, hover, ...) default to false. Many SPAs only
+    // need matchMedia to EXIST and not throw (responsive/CSS-in-JS checks).
+    // NOTE: `window` is a distinct object from globalThis here, so install on
+    // both so `window.matchMedia` and bare `matchMedia` both resolve.
+    var mm = function (query) {
+      var q = String(query);
+      var w = (globalThis.innerWidth || (globalThis.window && globalThis.window.innerWidth) || 1280);
+      var min = /min-width:\s*(\d+)/i.exec(q);
+      var max = /max-width:\s*(\d+)/i.exec(q);
+      var m = false;
+      if (min || max) {
+        m = true;
+        if (min && w < parseInt(min[1], 10)) m = false;
+        if (max && w > parseInt(max[1], 10)) m = false;
+      }
+      return { media: q, matches: m, onchange: null,
+        addListener: function () {}, removeListener: function () {},
+        addEventListener: function () {}, removeEventListener: function () {},
+        dispatchEvent: function () { return true; } };
+    };
+    globalThis.matchMedia = globalThis.matchMedia || mm;
+    if (globalThis.window) { globalThis.window.matchMedia = globalThis.window.matchMedia || mm; }
+  })();
   function augment(loc) {
     if (!loc) return;
     try {
@@ -8357,6 +8387,41 @@ mod tests {
             r.value,
             Some(serde_json::json!(250_000)),
             "heavy loop completed (nav limits high enough), elapsed {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_match_media_min_max_width_and_default() {
+        // matchMedia must exist and not throw (responsive/CSS-in-JS feature
+        // checks call it at module init). min/max-width derive from viewport;
+        // other queries default to matches=false.
+        let mut rt = JsRuntime::new();
+        rt.set_document("<html><body></body></html>", None, (1280, 720))
+            .await
+            .unwrap();
+        let r = rt
+            .evaluate(
+                "({\
+                   has: typeof window.matchMedia === 'function',\
+                   small: window.matchMedia('(min-width: 100px)').matches,\
+                   huge: window.matchMedia('(min-width: 99999px)').matches,\
+                   maxok: window.matchMedia('(max-width: 5000px)').matches,\
+                   dark: window.matchMedia('(prefers-color-scheme: dark)').matches\
+                 })",
+            )
+            .await
+            .expect("evaluate");
+        if r.value.is_none() {
+            panic!("matchMedia eval failed: {:?}", r.exception);
+        }
+        let obj = r.value.expect("json object");
+        assert_eq!(obj["has"], serde_json::json!(true), "matchMedia is a function");
+        assert_eq!(obj["small"], serde_json::json!(true), "1280 >= 100");
+        assert_eq!(obj["huge"], serde_json::json!(false), "1280 < 99999");
+        assert_eq!(obj["maxok"], serde_json::json!(true), "1280 <= 5000");
+        assert_eq!(
+            obj["dark"], serde_json::json!(false),
+            "non-width query defaults to false"
         );
     }
 
