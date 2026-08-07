@@ -43,6 +43,7 @@ use crate::error::{CoreError, Result};
 use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot, ScriptSource};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
+use crate::network::ws::{WsData, WsEvent};
 use oxibrowser_render::{CaptureOpts, RenderDocument, RenderError, Viewport};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -90,6 +91,60 @@ enum PendingFetch {
         onrsc: Arc<RwLock<Option<JsValue>>>,
     },
 }
+#[derive(Clone, Default)]
+enum BinaryType {
+    #[default]
+    ArrayBuffer,
+}
+
+/// JS-side per-socket WebSocket state. Callbacks (`on*`) are re-read at settle
+/// time because JS may reassign them between pump cycles. Mirrors `PendingFetch`.
+enum WsState {
+    Connecting {
+        url: String,
+        onopen: Option<JsValue>,
+        onmessage: Option<JsValue>,
+        onclose: Option<JsValue>,
+        onerror: Option<JsValue>,
+        binary_type: BinaryType,
+        listeners: HashMap<String, Vec<JsValue>>,
+    },
+    Open {
+        url: String,
+        protocol: String,
+        extensions: String,
+        onopen: Option<JsValue>,
+        onmessage: Option<JsValue>,
+        onclose: Option<JsValue>,
+        onerror: Option<JsValue>,
+        binary_type: BinaryType,
+        listeners: HashMap<String, Vec<JsValue>>,
+    },
+    Closing {
+        onclose: Option<JsValue>,
+        onerror: Option<JsValue>,
+        listeners: HashMap<String, Vec<JsValue>>,
+    },
+    Closed,
+}
+
+/// JS→bridge WebSocket request, id-keyed (mirrors `FetchRequestMsg`).
+pub enum WsReqMsg {
+    Connect {
+        id: u64,
+        url: String,
+        protocols: Vec<String>,
+    },
+    Send {
+        id: u64,
+        data: WsData,
+    },
+    Close {
+        id: u64,
+        code: Option<u16>,
+        reason: Option<String>,
+    },
+}
 
 thread_local! {
     static PENDING_FETCH: RefCell<HashMap<u64, PendingFetch>> =
@@ -109,6 +164,28 @@ thread_local! {
 /// Mint a fresh fetch request id on the JS thread (never 0).
 fn next_fetch_id() -> u64 {
     NEXT_FETCH_ID.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1));
+        id
+    })
+}
+thread_local! {
+    /// Per-socket JS state + callbacks, keyed by id. Mirrors `PENDING_FETCH`.
+    static PENDING_WS: RefCell<HashMap<u64, WsState>> =
+        RefCell::new(HashMap::new());
+    /// Shared WS event receiver (background→JS, id-routed), installed by
+    /// `SetWsChannel`.
+    static WS_EVENT_RX: RefCell<Option<Receiver<WsEvent>>> =
+        const { RefCell::new(None) };
+    /// Shared WS request sender (JS→bridge): Connect/Send/Close.
+    static WS_REQ_TX: RefCell<Option<Sender<WsReqMsg>>> =
+        const { RefCell::new(None) };
+    static NEXT_WS_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Mint a fresh WebSocket id on the JS thread (never 0).
+fn next_ws_id() -> u64 {
+    NEXT_WS_ID.with(|c| {
         let id = c.get();
         c.set(id.wrapping_add(1));
         id
@@ -264,6 +341,12 @@ enum JsCommand {
     SetFetchChannel {
         request_tx: std::sync::mpsc::Sender<FetchRequestMsg>,
         response_rx: std::sync::mpsc::Receiver<FetchResponseMsg>,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Install the WebSocket channels so JS can open realtime connections.
+    SetWsChannel {
+        request_tx: std::sync::mpsc::Sender<WsReqMsg>,
+        response_rx: std::sync::mpsc::Receiver<WsEvent>,
         response_tx: Sender<JsResponse>,
     },
     /// Set the localStorage sync channel so JS operations propagate to Session.
@@ -535,6 +618,24 @@ impl JsRuntime {
             response_tx: ack_tx,
         }) {
             tracing::error!(error = %e, "failed to send SetFetchChannel: JS thread has died");
+            return;
+        }
+        let _ = ack_rx.recv();
+    }
+    /// Set the WebSocket channels: the request sender and the shared event
+    /// receiver. Must be called before JS can use `WebSocket`.
+    pub fn set_ws_channel(
+        &mut self,
+        request_tx: std::sync::mpsc::Sender<WsReqMsg>,
+        event_rx: std::sync::mpsc::Receiver<WsEvent>,
+    ) {
+        let (ack_tx, ack_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self.cmd_tx.send(JsCommand::SetWsChannel {
+            request_tx,
+            response_rx: event_rx,
+            response_tx: ack_tx,
+        }) {
+            tracing::error!(error = %e, "failed to send SetWsChannel: JS thread has died");
             return;
         }
         let _ = ack_rx.recv();
@@ -1099,6 +1200,15 @@ fn js_thread_loop(
             } => {
                 *fetch_tx_arc.write() = Some(request_tx);
                 RESPONSE_RX.with(|cell| *cell.borrow_mut() = Some(response_rx));
+                let _ = response_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetWsChannel {
+                request_tx,
+                response_rx,
+                response_tx,
+            } => {
+                WS_REQ_TX.with(|cell| *cell.borrow_mut() = Some(request_tx));
+                WS_EVENT_RX.with(|cell| *cell.borrow_mut() = Some(response_rx));
                 let _ = response_tx.send(JsResponse::Done);
             }
             JsCommand::SetCookieJar { jar, response_tx } => {
