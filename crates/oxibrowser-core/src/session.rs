@@ -744,23 +744,50 @@ impl Session {
     /// `DomSnapshot` (still used by `document.title`/`document.cookie`/window
     /// globals until the webapi DOM is retired) and the page URL.
     async fn inject_dom_snapshot(&mut self) {
-        let (html, url) = match &self.active_page {
+        let (html, url, mut scripts) = match &self.active_page {
             Some(page) => {
                 let html = page.content().to_string();
                 let url = self
                     .current_url()
                     .map(|u| u.as_str().to_string())
                     .unwrap_or_default();
-                (html, url)
+                let scripts = page.root_frame().extract_scripts();
+                (html, url, scripts)
             }
             None => return,
         };
 
-        // Build/replace the render document that JS mutates and screenshots render.
+        // Fetch external (<script src>) bodies in document order, filling each
+        // entry's `source`. Inline scripts already carry their source. Fetch is
+        // sequential + in-order for Phase 1 (parallel fetch is Phase 3).
+        if !scripts.is_empty() {
+            let base = Url::parse(&url).ok();
+            for s in scripts.iter_mut() {
+                let Some(src) = s.src_url.clone() else {
+                    continue;
+                };
+                let Some(full_url) = base.as_ref().and_then(|b| b.join(&src).ok()) else {
+                    continue;
+                };
+                let _in_flight = InFlightGuard::new(self.in_flight.clone());
+                match self.http_client.fetch_text(&full_url).await {
+                    Ok(body) => s.source = body,
+                    Err(e) => tracing::warn!(src = %src, error = %e, "failed to fetch external script"),
+                }
+            }
+        }
+
+        // Set window.location BEFORE running page scripts: `set_page_url`
+        // re-registers the whole `window` global, so it must precede script
+        // execution — otherwise any `window.*` properties a script sets
+        // (window.onload handlers, framework globals, etc.) would be wiped.
+        self.js_runtime.set_page_url(&url);
+        // Build/replace the render document AND execute the page's `<script>`
+        // tags (Phase 1 keystone).
         let viewport = (self.config.viewport_width, self.config.viewport_height);
         if let Err(e) = self
             .js_runtime
-            .set_document(&html, Some(&url), viewport)
+            .set_document_with_scripts(&html, Some(&url), viewport, scripts)
             .await
         {
             tracing::warn!(error = %e, "failed to build render document; falling back");
@@ -780,7 +807,6 @@ impl Session {
             "DOM snapshot injected"
         );
         self.js_runtime.set_dom_snapshot(snapshot);
-        self.js_runtime.set_page_url(&url);
     }
 
     /// Serialize the live (post-JS) document to a [`DomSnapshot`].
@@ -1020,5 +1046,71 @@ impl Session {
             "sub-resources loaded"
         );
         loaded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::BrowserId;
+    use crate::config::BrowserConfig;
+    use crate::network::HttpClient;
+    use crate::network::cookie::CookieJar;
+    use crate::page::Page;
+
+    /// Build a Session with SSRF disabled (so tests can reach loopback mocks)
+    /// and the default (high) nav-script limits.
+    async fn make_session() -> Session {
+        let mut config = BrowserConfig::headless();
+        config.enable_ssrf_filter = false;
+        let cookie_jar = Arc::new(RwLock::new(CookieJar::new()));
+        let http_client = Arc::new(HttpClient::new(&config, cookie_jar.clone()).unwrap());
+        Session::new(BrowserId::next(), config, http_client, cookie_jar)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_inject_dom_snapshot_runs_inline_scripts() {
+        // Phase 1 keystone end-to-end: a page's inline <script> must execute
+        // during document injection, mutating the live DOM that a later
+        // evaluate observes — exactly like headless Chrome.
+        let mut session = make_session().await;
+        let html = r#"<html><head></head><body>
+            <div id="app">placeholder</div>
+            <script>document.getElementById('app').textContent = 'rendered';</script>
+            </body></html>"#;
+        let url = Url::parse("https://test.local/").unwrap();
+        let page = Page::from_html(url, html, 200, "text/html".into())
+            .await
+            .unwrap();
+        session.inject_dom_snapshot_for_test(page).await;
+
+        let r = session
+            .evaluate_js("document.getElementById('app').textContent")
+            .await
+            .expect("evaluate");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!("rendered")),
+            "inline script ran during injection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ready_state_is_complete_after_inject() {
+        let mut session = make_session().await;
+        let html = r#"<html><body><script>window.__any = 1;</script></body></html>"#;
+        let url = Url::parse("https://test.local/").unwrap();
+        let page = Page::from_html(url, html, 200, "text/html".into())
+            .await
+            .unwrap();
+        session.inject_dom_snapshot_for_test(page).await;
+
+        let r = session
+            .evaluate_js("document.readyState")
+            .await
+            .expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!("complete")));
     }
 }

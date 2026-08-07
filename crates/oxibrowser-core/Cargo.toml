@@ -42,6 +42,7 @@ oxibrowser-render = { version = "0.18.0", path = "../oxibrowser-render" }
 getrandom = { workspace = true }
 
 [dev-dependencies]
+wiremock = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

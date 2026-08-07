@@ -148,6 +148,12 @@ impl Frame {
     pub fn iframe_srcs(&self) -> Vec<String> {
         self.snapshot.iframe_srcs()
     }
+
+    /// Extract executable `<script>` elements in document order (Phase 1).
+    /// External scripts return an empty `source`; the caller fetches the body.
+    pub fn extract_scripts(&self) -> Vec<crate::js::dom_snapshot::ScriptSource> {
+        self.snapshot.extract_scripts()
+    }
 }
 
 #[cfg(test)]

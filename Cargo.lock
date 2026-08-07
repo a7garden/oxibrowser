@@ -2829,6 +2829,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wiremock",
  "wreq",
  "wreq-util",
 ]

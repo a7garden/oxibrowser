@@ -39,7 +39,7 @@ use serde_json::Value;
 
 use crate::css::LayoutEngine;
 use crate::error::{CoreError, Result};
-use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot};
+use crate::js::dom_snapshot::{DomMutation, DomNode, DomSnapshot, ScriptSource};
 use crate::js::job_queue::TokioJobQueue;
 use crate::network::cookie::CookieJar;
 use oxibrowser_render::{CaptureOpts, RenderDocument, RenderError, Viewport};
@@ -59,6 +59,14 @@ static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1_000_000);
 thread_local! {
     static LISTENER_REGISTRY: RefCell<HashMap<u32, HashMap<String, Vec<JsObject>>>> =
         RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// `document.readyState`. Transitions "loading" → "interactive" →
+    /// "complete" during navigation script execution (Phase 1). Defaults to
+    /// "complete" so legacy `set_document` (no scripts) reports a ready doc.
+    static DOC_READY_STATE: std::cell::Cell<&'static str> =
+        const { std::cell::Cell::new("complete") };
 }
 
 /// Register a listener callback for a node in the thread-local registry.
@@ -226,6 +234,17 @@ enum JsCommand {
         html: String,
         base_url: Option<String>,
         viewport: (u32, u32),
+        /// Page `<script>` sources to execute after the document is built
+        /// (inline + fetched external, in document order). Empty = legacy
+        /// behavior (no script execution).
+        scripts: Vec<ScriptSource>,
+        /// Nav-script execution limits — much higher than the eval caps; see
+        /// `JsRuntimeConfig::nav_script_*`. Carried per-command because the JS
+        /// thread holds no config.
+        nav_loop_limit: u64,
+        nav_recursion_limit: usize,
+        nav_stack_limit: usize,
+        nav_timeout_ms: u64,
         response_tx: Sender<JsResponse>,
     },
     /// Capture a PNG of the current `RenderDocument`.
@@ -333,6 +352,14 @@ pub struct JsRuntimeConfig {
     pub max_loop_iterations: u64,
     /// Max operand stack size.
     pub max_stack_size: usize,
+    /// Nav-script limits — separate, much higher caps for page `<script>`
+    /// execution (see Phase 1 spec). The eval caps above are for agent
+    /// one-shot snippets and would silently skip real SPA bundles.
+    pub nav_script_max_loop_iterations: u64,
+    pub nav_script_max_recursion: usize,
+    pub nav_script_max_stack_size: usize,
+    /// Wall-clock budget (ms) for the whole script-execution + settle phase.
+    pub nav_script_timeout_ms: u64,
     /// Viewport width (pixels, 0 = headless).
     pub viewport_width: u32,
     /// Viewport height (pixels, 0 = headless).
@@ -349,6 +376,10 @@ impl Default for JsRuntimeConfig {
             max_recursion: 100,
             max_loop_iterations: 100_000,
             max_stack_size: 1024,
+            nav_script_max_loop_iterations: 500_000_000,
+            nav_script_max_recursion: 4_096,
+            nav_script_max_stack_size: 16_384,
+            nav_script_timeout_ms: 30_000,
             viewport_width: 1280,
             viewport_height: 720,
             user_agent: "Mozilla/5.0 (OxiBrowser/0.1.0; +https://github.com/oxios/oxibrowser)"
@@ -364,6 +395,10 @@ impl From<&crate::config::BrowserConfig> for JsRuntimeConfig {
             max_recursion: config.js_max_recursion,
             max_loop_iterations: config.js_max_loop_iterations,
             max_stack_size: config.js_max_stack_size,
+            nav_script_max_loop_iterations: config.nav_script_max_loop_iterations,
+            nav_script_max_recursion: config.nav_script_max_recursion,
+            nav_script_max_stack_size: config.nav_script_max_stack_size,
+            nav_script_timeout_ms: config.nav_script_timeout_ms,
             viewport_width: config.viewport_width,
             viewport_height: config.viewport_height,
             user_agent: config.user_agent.clone(),
@@ -631,13 +666,30 @@ impl JsRuntime {
 
     /// Build (or replace) the renderable document on the JS thread from HTML.
     ///
-    /// The `RenderDocument` is constructed on the JS thread (it is `!Send`),
-    /// then mutated by JS bindings and captured/queried via the façades below.
+    /// No page scripts are executed (legacy behavior). Use
+    /// [`set_document_with_scripts`](Self::set_document_with_scripts) to run
+    /// the page's `<script>` tags during navigation.
     pub async fn set_document(
         &mut self,
         html: &str,
         base_url: Option<&str>,
         viewport: (u32, u32),
+    ) -> Result<()> {
+        self.set_document_with_scripts(html, base_url, viewport, Vec::new())
+            .await
+    }
+
+    /// Build the render document AND execute the supplied page `<script>`
+    /// sources in document order, then fire `DOMContentLoaded`/`load` and
+    /// settle the timer/microtask queue — mirroring a real browser's
+    /// navigation. External scripts must already be fetched (`source` filled);
+    /// entries with an empty `source` and a `src_url` are skipped with a warn.
+    pub async fn set_document_with_scripts(
+        &mut self,
+        html: &str,
+        base_url: Option<&str>,
+        viewport: (u32, u32),
+        scripts: Vec<ScriptSource>,
     ) -> Result<()> {
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
         self.cmd_tx
@@ -645,6 +697,11 @@ impl JsRuntime {
                 html: html.to_string(),
                 base_url: base_url.map(|s| s.to_string()),
                 viewport,
+                scripts,
+                nav_loop_limit: self.config.nav_script_max_loop_iterations,
+                nav_recursion_limit: self.config.nav_script_max_recursion,
+                nav_stack_limit: self.config.nav_script_max_stack_size,
+                nav_timeout_ms: self.config.nav_script_timeout_ms,
                 response_tx,
             })
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
@@ -983,6 +1040,11 @@ fn js_thread_loop(
                 html,
                 base_url,
                 viewport,
+                scripts,
+                nav_loop_limit,
+                nav_recursion_limit,
+                nav_stack_limit,
+                nav_timeout_ms,
                 response_tx,
             } => {
                 let vp = Viewport {
@@ -993,6 +1055,15 @@ fn js_thread_loop(
                 match RenderDocument::from_html(&html, base_url.as_deref(), vp) {
                     Ok(doc) => {
                         *render_doc_cell.borrow_mut() = Some(doc);
+                        run_navigation_scripts(
+                            &mut ctx,
+                            &job_queue,
+                            &scripts,
+                            nav_loop_limit,
+                            nav_recursion_limit,
+                            nav_stack_limit,
+                            nav_timeout_ms,
+                        );
                         let _ = response_tx.send(JsResponse::Done);
                     }
                     Err(e) => {
@@ -1172,6 +1243,129 @@ fn await_promise_value(
     }
 }
 
+/// Execute the page's `<script>` tags in document order, fire the load
+/// lifecycle, and settle the timer/microtask queue — the Phase 1 keystone.
+///
+/// Runs entirely on the JS thread against the just-built `RenderDocument`.
+/// Uses dedicated (high) nav-script limits, NOT `evaluate()`'s caps, so real
+/// SPA bundles are not silently skipped. On budget exhaustion we stop running
+/// further scripts but keep partial state (no context reset).
+fn run_navigation_scripts(
+    ctx: &mut Context,
+    job_queue: &Rc<TokioJobQueue>,
+    scripts: &[ScriptSource],
+    loop_limit: u64,
+    recursion_limit: usize,
+    stack_limit: usize,
+    timeout_ms: u64,
+) {
+    // No scripts → document is immediately complete (legacy set_document path).
+    if scripts.is_empty() {
+        DOC_READY_STATE.with(|c| c.set("complete"));
+        return;
+    }
+
+    let budget = Duration::from_millis(timeout_ms);
+    let start = Instant::now();
+
+    // readyState = "interactive": DOM is built, scripts about to run.
+    DOC_READY_STATE.with(|c| c.set("interactive"));
+
+    let apply_limits = |ctx: &mut Context| {
+        let limits = ctx.runtime_limits_mut();
+        limits.set_loop_iteration_limit(loop_limit);
+        limits.set_recursion_limit(recursion_limit);
+        limits.set_stack_size_limit(stack_limit);
+    };
+
+    for script in scripts {
+        if start.elapsed() >= budget {
+            tracing::warn!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                budget_ms = timeout_ms,
+                "nav-script budget exhausted; stopping script execution (state kept)"
+            );
+            break;
+        }
+        // External scripts must be fetched by the caller; an empty source with
+        // a src_url means it was not retrieved — skip (mirrors onerror).
+        if script.source.is_empty() {
+            if let Some(src) = &script.src_url {
+                tracing::warn!(src, "external script not fetched; skipping");
+            }
+            continue;
+        }
+        // Re-arm limits per script: boa's loop counter can accumulate across
+        // evals, and a prior script's runaway would otherwise starve siblings.
+        apply_limits(ctx);
+        if let Err(err) = ctx.eval(Source::from_bytes(script.source.as_str())) {
+            // A thrown script does not abort siblings — matches Chrome.
+            let msg = format_js_error(&err, ctx);
+            tracing::warn!(error = %msg, src = ?script.src_url, "page script threw; continuing");
+        }
+        // Drain microtasks + already-due timers queued by this script.
+        ctx.run_jobs();
+        drain_timers(job_queue, ctx);
+    }
+
+    // Lifecycle events. DOMContentLoaded fires while readyState is still
+    // "interactive"; load fires after it becomes "complete".
+    fire_lifecycle_event(ctx, "DOMContentLoaded");
+    DOC_READY_STATE.with(|c| c.set("complete"));
+    fire_lifecycle_event(ctx, "load");
+
+    // Bootstrap pump: settle timers/microtasks to idle, waiting for the next
+    // timer deadline (capped at remaining budget) so e.g. setTimeout(50) fires.
+    settle_to_idle(ctx, job_queue, start, budget);
+}
+
+/// Dispatch a lifecycle event on `document` and `window` defensively. A
+/// missing `dispatchEvent` or thrown handler never propagates to the caller.
+fn fire_lifecycle_event(ctx: &mut Context, event_type: &str) {
+    let snippet = format!(
+        r#"(function () {{
+  try {{ document.dispatchEvent(new Event({evt:?})); }} catch (e) {{}}
+  try {{ if (window.dispatchEvent) window.dispatchEvent(new Event({evt:?})); }} catch (e) {{}}
+}})();"#,
+        evt = event_type
+    );
+    let _ = ctx.eval(Source::from_bytes(snippet.as_str()));
+    ctx.run_jobs();
+}
+
+/// Pump microtasks and timers until the page is idle: no pending timers and no
+/// pending microtasks. If timers are scheduled for the future, sleep on the JS
+/// thread until the nearest deadline (capped at `budget` remaining from
+/// `start`), then loop. Bounded by 200 passes to guard interval storms.
+fn settle_to_idle(ctx: &mut Context, job_queue: &Rc<TokioJobQueue>, start: Instant, budget: Duration) {
+    for _pass in 0..200u32 {
+        ctx.run_jobs();
+        drain_timers(job_queue, ctx);
+
+        let pending = job_queue.timer_count() + job_queue.microtask_count();
+        if pending == 0 {
+            return;
+        }
+        // Microtasks may remain even with no due timers; loop back if so.
+        if job_queue.timer_count() == 0 {
+            // Only microtasks pending — run_jobs on the next pass drains them.
+            continue;
+        }
+        let now = Instant::now();
+        let remaining = budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            tracing::warn!(pending, "settle budget exhausted; timers remain");
+            return;
+        }
+        let wait = match job_queue.next_timer_deadline() {
+            Some(dl) if dl > now => dl - now,
+            _ => Duration::ZERO,
+        };
+        if !wait.is_zero() {
+            std::thread::sleep(wait.min(remaining));
+        }
+    }
+}
 fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
     let mut iterations = 0u32;
     loop {
@@ -4667,6 +4861,14 @@ fn register_document_object(
         })
     };
 
+    let ready_state_getter_fn = FunctionObjectBuilder::new(ctx.realm(), unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let s = DOC_READY_STATE.with(|c| c.get());
+            Ok(JsValue::from(js_string!(s)))
+        })
+    })
+    .name(js_string!("get readyState"))
+    .build();
     let document_obj = boa_engine::object::ObjectInitializer::new(ctx)
         .accessor(
             js_string!("title"),
@@ -4853,6 +5055,12 @@ fn register_document_object(
             },
             js_string!("elementFromPoint"),
             2,
+        )
+        .accessor(
+            js_string!("readyState"),
+            Some(ready_state_getter_fn),
+            None,
+            Attribute::all(),
         )
         .build();
 
@@ -7871,12 +8079,25 @@ fn register_window_globals(
     },
   };
   globalThis.addEventListener = globalThis.addEventListener || function (type, cb) {
+    if (typeof cb !== 'function') return;
     if (type === 'popstate') (globalThis.__oxiPopstateListeners = globalThis.__oxiPopstateListeners || []).push(cb);
+    var m = (globalThis.__oxiWinListeners = globalThis.__oxiWinListeners || {});
+    (m[type] = m[type] || []).push(cb);
   };
   globalThis.removeEventListener = globalThis.removeEventListener || function (type, cb) {
     if (type === 'popstate' && globalThis.__oxiPopstateListeners) {
       globalThis.__oxiPopstateListeners = globalThis.__oxiPopstateListeners.filter(function (x) { return x !== cb; });
     }
+    var m = globalThis.__oxiWinListeners;
+    if (m && m[type]) { m[type] = m[type].filter(function (x) { return x !== cb; }); }
+  };
+  globalThis.dispatchEvent = globalThis.dispatchEvent || function (ev) {
+    var t = (ev && typeof ev === 'object') ? ev.type : ev;
+    var cbs = globalThis.__oxiWinListeners && globalThis.__oxiWinListeners[t];
+    if (cbs) { for (var i = 0; i < cbs.length; i++) { try { cbs[i].call(globalThis, ev); } catch (e) {} } }
+    var onprop = 'on' + t;
+    if (typeof globalThis[onprop] === 'function') { try { globalThis[onprop].call(globalThis, ev); } catch (e) {} }
+    return true;
   };
   function augment(loc) {
     if (!loc) return;
@@ -7941,6 +8162,7 @@ fn estimate_element_height(node: &DomNode) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::js::dom_snapshot::{ExecuteTiming, ScriptKind};
     use crate::frame::Frame;
     use url::Url;
 
@@ -7986,6 +8208,155 @@ mod tests {
         assert!(
             matches!(err, CoreError::ScreenshotError(_)),
             "capture without a document should be a screenshot error, got {err:?}"
+        );
+    }
+
+    // --- Navigation script execution (Phase 1 keystone) ---
+
+    fn classic(source: &str) -> ScriptSource {
+        ScriptSource {
+            source: source.to_string(),
+            src_url: None,
+            kind: ScriptKind::Classic,
+            execute: ExecuteTiming::Defer,
+        }
+    }
+
+    const NAV_HTML: &str = "<!DOCTYPE html><html><head></head><body><div id=\"app\"></div></body></html>";
+
+    #[tokio::test]
+    async fn test_nav_script_inline_executes() {
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![classic("window.__t = 1;")],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let r = rt.evaluate("window.__t").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!(1)), "inline script ran");
+    }
+
+    #[tokio::test]
+    async fn test_nav_scripts_run_in_document_order() {
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![
+                classic("window.__order = (window.__order || '') + 'A';"),
+                classic("window.__order = (window.__order || '') + 'B';"),
+                classic("window.__order = (window.__order || '') + 'C';"),
+            ],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let r = rt.evaluate("window.__order").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!("ABC")), "ordered execution");
+    }
+
+    #[tokio::test]
+    async fn test_nav_script_throw_does_not_abort_sibling() {
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![
+                classic("throw new Error('boom');"),
+                classic("window.__survived = 1;"),
+            ],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let r = rt.evaluate("window.__survived").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!(1)), "later script ran despite throw");
+    }
+
+    #[tokio::test]
+    async fn test_nav_script_dom_content_loaded_fires() {
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![classic(
+                "document.addEventListener('DOMContentLoaded', function () {\
+                     window.__dcl = 1;\
+                 });",
+            )],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let r = rt.evaluate("window.__dcl").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!(1)), "DOMContentLoaded fired");
+    }
+
+    #[tokio::test]
+    async fn test_nav_script_ready_state_complete() {
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![classic("window.__rs = document.readyState;")],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        // The script captured readyState during execution ("interactive"); the
+        // post-nav readyState must be "complete".
+        let r = rt.evaluate("document.readyState").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!("complete")), "readyState complete");
+    }
+
+    #[tokio::test]
+    async fn test_nav_script_settimeout_settles() {
+        // A 50 ms timer must fire during the bootstrap pump (not require a
+        // later evaluate()), proving the pump waits for due timers.
+        let mut rt = JsRuntime::new();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![classic("setTimeout(function () { window.__to = 'fired'; }, 50);")],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let r = rt.evaluate("window.__to").await.expect("evaluate");
+        assert_eq!(r.value, Some(serde_json::json!("fired")), "setTimeout fired in pump");
+    }
+
+    #[tokio::test]
+    async fn test_nav_script_heavy_loop_runs_under_dedicated_limits() {
+        // A loop exceeding the default evaluate() cap (100 000) must still run
+        // under the nav-script limits — proving real bundles are not silently
+        // skipped. Count is bounded by boa's interpreter throughput (a tight
+        // loop runs at ~tens of k iter/s JIT-less); 250 000 is 2.5x the eval
+        // cap and completes in a few seconds. NOTE: a single compute-bound
+        // script is uninterruptible mid-eval except by the loop counter, so
+        // pathological tight loops are a Phase 2 watchdog concern.
+        let mut rt = JsRuntime::new();
+        let t0 = std::time::Instant::now();
+        rt.set_document_with_scripts(
+            NAV_HTML,
+            Some("https://example.com/"),
+            (400, 300),
+            vec![classic(
+                "var s = 0; for (var i = 0; i < 250000; i++) { s++; } window.__heavy = s;",
+            )],
+        )
+        .await
+        .expect("set_document_with_scripts");
+        let elapsed = t0.elapsed();
+        eprintln!("250k-loop nav-script elapsed: {elapsed:?}");
+        let r = rt.evaluate("window.__heavy").await.expect("evaluate");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!(250_000)),
+            "heavy loop completed (nav limits high enough), elapsed {elapsed:?}"
         );
     }
 
@@ -8923,6 +9294,10 @@ mod tests {
             max_recursion: 10,
             max_loop_iterations: 50,
             max_stack_size: 256,
+            nav_script_max_loop_iterations: 50,
+            nav_script_max_recursion: 10,
+            nav_script_max_stack_size: 256,
+            nav_script_timeout_ms: 1000,
             viewport_width: 1280,
             viewport_height: 720,
             user_agent: "Test/1.0".to_string(),

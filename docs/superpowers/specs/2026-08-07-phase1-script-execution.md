@@ -185,3 +185,23 @@ external script fetches need the `http_client` + `in_flight`, which the `Session
 - Cross-origin/CORS enforcement on external script fetch (Phase 6).
 - Multi-frame script execution (Phase 8).
 - `Runtime.exceptionThrown` CDP emission (Phase 5; Phase 1 only logs).
+
+## Implementation findings (post-implementation)
+
+1. **`set_page_url` must precede script execution.** `SetPageUrl` re-registers
+   the *entire* `window` global (`register_window_globals`), so calling it
+   after scripts run wipes any `window.*` properties the scripts set
+   (`window.onload`, framework globals). `inject_dom_snapshot` now calls
+   `set_page_url` before `set_document_with_scripts`. DOM mutations survive
+   either order (they live on the `RenderDocument`), but window globals do not.
+
+2. **boa interpreter throughput is a binding constraint.** A tight
+   `for` loop runs at ~88 k iter/s JIT-less (measured), so a 5 M-iteration
+   init loop takes ~1 minute. The 500 M loop cap is a ceiling, not a practical
+   guard: a single compute-bound `eval` is uninterruptible mid-loop except by
+   the loop counter, and the wall-clock budget only checks *between* scripts.
+   Light/medium event-driven bundles (the common case) bootstrap fine; a
+   pathological single tight loop can block beyond the budget. A per-script
+   wall-clock watchdog is Phase 2 work (requires boa interrupt hooks). The
+   acceptance test uses 250 k iterations (2.5× the eval cap, ~2.8 s) rather
+   than 5 M to stay within test time.

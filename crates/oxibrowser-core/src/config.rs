@@ -72,6 +72,22 @@ fn default_js_max_stack_size() -> usize {
     1024
 }
 
+fn default_nav_script_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_nav_script_max_recursion() -> usize {
+    4_096
+}
+
+fn default_nav_script_max_loop_iterations() -> u64 {
+    500_000_000
+}
+
+fn default_nav_script_max_stack_size() -> usize {
+    16_384
+}
+
 fn default_navigation_timeout_ms() -> u64 {
     30_000
 }
@@ -161,6 +177,30 @@ pub struct BrowserConfig {
     #[serde(default = "default_js_max_stack_size")]
     pub js_max_stack_size: usize,
 
+    /// Timeout (ms) for the navigation script-execution phase — covers all
+    /// page `<script>` tags plus the post-load settle pump cumulatively.
+    /// Separate from `js_timeout_ms` (agent one-shot evals): real SPA bundles
+    /// need far more wall time. Default 30 s.
+    #[serde(default = "default_nav_script_timeout_ms")]
+    pub nav_script_timeout_ms: u64,
+
+    /// Max recursion depth for navigation script execution. Higher than
+    /// `js_max_recursion` to allow framework-scale call depth without
+    /// tripping. Default 4_096.
+    #[serde(default = "default_nav_script_max_recursion")]
+    pub nav_script_max_recursion: usize,
+
+    /// Max loop iterations for navigation script execution. ~5_000x the
+    /// `js_max_loop_iterations` cap so real SPA bundles (millions of init
+    /// iterations, more under JIT-less boa) are not silently skipped.
+    /// Default 500_000_000.
+    #[serde(default = "default_nav_script_max_loop_iterations")]
+    pub nav_script_max_loop_iterations: u64,
+
+    /// Max operand stack size for navigation script execution. Default 16_384.
+    #[serde(default = "default_nav_script_max_stack_size")]
+    pub nav_script_max_stack_size: usize,
+
     /// Navigation timeout in milliseconds (time to wait for page load).
     #[serde(default = "default_navigation_timeout_ms")]
     pub navigation_timeout_ms: u64,
@@ -193,6 +233,10 @@ impl Default for BrowserConfig {
             js_max_recursion: default_js_max_recursion(),
             js_max_loop_iterations: default_js_max_loop_iterations(),
             js_max_stack_size: default_js_max_stack_size(),
+            nav_script_timeout_ms: default_nav_script_timeout_ms(),
+            nav_script_max_recursion: default_nav_script_max_recursion(),
+            nav_script_max_loop_iterations: default_nav_script_max_loop_iterations(),
+            nav_script_max_stack_size: default_nav_script_max_stack_size(),
             navigation_timeout_ms: default_navigation_timeout_ms(),
             cookie_file: None,
             max_response_body_bytes: default_max_response_body(),

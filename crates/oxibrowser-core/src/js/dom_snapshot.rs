@@ -79,6 +79,37 @@ pub struct ResourceUrl {
     pub kind: ResourceKind,
 }
 
+/// Whether a `<script>` is a classic or module script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptKind {
+    Classic,
+    Module,
+}
+
+/// When a `<script>` executes relative to document parsing.
+///
+/// `Defer` = execute in document order after the DOM is built (covers inline,
+/// classic `<script src>`, `defer`, and `module`). `Async` = execute as soon as
+/// it is available (unordered). Phase 1 treats both as ordered-after-parse;
+/// the distinction is recorded for Phase 3+.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecuteTiming {
+    Defer,
+    Async,
+}
+
+/// An executable `<script>` extracted from the document, in document order.
+///
+/// `source` holds the inline text for inline scripts and is left empty for
+/// external scripts — the navigation path fills it after fetching the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptSource {
+    pub source: String,
+    pub src_url: Option<String>,
+    pub kind: ScriptKind,
+    pub execute: ExecuteTiming,
+}
+
 /// Per-node `ComputedStyle` cache, keyed by `node_id` and invalidated by snapshot revision.
 ///
 /// Stays private — only `DomSnapshot::compute_style_cached` reads or writes it.
@@ -993,6 +1024,78 @@ impl DomSnapshot {
             .filter_map(|n| n.attributes.get("src").cloned())
             .collect()
     }
+
+    /// Extract executable `<script>` elements in document order.
+    ///
+    /// Skips non-JS script types (e.g. `application/json` data blocks) and
+    /// `nomodule` scripts (this engine supports modules). External (`src`)
+    /// scripts return an empty `source`; the caller fills it after fetching.
+    pub fn extract_scripts(&self) -> Vec<ScriptSource> {
+        let mut out = Vec::new();
+        // Iterative DFS pre-order = document order. `tag_index` would also
+        // work while fresh, but a tree walk stays correct after mutations.
+        let mut stack = vec![self.root_id];
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            // Push children reversed so they are visited in forward order.
+            for &child in node.children.iter().rev() {
+                stack.push(child);
+            }
+            if node.node_type != 1 || !node.tag.eq_ignore_ascii_case("script") {
+                continue;
+            }
+            let type_attr = node
+                .attributes
+                .get("type")
+                .map(String::as_str)
+                .unwrap_or("");
+            let Some(kind) = classify_script_type(type_attr) else {
+                continue; // non-JS type → data block, skip
+            };
+            // `nomodule` is honored only by non-module browsers; we support
+            // modules, so skip these like real Chrome does.
+            if node.attributes.contains_key("nomodule") {
+                continue;
+            }
+            let src_url = node.attributes.get("src").cloned();
+            let execute = if node.attributes.contains_key("async") {
+                ExecuteTiming::Async
+            } else {
+                ExecuteTiming::Defer
+            };
+            let source = match &src_url {
+                Some(_) => String::new(),
+                None => node.text_content.clone(),
+            };
+            out.push(ScriptSource {
+                source,
+                src_url,
+                kind,
+                execute,
+            });
+        }
+        out
+    }
+}
+
+/// Classify a `<script type>` attribute into classic / module, or `None` for a
+/// non-JS type (data block) that must not execute.
+fn classify_script_type(type_attr: &str) -> Option<ScriptKind> {
+    let t = type_attr.trim().to_ascii_lowercase();
+    if t.is_empty()
+        || t == "text/javascript"
+        || t == "application/javascript"
+        || t == "text/ecmascript"
+        || t == "application/ecmascript"
+    {
+        Some(ScriptKind::Classic)
+    } else if t == "module" {
+        Some(ScriptKind::Module)
+    } else {
+        None
+    }
 }
 
 /// DFS pre-order collection of `node_id` and every descendant present in
@@ -1244,6 +1347,54 @@ mod tests {
             Some("/changed"),
             "snapshot must reflect the RenderDocument mutation"
         );
+    }
+
+    #[test]
+    fn test_extract_scripts_order_and_flags() {
+        // Eight <script> elements in document order; the JSON-typed data block
+        // and the `nomodule` script must be skipped (this engine supports
+        // modules), leaving six executable scripts.
+        let html = r#"<html><head>
+            <script>window.__first = 1;</script>
+            <script type="application/json" id="data">{"x":1}</script>
+            <script src="/ext-a.js"></script>
+            <script type="module">import './m.js';</script>
+            <script src="/ext-b.js" defer></script>
+            <script src="/ext-c.js" async></script>
+            <script type="module" src="/mod.js"></script>
+            <script nomodule>window.__nomod = 1;</script>
+            </head><body></body></html>"#;
+        let frame = make_frame(html);
+        let snapshot = DomSnapshot::from_frame(&frame);
+        let scripts = snapshot.extract_scripts();
+
+        assert_eq!(scripts.len(), 6, "6 executable scripts, got: {scripts:?}");
+
+        // [0] inline classic
+        assert_eq!(scripts[0].source.trim(), "window.__first = 1;");
+        assert!(scripts[0].src_url.is_none());
+        assert_eq!(scripts[0].kind, ScriptKind::Classic);
+
+        // [1] external classic
+        assert_eq!(scripts[1].src_url.as_deref(), Some("/ext-a.js"));
+        assert_eq!(scripts[1].source, "", "external source filled by caller");
+        assert_eq!(scripts[1].kind, ScriptKind::Classic);
+
+        // [2] inline module
+        assert_eq!(scripts[2].kind, ScriptKind::Module);
+        assert!(scripts[2].src_url.is_none());
+
+        // [3] external defer
+        assert_eq!(scripts[3].src_url.as_deref(), Some("/ext-b.js"));
+        assert_eq!(scripts[3].execute, ExecuteTiming::Defer);
+
+        // [4] external async
+        assert_eq!(scripts[4].src_url.as_deref(), Some("/ext-c.js"));
+        assert_eq!(scripts[4].execute, ExecuteTiming::Async);
+
+        // [5] external module
+        assert_eq!(scripts[5].src_url.as_deref(), Some("/mod.js"));
+        assert_eq!(scripts[5].kind, ScriptKind::Module);
     }
 
     #[test]
