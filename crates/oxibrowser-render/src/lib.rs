@@ -17,3 +17,4 @@ mod document;
 mod paint;
 
 pub use document::{CaptureOpts, NodeId, RenderDocument, RenderError, Viewport};
+pub use paint::blank_png;

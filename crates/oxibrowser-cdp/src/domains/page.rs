@@ -372,7 +372,7 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
         .capture_screenshot_png(viewport_width.max(64))
         .await
         .unwrap_or_else(|_| {
-            oxibrowser_core::css::text_to_png("", viewport_width.max(64)).unwrap_or_default()
+            oxibrowser_core::blank_png(viewport_width.max(64), 800)
         });
 
     use base64::Engine;

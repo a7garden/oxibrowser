@@ -22,6 +22,9 @@ pub mod encoding;
 
 pub mod error;
 
+/// Blank white PNG fallback (re-exported from the render crate).
+pub use oxibrowser_render::blank_png;
+
 pub use browse_result::BrowseResult;
 pub use browser::Browser;
 pub use config::BrowserConfig;
