@@ -96,17 +96,21 @@ pub struct Session {
 // Fetch handler
 // ---------------------------------------------------------------------------
 
-/// Handle fetch requests from the JS thread.
-/// Spawns a minimal tokio runtime for async HTTP calls.
+/// Dispatch fetch requests from the JS thread to real HTTP I/O.
 ///
-/// `in_flight` is incremented when a request is dequeued from `fetch_rx`
-/// and decremented exactly once per request after the response (or
-/// terminal error) has been pushed onto the response channel — every
-/// `continue` / `break` branch must decrement before exiting the match,
-/// or `wait_for_condition(NetworkIdle)` will hang waiting for a counter
-/// that never returns to zero.
+/// Runs a minimal tokio runtime and **spawns an independent task per request**
+/// (Phase 3), so concurrent in-flight fetches run in parallel rather than
+/// serially. Each task awaits its own `http_client.fetch`, then pushes a single
+/// `FetchResponseMsg { id, .. }` onto the shared `response_tx` (routed back to
+/// the JS thread's `PENDING_FETCH` registry by `id`) and decrements `in_flight`.
+///
+/// `in_flight` is incremented before spawn and decremented exactly once per
+/// task on every terminal branch — including the error/early-return paths — so
+/// the counter never leaks and `wait_for_condition(NetworkIdle)` observes real
+/// parallelism.
 fn handle_fetch_requests(
     fetch_rx: std::sync::mpsc::Receiver<FetchRequestMsg>,
+    response_tx: std::sync::mpsc::Sender<FetchResponseMsg>,
     http_client: Arc<HttpClient>,
     _cookie_jar: Arc<RwLock<CookieJar>>,
     max_body_bytes: usize,
@@ -125,97 +129,116 @@ fn handle_fetch_requests(
 
     rt.block_on(async {
         loop {
-            // Use try_recv to avoid blocking
+            // try_recv + sleep().await: must yield to the current-thread
+            // runtime so spawned tasks get polled. A blocking recv() would
+            // park the OS thread and starve the runtime (deadlock).
             match fetch_rx.try_recv() {
                 Ok(request) => {
-                    // Mark this request as in-flight before any await — the
-                    // wait_for_condition(NetworkIdle) consumer may observe
-                    // the counter at any moment.
+                    // Mark in-flight before spawning — a NetworkIdle observer
+                    // may read the counter at any moment.
                     in_flight.fetch_add(1, Ordering::Relaxed);
-                    // Process the fetch request
-                    let url = match Url::parse(&request.url) {
-                        Ok(u) => u,
-                        Err(e) => {
-                            let _ = request.response_tx.send(FetchResponseMsg {
-                                status: 400,
-                                status_text: "Invalid URL".to_string(),
-                                url: request.url,
-                                headers: vec![],
-                                body: String::new(),
-                                error: Some(format!("invalid URL: {}", e)),
-                            });
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
-                            continue;
-                        }
-                    };
 
-                    let resp = http_client.fetch(&url).await;
-                    match resp {
-                        Ok(response) => {
-                            let status = response.status().as_u16();
-                            let status_text = response
-                                .status()
-                                .canonical_reason()
-                                .unwrap_or("")
-                                .to_string();
-                            let resp_url = response.uri().to_string();
-                            let headers: Vec<(String, String)> = response
-                                .headers()
-                                .iter()
-                                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                                .collect();
-                            let body = match HttpClient::read_body_limited(response, max_body_bytes).await {
-                                Ok((buf, truncated)) => {
-                                    if truncated {
-                                        tracing::warn!(url = %resp_url, max_bytes = max_body_bytes, "fetch body truncated");
-                                    }
-                                    String::from_utf8_lossy(&buf).into_owned()
-                                }
-                                Err(e) => {
-                                    let _ = request.response_tx.send(FetchResponseMsg {
-                                        status,
-                                        status_text,
-                                        url: resp_url.clone(),
-                                        headers,
-                                        body: String::new(),
-                                        error: Some(format!("failed to read body: {}", e)),
-                                    });
-                                    in_flight.fetch_sub(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                            };
+                    let http_client = http_client.clone();
+                    let response_tx = response_tx.clone();
+                    let in_flight = in_flight.clone();
 
-                            let _ = request.response_tx.send(FetchResponseMsg {
-                                status,
-                                status_text,
-                                url: resp_url,
-                                headers,
-                                body,
-                                error: None,
-                            });
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                    // Spawn an independent task per request so concurrent
+                    // fetches run in parallel (Phase 3), not one-at-a-time.
+                    tokio::spawn(async move {
+                        let id = request.id;
+                        let url = match Url::parse(&request.url) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                let _ = response_tx.send(FetchResponseMsg {
+                                    id,
+                                    status: 400,
+                                    status_text: "Invalid URL".to_string(),
+                                    url: request.url,
+                                    headers: vec![],
+                                    body: String::new(),
+                                    error: Some(format!("invalid URL: {}", e)),
+                                });
+                                in_flight.fetch_sub(1, Ordering::Relaxed);
+                                return;
+                            }
+                        };
+
+                        let resp = http_client.fetch(&url).await;
+                        match resp {
+                            Ok(response) => {
+                                let status = response.status().as_u16();
+                                let status_text = response
+                                    .status()
+                                    .canonical_reason()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let resp_url = response.uri().to_string();
+                                let headers: Vec<(String, String)> = response
+                                    .headers()
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        (k.to_string(), v.to_str().unwrap_or("").to_string())
+                                    })
+                                    .collect();
+                                let body =
+                                    match HttpClient::read_body_limited(response, max_body_bytes)
+                                        .await
+                                    {
+                                        Ok((buf, truncated)) => {
+                                            if truncated {
+                                                tracing::warn!(
+                                                    url = %resp_url,
+                                                    max_bytes = max_body_bytes,
+                                                    "fetch body truncated"
+                                                );
+                                            }
+                                            String::from_utf8_lossy(&buf).into_owned()
+                                        }
+                                        Err(e) => {
+                                            let _ = response_tx.send(FetchResponseMsg {
+                                                id,
+                                                status,
+                                                status_text,
+                                                url: resp_url,
+                                                headers,
+                                                body: String::new(),
+                                                error: Some(format!("failed to read body: {}", e)),
+                                            });
+                                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                                            return;
+                                        }
+                                    };
+
+                                let _ = response_tx.send(FetchResponseMsg {
+                                    id,
+                                    status,
+                                    status_text,
+                                    url: resp_url,
+                                    headers,
+                                    body,
+                                    error: None,
+                                });
+                                in_flight.fetch_sub(1, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                let _ = response_tx.send(FetchResponseMsg {
+                                    id,
+                                    status: 0,
+                                    status_text: "Network Error".to_string(),
+                                    url: request.url,
+                                    headers: vec![],
+                                    body: String::new(),
+                                    error: Some(e.to_string()),
+                                });
+                                in_flight.fetch_sub(1, Ordering::Relaxed);
+                            }
                         }
-                        Err(e) => {
-                            let _ = request.response_tx.send(FetchResponseMsg {
-                                status: 0,
-                                status_text: "Network Error".to_string(),
-                                url: request.url,
-                                headers: vec![],
-                                body: String::new(),
-                                error: Some(e.to_string()),
-                            });
-                            in_flight.fetch_sub(1, Ordering::Relaxed);
-                        }
-                    }
+                    });
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // No request ready — sleep briefly
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Channel closed — exit
-                    break;
-                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
     });
@@ -282,15 +305,17 @@ impl Session {
     ) -> Result<Self> {
         let js_config = JsRuntimeConfig::from(&config);
 
-        // Create fetch channel
+        // Fetch channels: request sender (JS→background) + shared response
+        // receiver (background→JS, id-routed). Phase 3 async fetch.
         let (fetch_tx, fetch_rx) = std::sync::mpsc::channel();
+        let (fetch_resp_tx, fetch_resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
 
         // Create localStorage sync channel
         let (ls_tx, ls_rx) = std::sync::mpsc::channel::<LocalStorageMsg>();
 
-        // Create JS runtime and wire up fetch channel
+        // Create JS runtime and wire up fetch channels
         let mut js_runtime = JsRuntime::with_config(js_config);
-        js_runtime.set_fetch_channel(fetch_tx);
+        js_runtime.set_fetch_channel(fetch_tx, fetch_resp_rx);
         js_runtime.set_local_storage_channel(ls_tx);
 
         // Spawn fetch handler on a blocking thread
@@ -302,6 +327,7 @@ impl Session {
         let fetch_task = Some(std::thread::spawn(move || {
             handle_fetch_requests(
                 fetch_rx,
+                fetch_resp_tx,
                 http_client_clone,
                 cookie_jar_clone,
                 max_body_bytes,

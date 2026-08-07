@@ -31,7 +31,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use base64::Engine;
-use boa_engine::object::builtins::JsArray;
+use boa_engine::builtins::promise::ResolvingFunctions;
+use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::object::{FunctionObjectBuilder, JsObject};
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Source, js_string};
@@ -67,6 +68,51 @@ thread_local! {
     /// "complete" so legacy `set_document` (no scripts) reports a ready doc.
     static DOC_READY_STATE: std::cell::Cell<&'static str> =
         const { std::cell::Cell::new("complete") };
+}
+
+// ── Async fetch / XHR pending registry (Phase 3) ───────────────────────────
+// Holds everything needed to settle an in-flight fetch/XHR when its response
+// arrives on the shared response channel. Thread-local because boa GC values
+// (`ResolvingFunctions`, `JsValue` callbacks) are `!Send` — they live on the JS
+// thread, where `drain_pending_fetch_responses` runs. Same rooting model as the
+// listener registry above.
+enum PendingFetch {
+    Fetch {
+        resolvers: ResolvingFunctions,
+    },
+    Xhr {
+        ready_state: Arc<RwLock<f64>>,
+        status: Arc<RwLock<f64>>,
+        resp_body: Arc<RwLock<String>>,
+        resp_hdrs: Arc<RwLock<String>>,
+        onload: Arc<RwLock<Option<JsValue>>>,
+        onerror: Arc<RwLock<Option<JsValue>>>,
+        onrsc: Arc<RwLock<Option<JsValue>>>,
+    },
+}
+
+thread_local! {
+    static PENDING_FETCH: RefCell<HashMap<u64, PendingFetch>> =
+        RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    static NEXT_FETCH_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+thread_local! {
+    /// The shared fetch response receiver, installed by `SetFetchChannel`.
+    static RESPONSE_RX: RefCell<Option<Receiver<FetchResponseMsg>>> =
+        const { RefCell::new(None) };
+}
+
+/// Mint a fresh fetch request id on the JS thread (never 0).
+fn next_fetch_id() -> u64 {
+    NEXT_FETCH_ID.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1));
+        id
+    })
 }
 
 /// Register a listener callback for a node in the thread-local registry.
@@ -216,7 +262,8 @@ enum JsCommand {
     },
     /// Set the fetch channel so JS can make real HTTP requests.
     SetFetchChannel {
-        tx: std::sync::mpsc::Sender<FetchRequestMsg>,
+        request_tx: std::sync::mpsc::Sender<FetchRequestMsg>,
+        response_rx: std::sync::mpsc::Receiver<FetchResponseMsg>,
         response_tx: Sender<JsResponse>,
     },
     /// Set the localStorage sync channel so JS operations propagate to Session.
@@ -294,6 +341,9 @@ enum JsResponse {
 
 /// A fetch request from JS.
 pub struct FetchRequestMsg {
+    /// Unique id minted on the JS thread; routes the response back to its
+    /// pending slot in `PENDING_FETCH`. Never 0.
+    pub id: u64,
     /// URL to fetch.
     pub url: String,
     /// HTTP method.
@@ -302,12 +352,12 @@ pub struct FetchRequestMsg {
     pub headers: Vec<(String, String)>,
     /// Request body (if any).
     pub body: Option<String>,
-    /// Channel to send the response back.
-    pub response_tx: std::sync::mpsc::Sender<FetchResponseMsg>,
 }
 
-/// HTTP response sent back to the JS thread.
+/// HTTP response sent back to the JS thread via the shared response channel.
 pub struct FetchResponseMsg {
+    /// Echoes the request `id`.
+    pub id: u64,
     /// HTTP status code.
     pub status: u16,
     /// HTTP status text.
@@ -470,18 +520,24 @@ impl JsRuntime {
         }
     }
 
-    /// Set the channel for fetch requests. Must be called before JS can use fetch().
-    pub fn set_fetch_channel(&mut self, tx: std::sync::mpsc::Sender<FetchRequestMsg>) {
-        self.fetch_tx = Some(tx.clone());
-        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
-        if let Err(e) = self
-            .cmd_tx
-            .send(JsCommand::SetFetchChannel { tx, response_tx })
-        {
+    /// Set the channels for fetch: the request sender and the shared response
+    /// receiver. Must be called before JS can use `fetch()`/`XMLHttpRequest`.
+    pub fn set_fetch_channel(
+        &mut self,
+        request_tx: std::sync::mpsc::Sender<FetchRequestMsg>,
+        response_rx: std::sync::mpsc::Receiver<FetchResponseMsg>,
+    ) {
+        self.fetch_tx = Some(request_tx.clone());
+        let (ack_tx, ack_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self.cmd_tx.send(JsCommand::SetFetchChannel {
+            request_tx,
+            response_rx,
+            response_tx: ack_tx,
+        }) {
             tracing::error!(error = %e, "failed to send SetFetchChannel: JS thread has died");
             return;
         }
-        let _ = response_rx.recv();
+        let _ = ack_rx.recv();
     }
 
     /// Set the channel for localStorage sync.
@@ -876,6 +932,14 @@ fn js_thread_loop(
                 // Drain due timers and fire their callbacks
                 drain_timers(&job_queue, &mut ctx);
 
+                // Settle async fetch/XHR kicked off by the script (Phase 3): a
+                // top-level `fetch().then(cb)` must resolve before the result
+                // is returned. Gate on pending fetches so a top-level
+                // setInterval(0) doesn't over-fire during this pump.
+                if PENDING_FETCH.with(|m| !m.borrow().is_empty()) {
+                    settle_to_idle(&mut ctx, &job_queue, start, Duration::from_millis(timeout));
+                }
+
                 let elapsed = start.elapsed();
                 let console = console_output.read().clone();
 
@@ -1028,8 +1092,13 @@ fn js_thread_loop(
                 *local_storage_tx_arc.write() = Some(tx);
                 let _ = response_tx.send(JsResponse::Done);
             }
-            JsCommand::SetFetchChannel { tx, response_tx } => {
-                *fetch_tx_arc.write() = Some(tx);
+            JsCommand::SetFetchChannel {
+                request_tx,
+                response_rx,
+                response_tx,
+            } => {
+                *fetch_tx_arc.write() = Some(request_tx);
+                RESPONSE_RX.with(|cell| *cell.borrow_mut() = Some(response_rx));
                 let _ = response_tx.send(JsResponse::Done);
             }
             JsCommand::SetCookieJar { jar, response_tx } => {
@@ -1347,31 +1416,263 @@ fn settle_to_idle(
         ctx.run_jobs();
         drain_timers(job_queue, ctx);
 
-        let pending = job_queue.timer_count() + job_queue.microtask_count();
-        if pending == 0 {
+        let pending_timers = job_queue.timer_count();
+        let pending_microtasks = job_queue.microtask_count();
+        let pending_fetch = PENDING_FETCH.with(|m| !m.borrow().is_empty());
+        if pending_timers == 0 && pending_microtasks == 0 && !pending_fetch {
             return;
         }
-        // Microtasks may remain even with no due timers; loop back if so.
-        if job_queue.timer_count() == 0 {
-            // Only microtasks pending — run_jobs on the next pass drains them.
+        // Only microtasks pending — run_jobs on the next pass drains them.
+        if pending_timers == 0 && pending_microtasks > 0 {
             continue;
         }
         let now = Instant::now();
         let remaining = budget.saturating_sub(start.elapsed());
         if remaining.is_zero() {
-            tracing::warn!(pending, "settle budget exhausted; timers remain");
+            tracing::warn!(
+                pending_timers,
+                pending_fetch,
+                "settle budget exhausted; async work remains"
+            );
             return;
         }
-        let wait = match job_queue.next_timer_deadline() {
-            Some(dl) if dl > now => dl - now,
-            _ => Duration::ZERO,
+        // Wait until the next timer deadline, or — with no timers but pending
+        // background fetches — poll briefly for their responses.
+        let wait = if pending_timers > 0 {
+            match job_queue.next_timer_deadline() {
+                Some(dl) if dl > now => dl - now,
+                _ => Duration::ZERO,
+            }
+        } else {
+            Duration::from_millis(2)
         };
         if !wait.is_zero() {
             std::thread::sleep(wait.min(remaining));
         }
     }
 }
+/// Settle a pending fetch `Promise` from a background response. Builds the
+/// Response object (status/headers/text/json/arrayBuffer) and resolves it —
+/// or rejects on a transport error.
+fn settle_fetch(resolvers: ResolvingFunctions, resp: FetchResponseMsg, ctx: &mut Context) {
+    if let Some(err) = resp.error {
+        let err_json =
+            serde_json::to_string(&err).unwrap_or_else(|_| "\"fetch failed\"".to_string());
+        let err = ctx
+            .eval(Source::from_bytes(
+                format!("new Error({})", err_json).as_str(),
+            ))
+            .unwrap_or(JsValue::undefined());
+        let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
+        return;
+    }
+
+    let text_fn = unsafe {
+        NativeFunction::from_closure(move |this, _args, ctx| {
+            let body = this
+                .as_object()
+                .and_then(|o| o.get(js_string!("__body"), ctx).ok())
+                .unwrap_or(JsValue::undefined());
+            let _ = ctx.register_global_property(js_string!("__text_body"), body, Attribute::all());
+            ctx.eval(Source::from_bytes(
+                "(() => { const v = __text_body; delete globalThis.__text_body; return Promise.resolve(v); })()",
+            ))
+        })
+    };
+
+    let json_fn = unsafe {
+        NativeFunction::from_closure(move |this, _args, ctx| {
+            let body = this
+                .as_object()
+                .and_then(|o| o.get(js_string!("__body"), ctx).ok())
+                .unwrap_or(JsValue::undefined());
+            let _ = ctx.register_global_property(js_string!("__json_body"), body, Attribute::all());
+            ctx.eval(Source::from_bytes(
+                "(() => { const v = __json_body; delete globalThis.__json_body; return Promise.resolve(JSON.parse(v)); })()",
+            ))
+        })
+    };
+
+    let array_buffer_fn = unsafe {
+        NativeFunction::from_closure(move |this, _args, ctx| {
+            let body_owned = {
+                if let Some(obj) = this.as_object()
+                    && let Ok(v) = obj.get(js_string!("__body"), ctx)
+                    && let Some(s) = v.as_string()
+                {
+                    s.to_std_string_escaped()
+                } else {
+                    String::new()
+                }
+            };
+            let bytes_json =
+                serde_json::to_string(body_owned.as_bytes()).unwrap_or_else(|_| String::from("[]"));
+            ctx.eval(Source::from_bytes(
+                format!("Promise.resolve(new Uint8Array({}))", bytes_json).as_str(),
+            ))
+        })
+    };
+
+    let headers_obj = boa_engine::object::ObjectInitializer::new(ctx).build();
+    for (k, v) in &resp.headers {
+        let _ = headers_obj.set(
+            JsString::from(k.as_str()),
+            JsValue::from(JsString::from(v.as_str())),
+            true,
+            ctx,
+        );
+    }
+
+    let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
+        .property(
+            js_string!("status"),
+            JsValue::from(resp.status),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("statusText"),
+            JsValue::from(JsString::from(resp.status_text.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("ok"),
+            JsValue::from(resp.status < 400),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("url"),
+            JsValue::from(JsString::from(resp.url.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("bodyUsed"),
+            JsValue::from(false),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("type"),
+            JsValue::from(JsString::from("basic")),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("__body"),
+            JsValue::from(JsString::from(resp.body.as_str())),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("headers"),
+            JsValue::from(headers_obj),
+            Attribute::all(),
+        )
+        .function(text_fn, js_string!("text"), 0)
+        .function(json_fn, js_string!("json"), 0)
+        .function(array_buffer_fn, js_string!("arrayBuffer"), 0)
+        .build();
+
+    let _ = resolvers
+        .resolve
+        .call(&JsValue::undefined(), &[JsValue::from(response_obj)], ctx);
+}
+
+/// Call a JS callback stored in a shared slot, if it is set and callable.
+fn fire_callback(slot: &Arc<RwLock<Option<JsValue>>>, ctx: &mut Context) {
+    let cb = slot.read().clone();
+    if let Some(v) = cb
+        && let Some(cb_obj) = v.as_object()
+        && cb_obj.is_callable()
+    {
+        let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
+    }
+}
+
+/// Settle a pending XHR: drive the shared state cells through LOADING (3) →
+/// DONE (4), firing `onreadystatechange` at each transition and `onload` (or
+/// `onerror`) at DONE.
+#[allow(clippy::too_many_arguments)]
+fn settle_xhr(
+    ready_state: Arc<RwLock<f64>>,
+    status: Arc<RwLock<f64>>,
+    resp_body: Arc<RwLock<String>>,
+    resp_hdrs: Arc<RwLock<String>>,
+    onload: Arc<RwLock<Option<JsValue>>>,
+    onerror: Arc<RwLock<Option<JsValue>>>,
+    onrsc: Arc<RwLock<Option<JsValue>>>,
+    resp: FetchResponseMsg,
+    ctx: &mut Context,
+) {
+    // LOADING (3)
+    *ready_state.write() = 3.0;
+    *status.write() = resp.status as f64;
+    *resp_body.write() = resp.body.clone();
+    let mut hdr_str = String::new();
+    for (k, v) in &resp.headers {
+        hdr_str.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    *resp_hdrs.write() = hdr_str;
+    fire_callback(&onrsc, ctx);
+
+    // DONE (4)
+    *ready_state.write() = 4.0;
+    if resp.error.is_none() {
+        fire_callback(&onload, ctx);
+    } else {
+        *status.write() = 0.0;
+        fire_callback(&onerror, ctx);
+    }
+    fire_callback(&onrsc, ctx);
+}
+
+/// Drain all currently-available fetch/XHR responses from the shared channel
+/// and settle their pending entries (Phase 3). Called at every event-loop pump
+/// site so responses resolve during script execution, the bootstrap pump, and
+/// top-level `evaluate()`. Responses are collected before settling to release
+/// the channel borrow before re-entering boa (settling may issue more JS/fetch).
+fn drain_pending_fetch_responses(ctx: &mut Context) {
+    let responses: Vec<FetchResponseMsg> = RESPONSE_RX.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        let Some(rx) = borrowed.as_mut() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(resp) = rx.try_recv() {
+            out.push(resp);
+        }
+        out
+    });
+
+    for resp in responses {
+        let entry = PENDING_FETCH.with(|m| m.borrow_mut().remove(&resp.id));
+        match entry {
+            Some(PendingFetch::Fetch { resolvers }) => settle_fetch(resolvers, resp, ctx),
+            Some(PendingFetch::Xhr {
+                ready_state,
+                status,
+                resp_body,
+                resp_hdrs,
+                onload,
+                onerror,
+                onrsc,
+            }) => settle_xhr(
+                ready_state,
+                status,
+                resp_body,
+                resp_hdrs,
+                onload,
+                onerror,
+                onrsc,
+                resp,
+                ctx,
+            ),
+            None => {
+                tracing::trace!(id = resp.id, "stale fetch response — no pending entry");
+            }
+        }
+    }
+}
 fn drain_timers(queue: &Rc<TokioJobQueue>, ctx: &mut Context) {
+    // Settle any fetch/XHR responses first — they may enqueue microtasks or
+    // timers that the rest of this drain must then process (Phase 3).
+    drain_pending_fetch_responses(ctx);
     let mut iterations = 0u32;
     loop {
         let due = queue.pop_due_timers();
@@ -1659,199 +1960,61 @@ fn create_context(
                 }
             }
 
-            // Send fetch request to main thread
-            let tx = fetch_tx_inner.read();
-            let tx = match tx.as_ref() {
-                Some(t) => t.clone(),
-                None => {
-                    // No fetch channel — return rejected Promise
-                    let reject_code = r#"
-                        Promise.reject(new Error('fetch() is not available — channel not set'))
-                    "#;
-                    let result = ctx.eval(Source::from_bytes(reject_code.trim()));
-                    return result;
-                }
-            };
-            drop(tx);
+            // Dispatch asynchronously (Phase 3): return a pending Promise now
+            // and settle it on the event loop when the response arrives. The JS
+            // thread never blocks on the network.
+            let (promise, resolvers) = JsPromise::new_pending(ctx);
+            let id = next_fetch_id();
 
-            // Recreate tx after dropping the read guard (to avoid deadlock)
-            let tx = {
-                let guard = fetch_tx_inner.read();
-                guard.as_ref().cloned().unwrap()
-            };
-
-            let (response_tx, response_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
             let request = FetchRequestMsg {
-                url: url.clone(),
-                method: method.clone(),
+                id,
+                url,
+                method,
                 headers,
                 body,
-                response_tx,
+            };
+
+            let tx = {
+                let guard = fetch_tx_inner.read();
+                match guard.as_ref() {
+                    Some(t) => t.clone(),
+                    None => {
+                        // No fetch channel — reject the real pending Promise.
+                        let msg = "fetch() is not available — channel not set";
+                        let msg_json = serde_json::to_string(msg)
+                            .unwrap_or_else(|_| "\"fetch unavailable\"".to_string());
+                        let err = ctx
+                            .eval(Source::from_bytes(
+                                format!("new Error({})", msg_json).as_str(),
+                            ))
+                            .unwrap_or(JsValue::undefined());
+                        let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
+                        return Ok(promise.into());
+                    }
+                }
             };
 
             if let Err(e) = tx.send(request) {
-                // Channel error — return rejected Promise
-                let err_json = serde_json::to_string(&e.to_string())
+                // Channel closed — reject the pending Promise.
+                let msg = format!("fetch channel error: {}", e);
+                let msg_json = serde_json::to_string(&msg)
                     .unwrap_or_else(|_| "\"fetch channel error\"".to_string());
-                let reject_code = format!("Promise.reject(new Error({}))", err_json);
-                let result = ctx.eval(Source::from_bytes(reject_code.trim()));
-                return result;
+                let err = ctx
+                    .eval(Source::from_bytes(
+                        format!("new Error({})", msg_json).as_str(),
+                    ))
+                    .unwrap_or(JsValue::undefined());
+                let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
+                return Ok(promise.into());
             }
 
-            // Wait for response (blocks JS thread)
-            // TODO(#async-fetch): This blocking recv() holds the JS thread while waiting
-            // for the HTTP response, which prevents other JS from running and blocks
-            // the dedicated std::thread. A proper fix would use an async-aware approach:
-            // 1. Return a Pending Promise from this closure
-            // 2. Use a non-blocking channel check or integrate with boa's job queue
-            // 3. Resolve/reject the Promise when the HTTP response arrives
-            // This requires architectural changes to how the JS thread processes events.
-            let response = response_rx.recv();
-            let resp_error: Option<String>;
+            // Register the resolver; `settle_fetch` resolves/rejects it when the
+            // response arrives on the shared channel (drained by the pump).
+            PENDING_FETCH.with(|m| {
+                m.borrow_mut().insert(id, PendingFetch::Fetch { resolvers });
+            });
 
-            match response {
-                Ok(resp) => {
-                    if let Some(err) = resp.error {
-                        resp_error = Some(err);
-                    } else {
-                        // text() / json() — stash __body as a global prop and let the
-                        // eval'd IIFE grab it by reference. Avoids re-stringifying the
-                        // body on every call. The body value itself is a GC-tracked
-                        // JsValue (JsString), not a serialized copy.
-                        let text_fn = {
-                            NativeFunction::from_closure(move |this, _args, ctx| {
-                                let body = this
-                                    .as_object()
-                                    .and_then(|o| o.get(js_string!("__body"), ctx).ok())
-                                    .unwrap_or(JsValue::undefined());
-                                let _ = ctx.register_global_property(
-                                    js_string!("__text_body"),
-                                    body,
-                                    Attribute::all(),
-                                );
-                                ctx.eval(Source::from_bytes(
-                                    "(() => { const v = __text_body; delete globalThis.__text_body; return Promise.resolve(v); })()",
-                                ))
-                            })
-                        };
-
-                        let json_fn = {
-                            NativeFunction::from_closure(move |this, _args, ctx| {
-                                let body = this
-                                    .as_object()
-                                    .and_then(|o| o.get(js_string!("__body"), ctx).ok())
-                                    .unwrap_or(JsValue::undefined());
-                                let _ = ctx.register_global_property(
-                                    js_string!("__json_body"),
-                                    body,
-                                    Attribute::all(),
-                                );
-                                ctx.eval(Source::from_bytes(
-                                    "(() => { const v = __json_body; delete globalThis.__json_body; return Promise.resolve(JSON.parse(v)); })()",
-                                ))
-                            })
-                        };
-
-                        // arrayBuffer() — reads body from this.__body, returns Uint8Array
-                        let array_buffer_fn = {
-                            NativeFunction::from_closure(move |this, _args, ctx| {
-                                let body_owned = {
-                                    if let Some(obj) = this.as_object()
-                                        && let Ok(v) = obj.get(js_string!("__body"), ctx)
-                                        && let Some(s) = v.as_string()
-                                    {
-                                        s.to_std_string_escaped()
-                                    } else {
-                                        String::new()
-                                    }
-                                };
-                                let bytes_json = serde_json::to_string(body_owned.as_bytes())
-                                    .unwrap_or_else(|_| String::from("[]"));
-                                let code =
-                                    format!("Promise.resolve(new Uint8Array({}))", bytes_json);
-                                ctx.eval(Source::from_bytes(code.trim()))
-                            })
-                        };
-
-                        let headers_obj = boa_engine::object::ObjectInitializer::new(ctx).build();
-                        for (k, v) in &resp.headers {
-                            let _ = headers_obj.set(
-                                JsString::from(k.as_str()),
-                                JsValue::from(JsString::from(v.as_str())),
-                                true,
-                                ctx,
-                            );
-                        }
-
-                        let response_obj = boa_engine::object::ObjectInitializer::new(ctx)
-                            .property(
-                                js_string!("status"),
-                                JsValue::from(resp.status),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("statusText"),
-                                JsValue::from(JsString::from(resp.status_text.as_str())),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("ok"),
-                                JsValue::from(resp.status < 400),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("url"),
-                                JsValue::from(JsString::from(resp.url.as_str())),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("bodyUsed"),
-                                JsValue::from(false),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("type"),
-                                JsValue::from(JsString::from("basic")),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("__body"),
-                                JsValue::from(JsString::from(resp.body.as_str())),
-                                Attribute::all(),
-                            )
-                            .property(
-                                js_string!("headers"),
-                                JsValue::from(headers_obj),
-                                Attribute::all(),
-                            )
-                            .function(text_fn, js_string!("text"), 0)
-                            .function(json_fn, js_string!("json"), 0)
-                            .function(array_buffer_fn, js_string!("arrayBuffer"), 0)
-                            .build();
-
-                        let _ = ctx.register_global_property(
-                            js_string!("__fetch_response"),
-                            JsValue::from(response_obj),
-                            Attribute::all(),
-                        );
-                        let result = ctx.eval(Source::from_bytes(
-                            "(() => { const r = __fetch_response; delete globalThis.__fetch_response; return Promise.resolve(r); })()"
-                        ));
-                        return result;
-                    }
-                }
-                Err(_) => {
-                    resp_error = Some("fetch channel closed".to_string());
-                }
-            }
-
-            // Return rejected Promise on error
-            let err_msg = resp_error.unwrap_or_else(|| "fetch failed".to_string());
-            let err_json =
-                serde_json::to_string(&err_msg).unwrap_or_else(|_| "\"fetch failed\"".to_string());
-            let reject_code = format!("Promise.reject(new Error({}))", err_json);
-
-            ctx.eval(Source::from_bytes(reject_code.trim()))
+            Ok(promise.into())
         })
     };
 
@@ -1955,7 +2118,7 @@ fn create_context(
             let send_onrsc = onreadystatechange_cb.clone();
             let send_tx = xhr_fetch_tx.clone();
             let send_fn = {
-                NativeFunction::from_closure(move |_this, args, ctx| {
+                NativeFunction::from_closure(move |_this, args, _ctx| {
                     let body = args
                         .first()
                         .and_then(|v| v.as_string())
@@ -1966,60 +2129,42 @@ fn create_context(
 
                     *send_rs.write() = 2.0; // HEADERS_RECEIVED
 
-                    let tx_guard = send_tx.read();
-                    if let Some(ref tx) = *tx_guard {
-                        let (response_tx, response_rx) =
-                            std::sync::mpsc::channel::<FetchResponseMsg>();
+                    let tx = {
+                        let guard = send_tx.read();
+                        guard.as_ref().cloned()
+                    };
+
+                    if let Some(tx) = tx {
+                        let id = next_fetch_id();
                         let request = FetchRequestMsg {
+                            id,
                             url: url.clone(),
                             method: method.clone(),
                             headers: Vec::new(),
                             body,
-                            response_tx,
                         };
                         if tx.send(request).is_ok() {
-                            match response_rx.recv() {
-                                Ok(resp) => {
-                                    *send_rs.write() = 3.0; // LOADING
-                                    *send_status.write() = resp.status as f64;
-                                    *send_resp.write() = resp.body.clone();
-                                    // Parse response headers
-                                    let mut hdr_str = String::new();
-                                    for (k, v) in &resp.headers {
-                                        hdr_str.push_str(&format!("{}: {}\r\n", k, v));
-                                    }
-                                    *send_hdrs.write() = hdr_str;
-                                    *send_rs.write() = 4.0; // DONE
-
-                                    if resp.error.is_none() {
-                                        // Fire onload
-                                        if let Some(ref cb) = *send_onload.read()
-                                            && let Some(cb_obj) = cb.as_object()
-                                            && cb_obj.is_callable()
-                                        {
-                                            let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
-                                        }
-                                    } else {
-                                        if let Some(ref cb) = *send_onerror.read()
-                                            && let Some(cb_obj) = cb.as_object()
-                                            && cb_obj.is_callable()
-                                        {
-                                            let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
-                                        }
-                                    }
-                                    // Fire onreadystatechange
-                                    if let Some(ref cb) = *send_onrsc.read()
-                                        && let Some(cb_obj) = cb.as_object()
-                                        && cb_obj.is_callable()
-                                    {
-                                        let _ = cb_obj.call(&JsValue::undefined(), &[], ctx);
-                                    }
-                                }
-                                Err(_) => {
-                                    *send_rs.write() = 4.0;
-                                    *send_status.write() = 0.0;
-                                }
-                            }
+                            // Non-blocking (Phase 3): register the XHR's shared
+                            // state cells + callbacks; `settle_xhr` mutates them
+                            // and fires callbacks when the response arrives on
+                            // the shared channel (drained by the pump).
+                            PENDING_FETCH.with(|m| {
+                                m.borrow_mut().insert(
+                                    id,
+                                    PendingFetch::Xhr {
+                                        ready_state: send_rs.clone(),
+                                        status: send_status.clone(),
+                                        resp_body: send_resp.clone(),
+                                        resp_hdrs: send_hdrs.clone(),
+                                        onload: send_onload.clone(),
+                                        onerror: send_onerror.clone(),
+                                        onrsc: send_onrsc.clone(),
+                                    },
+                                );
+                            });
+                        } else {
+                            *send_rs.write() = 4.0;
+                            *send_status.write() = 0.0;
                         }
                     }
 
@@ -9491,11 +9636,12 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_with_mock_channel() {
         let mut rt = JsRuntime::new();
-        // Set up a mock fetch channel
-        let (tx, rx) = std::sync::mpsc::channel();
-        rt.set_fetch_channel(tx);
+        // Set up a mock fetch channel (Phase 3 id-routed API).
+        let (tx, rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (_resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(tx, resp_rx);
 
-        // Drop the receiver so the fetch fails gracefully
+        // Drop the request receiver so dispatch fails gracefully.
         drop(rx);
 
         let result = rt
@@ -9503,6 +9649,134 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_ok());
+    }
+
+    /// Background fetch handler for tests: spawn-per-request, each responding
+    /// after `delay_ms` with `body`. Models concurrent in-flight I/O so the
+    /// parallelism and non-blocking guarantees of Phase 3 are exercised.
+    fn spawn_test_fetch_handler(
+        request_rx: std::sync::mpsc::Receiver<FetchRequestMsg>,
+        response_tx: std::sync::mpsc::Sender<FetchResponseMsg>,
+        delay_ms: u64,
+        body: String,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            while let Ok(req) = request_rx.recv() {
+                let response_tx = response_tx.clone();
+                let body = body.clone();
+                // Independent thread per request = parallel in-flight.
+                std::thread::spawn(move || {
+                    if delay_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    }
+                    let _ = response_tx.send(FetchResponseMsg {
+                        id: req.id,
+                        status: 200,
+                        status_text: "OK".to_string(),
+                        url: req.url,
+                        headers: vec![("content-type".to_string(), "application/json".to_string())],
+                        body,
+                        error: None,
+                    });
+                });
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn test_async_fetch_non_blocking() {
+        // fetch() must NOT block the JS thread: a 300 ms RTT must return to
+        // the next statement in well under that. On `main` the recv() blocked
+        // ≈ the full RTT.
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 300, "{\"value\":42}".to_string());
+
+        let r = rt
+            .evaluate(
+                "window.__t0 = performance.now(); fetch('http://x/'); window.__t1 = performance.now(); (window.__t1 - window.__t0) < 60",
+            )
+            .await
+            .unwrap();
+        let ok = r.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
+        assert!(
+            ok,
+            "fetch blocked the JS thread; timing value = {:?}",
+            r.value
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_fetch_resolves_on_event_loop() {
+        // fetch().then(cb) settles during the evaluate's post-script pump —
+        // no second evaluate needed for the callback to run.
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 50, "{\"value\":42}".to_string());
+
+        rt.evaluate(
+            "fetch('http://x/').then(r => r.json()).then(o => { window.__done = o.value })",
+        )
+        .await
+        .unwrap();
+
+        let r = rt.evaluate("window.__done").await.unwrap();
+        assert_eq!(r.value, Some(Value::from(42)));
+    }
+
+    #[tokio::test]
+    async fn test_async_fetch_concurrent_parallel() {
+        // Two slow fetches fired back-to-back must run in PARALLEL: total wall
+        // time ≈ one RTT (300 ms), not two (600 ms). On `main` requests were
+        // serialized, so this would take ≥ ~580 ms.
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 300, "{\"v\":1}".to_string());
+
+        rt.evaluate(
+            "window.__t0 = performance.now();\
+             Promise.all([fetch('http://a/'), fetch('http://b/')])\
+               .then(() => { window.__dur = performance.now() - window.__t0 })",
+        )
+        .await
+        .unwrap();
+
+        let r = rt.evaluate("(window.__dur || 9999) < 580").await.unwrap();
+        let ok = r.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
+        assert!(ok, "fetches were serial; dur value = {:?}", r.value);
+    }
+
+    #[tokio::test]
+    async fn test_async_xhr_non_blocking() {
+        // xhr.send(async) returns immediately; onload fires when the response
+        // arrives during the pump. Both the sync sentinel and the async flag
+        // must be set.
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 100, "hello".to_string());
+
+        rt.evaluate(
+            "var x = new XMLHttpRequest();\
+             x.open('GET', 'http://x/', true);\
+             x.onload = function () { window.__xhr = 1; };\
+             x.send();\
+             window.__sent = 1;",
+        )
+        .await
+        .unwrap();
+
+        let sent = rt.evaluate("window.__sent").await.unwrap();
+        assert_eq!(sent.value, Some(Value::from(1)));
+        let xhr = rt.evaluate("window.__xhr").await.unwrap();
+        assert_eq!(xhr.value, Some(Value::from(1)));
     }
 
     #[tokio::test]
