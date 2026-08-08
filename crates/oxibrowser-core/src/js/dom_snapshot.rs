@@ -493,6 +493,30 @@ impl DomSnapshot {
         results.reverse();
         results
     }
+    /// Does `node_id` match `selector`? (Element.matches)
+    pub fn element_matches(&self, node_id: u32, selector: &str) -> bool {
+        self.nodes
+            .get(&node_id)
+            .map(|n| self.node_matches_selector(n, selector))
+            .unwrap_or(false)
+    }
+
+    /// Nearest ancestor-or-self (incl. `node_id`) matching `selector`.
+    /// (Element.closest) Returns the node id, or `None`.
+    pub fn element_closest(&self, node_id: u32, selector: &str) -> Option<u32> {
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            if let Some(node) = self.nodes.get(&id) {
+                if node.node_type == 1 && self.node_matches_selector(node, selector) {
+                    return Some(id);
+                }
+                current = node.parent;
+            } else {
+                break;
+            }
+        }
+        None
+    }
 
     /// Get an element by its ID attribute.
     ///

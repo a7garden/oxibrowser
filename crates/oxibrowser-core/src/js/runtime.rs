@@ -6141,6 +6141,51 @@ fn create_element_object(
             Ok(arr.into())
         })
     };
+    // element.matches(selector)
+    let m_dom = dom_snapshot_arc.clone();
+    let m_root_id = node.id;
+    let element_matches_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let dom = m_dom.read();
+            if let Some(ref snapshot) = *dom {
+                return Ok(JsValue::from(snapshot.element_matches(m_root_id, &selector)));
+            }
+            Ok(JsValue::from(false))
+        })
+    };
+
+    // element.closest(selector)
+    let c_dom = dom_snapshot_arc.clone();
+    let c_mutations = mutations.clone();
+    let c_root_id = node.id;
+    let element_closest_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let dom = c_dom.read();
+            if let Some(ref snapshot) = *dom
+                && let Some(match_id) = snapshot.element_closest(c_root_id, &selector)
+                && let Some(match_node) = snapshot.nodes.get(&match_id)
+            {
+                return Ok(create_element_object(
+                    snapshot,
+                    match_node,
+                    ctx,
+                    &c_mutations,
+                    &c_dom,
+                ));
+            }
+            Ok(JsValue::null())
+        })
+    };
 
     // ── 트리 탐색 접근자 (firstChild, lastChild, nextSibling, previousSibling) ──
 
@@ -7190,6 +7235,8 @@ fn create_element_object(
         .function(remove_child_obj_fn, js_string!("removeChild"), 1)
         .function(element_qs_fn, js_string!("querySelector"), 1)
         .function(element_qsa_fn, js_string!("querySelectorAll"), 1)
+        .function(element_matches_fn, js_string!("matches"), 1)
+        .function(element_closest_fn, js_string!("closest"), 1)
         .function(
             {
                 let snap_cn = dom_snapshot_arc.clone();
@@ -11041,6 +11088,41 @@ mod tests {
         assert_eq!(
             rt.evaluate("__gb").await.unwrap().value,
             Some(serde_json::Value::String("B".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_element_matches_and_closest() {
+        let mut rt = JsRuntime::new();
+        let html = "<html><body><div class=\"outer\"><span class=\"inner\">hi</span></div></body></html>";
+        let frame = make_frame(html).await;
+        rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+        let r = rt
+            .evaluate(
+                "var span = document.querySelector('span');\
+                 globalThis.__m1 = span.matches('.inner');\
+                 globalThis.__m2 = span.matches('div');\
+                 globalThis.__c1 = span.closest('.outer') !== null;\
+                 globalThis.__c2 = span.closest('span').className === 'inner';",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        assert_eq!(
+            rt.evaluate("__m1").await.unwrap().value,
+            Some(serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            rt.evaluate("__m2").await.unwrap().value,
+            Some(serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            rt.evaluate("__c1").await.unwrap().value,
+            Some(serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            rt.evaluate("__c2").await.unwrap().value,
+            Some(serde_json::Value::Bool(true))
         );
     }
 }
