@@ -8662,6 +8662,27 @@ fn register_window_globals(
     for (var k = 0; k < names.length; k++) { var nm = names[k]; if (globalThis[nm] && typeof w[nm] === 'undefined') w[nm] = globalThis[nm]; }
     w.customElements = globalThis.customElements;
   }
+  // AbortController / AbortSignal (feature-detect + basic abort propagation).
+  if (typeof globalThis.AbortController === 'undefined') {
+    function AbortSignal() {
+      this.aborted = false; this.reason = undefined; this.onabort = null;
+      var listeners = [];
+      this.addEventListener = function (t, cb) { if (t === 'abort' && typeof cb === 'function') listeners.push(cb); };
+      this.removeEventListener = function (t, cb) { if (t === 'abort') listeners = listeners.filter(function (f) { return f !== cb; }); };
+      this._abort = function (reason) {
+        if (this.aborted) return;
+        this.aborted = true; this.reason = reason;
+        var ev = { type: 'abort', target: this };
+        if (typeof this.onabort === 'function') { try { this.onabort(ev); } catch (e) {} }
+        for (var i = 0; i < listeners.length; i++) { try { listeners[i](ev); } catch (e) {} }
+      };
+    }
+    function AbortController() { this.signal = new AbortSignal(); }
+    AbortController.prototype.abort = function (reason) { this.signal._abort(reason); };
+    globalThis.AbortSignal = AbortSignal;
+    globalThis.AbortController = AbortController;
+    if (globalThis.window) { globalThis.window.AbortController = AbortController; globalThis.window.AbortSignal = AbortSignal; }
+  }
 })();
 "#;
 
@@ -11161,6 +11182,22 @@ mod tests {
         let r = rt
             .evaluate(
                 "typeof URL.createObjectURL === 'function' && URL.createObjectURL({}).startsWith('blob:')",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        assert_eq!(r.value, Some(serde_json::Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_abort_controller() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "var ac = new AbortController(); var fired = false;\
+                 ac.signal.addEventListener('abort', function(){ fired = true; });\
+                 ac.abort('done');\
+                 globalThis.__ab = ac.signal.aborted && fired && ac.signal.reason === 'done';",
             )
             .await
             .unwrap();
