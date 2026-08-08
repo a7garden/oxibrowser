@@ -3438,6 +3438,34 @@ fn create_context(
     };
     let _ = context.register_global_callable(js_string!("URL"), 1, url_ctor);
 
+    // URL.createObjectURL / revokeObjectURL (static methods on the URL
+    // constructor). Minimal: mints a `blob:` URL; revoke is a no-op.
+    let cou_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let url = format!("blob:https://oxibrowser.local/{id}");
+            Ok(JsValue::from(JsString::from(url.as_str())))
+        })
+    };
+    let rou_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
+    };
+    let cou_built = FunctionObjectBuilder::new(context.realm(), cou_fn)
+        .name(js_string!("createObjectURL"))
+        .build();
+    let rou_built = FunctionObjectBuilder::new(context.realm(), rou_fn)
+        .name(js_string!("revokeObjectURL"))
+        .build();
+    {
+        let globals = context.global_object().clone();
+        if let Ok(url_val) = globals.get(js_string!("URL"), &mut context)
+            && let Some(url_obj) = url_val.as_object().cloned()
+        {
+            let _ = url_obj.set(js_string!("createObjectURL"), JsValue::from(cou_built), true, &mut context);
+            let _ = url_obj.set(js_string!("revokeObjectURL"), JsValue::from(rou_built), true, &mut context);
+        }
+    }
     // --- crypto.getRandomValues (CSPRNG) ---
     // Supports both JsArray and TypedArray (Uint8Array, Int32Array, etc.)
     // by using object.get("length") + object.set(index, value) directly.
@@ -11097,6 +11125,7 @@ mod tests {
         let html = "<html><body><div class=\"outer\"><span class=\"inner\">hi</span></div></body></html>";
         let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
+
         let r = rt
             .evaluate(
                 "var span = document.querySelector('span');\
@@ -11124,5 +11153,18 @@ mod tests {
             rt.evaluate("__c2").await.unwrap().value,
             Some(serde_json::Value::Bool(true))
         );
+    }
+
+    #[tokio::test]
+    async fn test_url_create_object_url() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "typeof URL.createObjectURL === 'function' && URL.createObjectURL({}).startsWith('blob:')",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        assert_eq!(r.value, Some(serde_json::Value::Bool(true)));
     }
 }
