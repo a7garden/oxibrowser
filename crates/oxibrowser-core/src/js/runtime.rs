@@ -80,6 +80,9 @@ thread_local! {
 enum PendingFetch {
     Fetch {
         resolvers: ResolvingFunctions,
+        /// Optional AbortSignal. Polled by the drain pass; when `.aborted`
+        /// becomes true the promise is rejected with an AbortError.
+        signal: Option<JsObject>,
     },
     Xhr {
         ready_state: Arc<RwLock<f64>>,
@@ -1715,6 +1718,41 @@ fn settle_xhr(
 /// top-level `evaluate()`. Responses are collected before settling to release
 /// the channel borrow before re-entering boa (settling may issue more JS/fetch).
 fn drain_pending_fetch_responses(ctx: &mut Context) {
+    // Abort pass: reject any pending fetch whose AbortSignal has fired since
+    // the last pump. Signal refs are cloned out first — reading `.aborted`
+    // needs `&mut ctx`, which can't happen under the `PENDING_FETCH` borrow.
+    let aborted_ids: Vec<u64> = PENDING_FETCH
+        .with(|m| {
+            m.borrow()
+                .iter()
+                .filter_map(|(id, pf)| match pf {
+                    PendingFetch::Fetch { signal, .. } => signal.clone().map(|s| (*id, s)),
+                    PendingFetch::Xhr { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .filter_map(|(id, sig)| {
+            sig.get(js_string!("aborted"), ctx)
+                .ok()
+                .and_then(|v| v.as_boolean())
+                .filter(|&b| b)
+                .map(|_| id)
+        })
+        .collect();
+    for id in aborted_ids {
+        if let Some(PendingFetch::Fetch { resolvers, .. }) =
+            PENDING_FETCH.with(|m| m.borrow_mut().remove(&id))
+        {
+            let err = ctx
+                .eval(Source::from_bytes(
+                    "(()=>{const e=new Error('The user aborted a request.');\
+                     e.name='AbortError';return e;})()",
+                ))
+                .unwrap_or(JsValue::undefined());
+            let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
+        }
+    }
     let responses: Vec<FetchResponseMsg> = RESPONSE_RX.with(|cell| {
         let mut borrowed = cell.borrow_mut();
         let Some(rx) = borrowed.as_mut() else {
@@ -1730,7 +1768,7 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
     for resp in responses {
         let entry = PENDING_FETCH.with(|m| m.borrow_mut().remove(&resp.id));
         match entry {
-            Some(PendingFetch::Fetch { resolvers }) => settle_fetch(resolvers, resp, ctx),
+            Some(PendingFetch::Fetch { resolvers, .. }) => settle_fetch(resolvers, resp, ctx),
             Some(PendingFetch::Xhr {
                 ready_state,
                 status,
@@ -1755,6 +1793,11 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
             }
         }
     }
+    // Flush microtasks scheduled by abort/response settlement (the `.catch`/
+    // `.then` reactions) within this pump. Without it, an abort that empties
+    // `pending_fetch` suppresses the settle_to_idle loop and leaves the
+    // rejection reaction un-drained until the next evaluate.
+    ctx.run_jobs();
 }
 /// Drain all available WebSocket events and fire the matching JS callbacks.
 /// Collects into a Vec first to release the `WS_EVENT_RX` borrow before
@@ -2250,6 +2293,28 @@ fn create_context(
                     _timeout_ms = Some(n as u64);
                 }
             }
+            // AbortSignal: if `signal` is present and already aborted, reject
+            // the returned promise with an AbortError WITHOUT dispatching the
+            // request (the standard "aborted at call time" path).
+            let signal_obj: Option<JsObject> = args
+                .get(1)
+                .and_then(|v| v.as_object())
+                .and_then(|opts| opts.get(js_string!("signal"), ctx).ok())
+                .and_then(|v| v.as_object().cloned());
+            if let Some(sig) = &signal_obj
+                && let Ok(aborted) = sig.get(js_string!("aborted"), ctx)
+                && aborted.as_boolean() == Some(true)
+            {
+                let (promise, resolvers) = JsPromise::new_pending(ctx);
+                let err = ctx
+                    .eval(Source::from_bytes(
+                        "(()=>{const e=new Error('The user aborted a request.');\
+                         e.name='AbortError';return e;})()",
+                    ))
+                    .unwrap_or(JsValue::undefined());
+                let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
+                return Ok(promise.into());
+            }
 
             // Dispatch asynchronously (Phase 3): return a pending Promise now
             // and settle it on the event loop when the response arrives. The JS
@@ -2302,7 +2367,13 @@ fn create_context(
             // Register the resolver; `settle_fetch` resolves/rejects it when the
             // response arrives on the shared channel (drained by the pump).
             PENDING_FETCH.with(|m| {
-                m.borrow_mut().insert(id, PendingFetch::Fetch { resolvers });
+                m.borrow_mut().insert(
+                    id,
+                    PendingFetch::Fetch {
+                        resolvers,
+                        signal: signal_obj,
+                    },
+                );
             });
 
             Ok(promise.into())
@@ -3448,9 +3519,8 @@ fn create_context(
             Ok(JsValue::from(JsString::from(url.as_str())))
         })
     };
-    let rou_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined()))
-    };
+    let rou_fn =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
     let cou_built = FunctionObjectBuilder::new(context.realm(), cou_fn)
         .name(js_string!("createObjectURL"))
         .build();
@@ -3462,8 +3532,18 @@ fn create_context(
         if let Ok(url_val) = globals.get(js_string!("URL"), &mut context)
             && let Some(url_obj) = url_val.as_object().cloned()
         {
-            let _ = url_obj.set(js_string!("createObjectURL"), JsValue::from(cou_built), true, &mut context);
-            let _ = url_obj.set(js_string!("revokeObjectURL"), JsValue::from(rou_built), true, &mut context);
+            let _ = url_obj.set(
+                js_string!("createObjectURL"),
+                JsValue::from(cou_built),
+                true,
+                &mut context,
+            );
+            let _ = url_obj.set(
+                js_string!("revokeObjectURL"),
+                JsValue::from(rou_built),
+                true,
+                &mut context,
+            );
         }
     }
     // --- crypto.getRandomValues (CSPRNG) ---
@@ -6181,7 +6261,9 @@ fn create_element_object(
                 .unwrap_or_default();
             let dom = m_dom.read();
             if let Some(ref snapshot) = *dom {
-                return Ok(JsValue::from(snapshot.element_matches(m_root_id, &selector)));
+                return Ok(JsValue::from(
+                    snapshot.element_matches(m_root_id, &selector),
+                ));
             }
             Ok(JsValue::from(false))
         })
@@ -10269,6 +10351,53 @@ mod tests {
         let ok = r.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
         assert!(ok, "fetches were serial; dur value = {:?}", r.value);
     }
+    #[tokio::test]
+    async fn test_fetch_pre_aborted_signal_rejects_with_abort_error() {
+        // fetch(url, {signal}) with an ALREADY-aborted signal must reject the
+        // returned promise with an AbortError WITHOUT dispatching a request.
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 400, "{\"v\":1}".to_string());
+
+        rt.evaluate(
+            "var ac = new AbortController();\
+             ac.abort();\
+             globalThis.__name = 'none';\
+             fetch('http://x/', {signal: ac.signal})\
+               .catch(e => { globalThis.__name = e.name; })",
+        )
+        .await
+        .unwrap();
+
+        let r = rt.evaluate("globalThis.__name").await.unwrap();
+        assert_eq!(r.value, Some(Value::from("AbortError")));
+    }
+    #[tokio::test]
+    async fn test_fetch_inflight_abort_rejects_with_abort_error() {
+        // abort() called AFTER fetch() starts must reject the in-flight promise
+        // with an AbortError; the late response is then dropped (no entry).
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        // Long RTT so the abort fires while the request is still in-flight.
+        let _h = spawn_test_fetch_handler(req_rx, resp_tx, 400, "{\"v\":1}".to_string());
+
+        rt.evaluate(
+            "var ac = new AbortController();\
+             globalThis.__name = 'none';\
+             fetch('http://x/', {signal: ac.signal})\
+               .catch(e => { globalThis.__name = e.name; });\
+             ac.abort();",
+        )
+        .await
+        .unwrap();
+
+        let r = rt.evaluate("globalThis.__name").await.unwrap();
+        assert_eq!(r.value, Some(Value::from("AbortError")));
+    }
 
     #[tokio::test]
     async fn test_async_xhr_non_blocking() {
@@ -11143,7 +11272,8 @@ mod tests {
     #[tokio::test]
     async fn test_element_matches_and_closest() {
         let mut rt = JsRuntime::new();
-        let html = "<html><body><div class=\"outer\"><span class=\"inner\">hi</span></div></body></html>";
+        let html =
+            "<html><body><div class=\"outer\"><span class=\"inner\">hi</span></div></body></html>";
         let frame = make_frame(html).await;
         rt.set_dom_snapshot(Some(DomSnapshot::from_frame(&frame)));
 
