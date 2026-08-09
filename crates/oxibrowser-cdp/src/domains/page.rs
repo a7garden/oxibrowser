@@ -39,7 +39,9 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "setLifecycleEventsEnabled" => set_lifecycle_events_enabled(params, ctx),
         // Dialog handling: alert/confirm/prompt default to non-blocking
         // (no-throw), so acknowledging the dialog is a no-op ack.
-        "handleJavaScriptDialog" => Ok(Some(json!({}))),
+        // Resolve a pending alert/confirm/prompt. The page's JS thread blocks
+        // polling the dialog gate until this writes the resolution.
+        "handleJavaScriptDialog" => handle_javascript_dialog(params, ctx).await,
         // Common Playwright/Puppeteer Page methods — acknowledged as no-ops so
         // they don't 404 the client. Real implementations land per phase.
         "addScriptToEvaluateOnNewDocument" => Ok(Some(json!({ "identifier": "0" }))),
@@ -406,4 +408,26 @@ async fn print_to_pdf(_params: Option<Value>, _ctx: &DispatchContext) -> DomainR
         "data": "",
         "stream": ""
     })))
+}
+
+/// Page.handleJavaScriptDialog — accept or dismiss a pending
+/// `alert`/`confirm`/`prompt` dialog. Writes the resolution into the session's
+/// shared dialog gate, waking the blocked JS thread.
+async fn handle_javascript_dialog(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let accept = params
+        .get("accept")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let prompt_text = params
+        .get("promptText")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // Write directly to the shared gate — no session lock, so this resolves a
+    // dialog even while a blocking evaluate holds the session write lock.
+    *ctx.dialog_gate.lock() = Some(oxibrowser_core::js::DialogResult {
+        accept,
+        prompt_text,
+    });
+    Ok(Some(json!({})))
 }

@@ -35,6 +35,10 @@ pub struct DispatchContext {
     pub events: EventSender,
     /// Registry of paused requests for Fetch domain interception.
     pub fetch_registry: SharedRegistry,
+    /// Shared dialog-resolution gate (for `Page.handleJavaScriptDialog`).
+    /// Accessible without the session lock so dialogs resolve while a blocking
+    /// `evaluate` holds the session write lock.
+    pub dialog_gate: oxibrowser_core::js::DialogGate,
 }
 
 /// Result of handling a CDP domain method.

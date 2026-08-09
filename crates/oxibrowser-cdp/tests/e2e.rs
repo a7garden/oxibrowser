@@ -114,6 +114,14 @@ async fn start_cdp_server() -> (Arc<CdpServer>, SocketAddr) {
     (server, addr)
 }
 
+// Events that arrive while a `send_command` is awaiting its response are
+// buffered here (concurrent dispatch may deliver events before the response).
+// `collect_events` drains the prefix-matching ones so tests observe them.
+thread_local! {
+    static SIDECAR_EVENTS: std::cell::RefCell<Vec<Value>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Connect to a CDP server via WebSocket.
 async fn connect_ws(
     addr: SocketAddr,
@@ -133,7 +141,9 @@ async fn connect_ws(
     let url = format!("ws://{addr}/ws");
     let request = url.into_client_request().unwrap();
     let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    ws.split()
+    let (sink, stream) = ws.split();
+    SIDECAR_EVENTS.with(|b| b.borrow_mut().clear());
+    (sink, stream)
 }
 
 /// Send a CDP command and return the response (skipping events).
@@ -175,7 +185,9 @@ async fn send_command(
                 if response.get("id").and_then(|v| v.as_u64()) == Some(id) {
                     return response;
                 }
-                // Skip events
+                // Buffer events for a later collect_events (concurrent
+                // dispatch may deliver them before this command's response).
+                SIDECAR_EVENTS.with(|b| b.borrow_mut().push(response));
             }
             Ok(Some(Ok(_))) => continue,
             Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
@@ -197,6 +209,19 @@ async fn collect_events(
 ) -> Vec<Value> {
     let mut events = Vec::new();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(max_wait_ms);
+    // Drain prefix-matching events buffered while prior send_command calls
+    // awaited their responses (concurrent dispatch delivers them early).
+    SIDECAR_EVENTS.with(|b| {
+        let mut buf = b.borrow_mut();
+        let mut kept = Vec::with_capacity(buf.len());
+        for ev in buf.drain(..) {
+            match ev.get("method").and_then(|v| v.as_str()) {
+                Some(m) if m.starts_with(method_prefix) => events.push(ev),
+                _ => kept.push(ev),
+            }
+        }
+        *buf = kept;
+    });
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

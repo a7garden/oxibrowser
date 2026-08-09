@@ -47,6 +47,8 @@ pub struct CdpSession {
     event_sender: EventSender,
     /// Registry of paused Fetch requests (shared via DispatchContext).
     fetch_registry: oxibrowser_core::network::SharedRegistry,
+    /// Shared dialog-resolution gate (for Page.handleJavaScriptDialog).
+    dialog_gate: oxibrowser_core::js::DialogGate,
     /// Event receiver (drained by background task).
     event_receiver: Option<EventReceiver>,
 }
@@ -69,8 +71,32 @@ impl CdpSession {
         // Create a browser session for this CDP connection
         let session = browser.new_session().await?;
 
-        // Create event broadcaster
         let (event_sender, event_receiver) = event_channel();
+        // CoreEvent sink: the JS thread (in core) pushes neutral CoreEvents
+        // onto this channel; the drainer task translates them into CDP events.
+        let (core_tx, core_rx) = std::sync::mpsc::channel::<oxibrowser_core::js::CoreEvent>();
+        {
+            let mut s = session.write().await;
+            s.set_event_sink(core_tx);
+        }
+        // Spawn a drainer that pumps CoreEvents into CDP events. Exits when the
+        // core sender drops (session/JS-thread teardown).
+        let drain_events = event_sender.clone();
+        tokio::spawn(async move {
+            loop {
+                loop {
+                    match core_rx.try_recv() {
+                        Ok(ev) => crate::core_event::emit_core_event(&drain_events, ev),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        // Clone the shared dialog gate so Page.handleJavaScriptDialog can
+        // resolve a pending dialog without acquiring the session lock.
+        let dialog_gate = session.read().await.dialog_gate();
 
         info!(session_id = %session_id, "CDP session created");
 
@@ -81,25 +107,32 @@ impl CdpSession {
             target_id: None,
             browser,
             session,
+            dialog_gate,
             event_sender,
             fetch_registry: oxibrowser_core::network::intercept::shared_registry(),
             event_receiver: Some(event_receiver),
         })
     }
-
     /// Run the message dispatch loop.
     ///
-    /// Reads commands from WebSocket, dispatches to domain handlers,
-    /// sends responses back, and forwards CDP events to the client.
+    /// Reads commands from the WebSocket, dispatches each **concurrently**
+    /// (so a long-running command — e.g. `Runtime.evaluate` blocked on a
+    /// dialog — cannot stall event forwarding or other commands), and forwards
+    /// CDP responses + events to the client.
     #[tracing::instrument(skip(self), fields(session_id = %self.session_id), err)]
     pub async fn run(mut self) -> anyhow::Result<()> {
         info!(session_id = %self.session_id, "CDP session started");
 
-        // Take the event receiver out — the forwarding task owns it.
+        // Take the event receiver out — drained by this loop's select!.
         let mut event_rx = self
             .event_receiver
             .take()
             .ok_or_else(|| anyhow::anyhow!("event_receiver must be present at session start"))?;
+
+        // Command responses flow back from spawned dispatch tasks through this
+        // channel, keeping the select! free to poll ws input, events, and
+        // responses concurrently.
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<CdpResponse>();
 
         loop {
             tokio::select! {
@@ -108,7 +141,20 @@ impl CdpSession {
                     match msg {
                         Some(Ok(tungstenite::Message::Text(text))) => {
                             debug!(text = %text, "received CDP message");
-                            self.handle_text_message(&text).await?;
+                            let ctx = DispatchContext {
+                                session: self.session.clone(),
+                                events: self.event_sender.clone(),
+                                fetch_registry: self.fetch_registry.clone(),
+                                dialog_gate: self.dialog_gate.clone(),
+                            };
+                            let response_tx = response_tx.clone();
+                            // Spawn so dispatch never blocks the loop — a
+                            // blocking evaluate (e.g. alert()) still lets
+                            // Page.handleJavaScriptDialog be received & run.
+                            tokio::spawn(async move {
+                                let response = dispatch_command(text.to_string(), &ctx).await;
+                                let _ = response_tx.send(response);
+                            });
                         }
                         Some(Ok(tungstenite::Message::Close(_))) => {
                             info!(session_id = %self.session_id, "WebSocket closed by client");
@@ -130,7 +176,18 @@ impl CdpSession {
                         }
                     }
                 }
-                // Outgoing CDP events
+                // Command responses from spawned dispatch tasks
+                response = response_rx.recv() => {
+                    if let Some(response) = response
+                        && let Err(e) = self.send_response(response).await
+                    {
+                        warn!(error = %e, "failed to send CDP response");
+                        break;
+                    }
+                }
+                // Outgoing CDP events (independent of dispatch — decoupled so
+                // e.g. Page.javascriptDialogOpening reaches the client while a
+                // blocking evaluate is still pending).
                 event = event_rx.recv() => {
                     match event {
                         Some(event) => {
@@ -139,14 +196,15 @@ impl CdpSession {
                                 break;
                             }
                         }
-                        None => {
-                            // Channel closed
-                            break;
-                        }
+                        None => break,
                     }
                 }
             }
         }
+
+        // Drop our response sender; in-flight dispatch tasks finish and their
+        // sends are dropped (channel receiver gone on return).
+        drop(response_tx);
 
         // Close the underlying Session so is_closed() returns true.
         self.session.write().await.close().await.ok();
@@ -157,87 +215,6 @@ impl CdpSession {
 
         info!(session_id = %self.session_id, "CDP session ended");
         Ok(())
-    }
-
-    /// Handle a single text message.
-    #[tracing::instrument(skip(self, text), fields(session_id = %self.session_id))]
-    async fn handle_text_message(&mut self, text: &str) -> anyhow::Result<()> {
-        // Validate message size
-        if text.len() > MAX_CDP_MESSAGE_SIZE {
-            warn!(
-                size = text.len(),
-                max = MAX_CDP_MESSAGE_SIZE,
-                "CDP message too large, dropping"
-            );
-            let response = CdpResponse {
-                id: 0,
-                result: None,
-                error: Some(crate::protocol::CdpError {
-                    code: -32600,
-                    message: format!(
-                        "Message too large: {} bytes (max {} bytes)",
-                        text.len(),
-                        MAX_CDP_MESSAGE_SIZE
-                    ),
-                }),
-                session_id: None,
-            };
-            self.send_response(response).await?;
-            return Ok(());
-        }
-
-        // Parse the CDP request
-        let request: CdpRequest = match serde_json::from_str(text) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "failed to parse CDP request");
-                let response = CdpResponse {
-                    id: 0,
-                    result: None,
-                    error: Some(crate::protocol::CdpError {
-                        code: -32700,
-                        message: format!("Parse error: {e}"),
-                    }),
-                    session_id: None,
-                };
-                self.send_response(response).await?;
-                return Ok(());
-            }
-        };
-
-        let request_id = request.id.unwrap_or(0);
-        let session_id_for_response = request.session_id.clone();
-
-        debug!(
-            id = request_id,
-            method = %request.method,
-            "dispatching CDP command"
-        );
-
-        // Create dispatch context with session + event sender + fetch registry
-        let ctx = DispatchContext {
-            session: self.session.clone(),
-            events: self.event_sender.clone(),
-            fetch_registry: self.fetch_registry.clone(),
-        };
-
-        // Dispatch to domain handler
-        let response = match domains::dispatch(&request.method, request.params, &ctx).await {
-            Ok(result) => CdpResponse {
-                id: request_id,
-                result: Some(result.unwrap_or(serde_json::json!({}))),
-                error: None,
-                session_id: session_id_for_response,
-            },
-            Err(cdp_error) => CdpResponse {
-                id: request_id,
-                result: None,
-                error: Some(cdp_error),
-                session_id: session_id_for_response,
-            },
-        };
-
-        self.send_response(response).await
     }
 
     /// Send a CDP response to the client.
@@ -268,5 +245,75 @@ impl CdpSession {
     /// Get the target ID (if attached).
     pub fn target_id(&self) -> Option<&str> {
         self.target_id.as_deref()
+    }
+}
+
+/// Parse + dispatch a single CDP command text, returning the response.
+///
+/// Runs as a spawned task so dispatch never blocks the run loop's `select!`
+/// (a long-running command like a dialog-blocked `Runtime.evaluate` must not
+/// stall event forwarding or other commands).
+async fn dispatch_command(text: String, ctx: &DispatchContext) -> CdpResponse {
+    // Validate message size
+    if text.len() > MAX_CDP_MESSAGE_SIZE {
+        warn!(
+            size = text.len(),
+            max = MAX_CDP_MESSAGE_SIZE,
+            "CDP message too large, dropping"
+        );
+        return CdpResponse {
+            id: 0,
+            result: None,
+            error: Some(crate::protocol::CdpError {
+                code: -32600,
+                message: format!(
+                    "Message too large: {} bytes (max {} bytes)",
+                    text.len(),
+                    MAX_CDP_MESSAGE_SIZE
+                ),
+            }),
+            session_id: None,
+        };
+    }
+
+    // Parse the CDP request
+    let request: CdpRequest = match serde_json::from_str(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "failed to parse CDP request");
+            return CdpResponse {
+                id: 0,
+                result: None,
+                error: Some(crate::protocol::CdpError {
+                    code: -32700,
+                    message: format!("Parse error: {e}"),
+                }),
+                session_id: None,
+            };
+        }
+    };
+
+    let request_id = request.id.unwrap_or(0);
+    let session_id_for_response = request.session_id.clone();
+
+    debug!(
+        id = request_id,
+        method = %request.method,
+        "dispatching CDP command"
+    );
+
+    match domains::dispatch(&request.method, request.params, ctx).await {
+        Ok(result) => CdpResponse {
+            id: request_id,
+            result: Some(result.unwrap_or(serde_json::json!({}))),
+            error: None,
+            session_id: session_id_for_response,
+        },
+        Err(cdp_error) => CdpResponse {
+            id: request_id,
+            result: None,
+            error: Some(cdp_error),
+            session_id: session_id_for_response,
+        },
     }
 }

@@ -12,12 +12,18 @@ use crate::protocol::CdpError;
 use serde_json::{Value, json};
 
 /// Dispatch Log domain methods.
-pub async fn handle(method: &str, _params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
+pub async fn handle(method: &str, _params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
-        // Acknowledge — no state to track until entryAdded is wired.
-        "enable" | "disable" | "clear" | "startViolationsReport" | "stopViolationsReport" => {
+        "enable" => {
+            ctx.events.set_log_enabled(true);
             Ok(Some(json!({})))
         }
+        "disable" => {
+            ctx.events.set_log_enabled(false);
+            Ok(Some(json!({})))
+        }
+        // Acknowledge — no state to track.
+        "clear" | "startViolationsReport" | "stopViolationsReport" => Ok(Some(json!({}))),
         _ => Err(CdpError {
             code: -32601,
             message: format!("Log.{method} not implemented"),

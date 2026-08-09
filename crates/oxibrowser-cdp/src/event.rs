@@ -20,8 +20,8 @@ pub struct EventSender {
     page_enabled: Arc<AtomicBool>,
     runtime_enabled: Arc<AtomicBool>,
     network_enabled: Arc<AtomicBool>,
+    log_enabled: Arc<AtomicBool>,
     fetch_enabled: Arc<AtomicBool>,
-    /// Fetch interception patterns (set via Fetch.enable).
     fetch_patterns: Arc<RwLock<Vec<FetchPattern>>>,
     /// Session ID stamped onto every CDP event once a target is attached
     /// (flat / auto-attach protocol). `None` for root-level events.
@@ -41,6 +41,7 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
         page_enabled: Arc::new(AtomicBool::new(false)),
         runtime_enabled: Arc::new(AtomicBool::new(false)),
         network_enabled: Arc::new(AtomicBool::new(false)),
+        log_enabled: Arc::new(AtomicBool::new(false)),
         fetch_enabled: Arc::new(AtomicBool::new(false)),
         fetch_patterns: Arc::new(RwLock::new(Vec::new())),
         attached_session_id: Arc::new(RwLock::new(None)),
@@ -111,6 +112,23 @@ impl EventSender {
         if self.fetch_enabled.load(Ordering::Relaxed) {
             self.send_event(method, params);
         }
+    }
+
+    /// Send a Log domain event (only if Log domain is enabled).
+    pub fn send_log_event(&self, method: &str, params: Value) {
+        if self.log_enabled.load(Ordering::Relaxed) {
+            self.send_event(method, params);
+        }
+    }
+
+    /// Enable Log domain events.
+    pub fn set_log_enabled(&self, enabled: bool) {
+        self.log_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check if Log domain events are enabled.
+    pub fn is_log_enabled(&self) -> bool {
+        self.log_enabled.load(Ordering::Relaxed)
     }
 
     // -- Flag getters/setters --
@@ -255,6 +273,7 @@ mod tests {
             page_enabled: Arc::new(AtomicBool::new(false)),
             runtime_enabled: Arc::new(AtomicBool::new(false)),
             network_enabled: Arc::new(AtomicBool::new(false)),
+            log_enabled: Arc::new(AtomicBool::new(false)),
             fetch_enabled: Arc::new(AtomicBool::new(false)),
             fetch_patterns: Arc::new(RwLock::new(Vec::new())),
             attached_session_id: Arc::new(RwLock::new(None)),

@@ -566,6 +566,7 @@ mod tests {
             session: session.clone(),
             events,
             fetch_registry: shared_registry(),
+            dialog_gate: Arc::new(parking_lot::Mutex::new(None)),
         };
         (ctx, session)
     }
