@@ -97,6 +97,8 @@ fn set_device_metrics_override(params: Option<Value>) -> DomainResult {
         device_scale_factor,
         mobile,
     });
+    // Apply to layout: subsequent navigations lay out at this viewport.
+    oxibrowser_core::session::set_viewport_override(width, height);
 
     Ok(Some(json!({})))
 }
@@ -104,6 +106,7 @@ fn set_device_metrics_override(params: Option<Value>) -> DomainResult {
 /// `Emulation.clearDeviceMetricsOverride` — drop any stored override.
 fn clear_device_metrics_override() -> DomainResult {
     *DEVICE_METRICS.write() = None;
+    oxibrowser_core::session::clear_viewport_override();
     tracing::debug!("Emulation.clearDeviceMetricsOverride");
     Ok(Some(json!({})))
 }

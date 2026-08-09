@@ -113,6 +113,27 @@ pub fn set_download_behavior(path: Option<std::path::PathBuf>) {
     *DOWNLOAD_DIR.write() = path;
 }
 
+/// Emulated viewport override `(width, height)` set via
+/// `Emulation.setDeviceMetricsOverride`. When set, navigations lay out at this
+/// size instead of `BrowserConfig`'s viewport.
+static VIEWPORT_OVERRIDE: std::sync::LazyLock<parking_lot::RwLock<Option<(u32, u32)>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(None));
+
+/// Install a viewport override consumed by navigation layout.
+pub fn set_viewport_override(width: u32, height: u32) {
+    *VIEWPORT_OVERRIDE.write() = Some((width.max(1), height.max(1)));
+}
+
+/// Clear the viewport override.
+pub fn clear_viewport_override() {
+    *VIEWPORT_OVERRIDE.write() = None;
+}
+
+/// Read the viewport override, if any.
+pub(crate) fn current_viewport_override() -> Option<(u32, u32)> {
+    *VIEWPORT_OVERRIDE.read()
+}
+
 // ---------------------------------------------------------------------------
 // Fetch handler
 // ---------------------------------------------------------------------------
@@ -991,7 +1012,8 @@ impl Session {
         self.js_runtime.set_page_url(&url);
         // Build/replace the render document AND execute the page's `<script>`
         // tags (Phase 1 keystone).
-        let viewport = (self.config.viewport_width, self.config.viewport_height);
+        let viewport = current_viewport_override()
+            .unwrap_or((self.config.viewport_width, self.config.viewport_height));
         if let Err(e) = self
             .js_runtime
             .set_document_with_scripts(&html, Some(&url), viewport, scripts)
@@ -1361,7 +1383,6 @@ mod tests {
     async fn test_navigate_to_attachment_downloads_file() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/file"))
@@ -1389,5 +1410,37 @@ mod tests {
         );
         set_download_behavior(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_viewport_override_applies_to_layout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<html><body><div style=\"width:100%;height:10px\"></div></body></html>",
+            ))
+            .mount(&server)
+            .await;
+
+        set_viewport_override(500, 400);
+        let mut session = make_session().await;
+        session
+            .navigate(&format!("{}/", server.uri()))
+            .await
+            .expect("navigate");
+        let png = session.capture_screenshot_png(500).await.expect("capture");
+        clear_viewport_override();
+
+        let img = image::load_from_memory(&png).expect("decode");
+        // Full-page capture reflects the laid-out content width (≥ override width).
+        assert!(
+            img.width() >= 500,
+            "viewport override should drive layout width, got {}",
+            img.width()
+        );
     }
 }

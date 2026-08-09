@@ -119,16 +119,29 @@ via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-f
 
 ## 6. Phase 9 — Playwright 롱테일
 
-이미 완료: `alert`/`confirm`/`prompt` dialog(Dialog MVP + 이벤트 구동
-`Page.handleJavaScriptDialog`).
+이미 완료: `alert`/`confirm`/`prompt` dialog; **geolocation/timezone 에뮬레이션**
+(2026-08-09, `navigator.geolocation` + `Emulation.setGeolocationOverride`/
+`setTimezoneOverride`); **파일 다운로드** (2026-08-09, `Content-Disposition:
+attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
 
 남은 항목:
-- **멀티탭** — `context.newPage()` / 탭 간 전환·격리
-- **다운로드** — 다운로드 이벤트/파일 저장
-- **geolocation / timezone / viewport 에뮬레이션** — Emulation 도메인 확장(일부
-  `setDeviceMetricsOverride`는 Phase 5에서 ack만 해둔 상태)
-- **request interception 인체개선** — `intercept.rs` 기반 Playwright 에르고노믹
-- **tracing**
+- **멀티탭** — `Target.createTarget`가 현재 stub(가짜 targetId 반환). 진짜 멀티탭은
+  CDP 서버의 멀티 페이지/세션 라우팅 + `Browser`/`Page` 모델 확장 필요.
+  앵커: `crates/oxibrowser-cdp/src/domains/target.rs:120` (`create_target`).
+- **request interception 실배선** — Fetch 도메인 핸들러/패턴/레지스트리/
+  `PausedRequest`/`emit_request_paused` 모두 존재하지만 **`emit_request_paused`가
+  어디서도 호출되지 않음** → requestPaused가 발생하지 않아 Playwright `route()`가
+  동작 안 함. navigate(및 이상적으로 JS fetch) 경로에서 패턴 매칭 후
+  `emit_request_paused` + oneshot 대기로 실배선 필요. 계층 문제: fetch는
+  `session.navigate`(core)에 캡슐화되어 있고 patterns/registry/sender는 CDP에 있음.
+  앵커: `crates/oxibrowser-cdp/src/domains/fetch.rs:332` (`emit_request_paused`),
+  `crates/oxibrowser-cdp/src/domains/page.rs:82` (`navigate`), 
+  `crates/oxibrowser-core/src/session.rs:464` (`navigate`).
+- **tracing** — 큰 규모.
+- **viewport device-metrics 실적용** — `setDeviceMetricsOverride`는 저장만 하고
+  렌더/레이아웃 뷰포트에 미반영(`current_device_metrics()` 무소비).
+  앵커: `crates/oxibrowser-cdp/src/domains/emulation.rs:34`, 적용점
+  `crates/oxibrowser-core/src/session.rs:917`(viewport).
 
 ---
 
