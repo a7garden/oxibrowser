@@ -1966,6 +1966,44 @@ fn extract_binary_bytes(v: &JsValue, ctx: &mut Context) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Normalize a fetch/XHR body argument into bytes + an optional auto Content-Type.
+/// Plain strings → UTF-8 bytes; `FormData` → `multipart/form-data`; `Blob` → raw
+/// bytes with the blob's `type`. Returns `None` for no body.
+fn normalize_fetch_body(value: &JsValue, ctx: &mut Context) -> Option<(Vec<u8>, Option<String>)> {
+    if value.is_undefined() || value.is_null() {
+        return None;
+    }
+    if let Some(s) = value.as_string() {
+        return Some((s.to_std_string_escaped().into_bytes(), None));
+    }
+    // FormData / Blob via the JS serializer installed by FORMDATA_BLOB_BOOTSTRAP.
+    let serializer = ctx
+        .global_object()
+        .get(js_string!("__oxi_serialize_body"), ctx)
+        .ok()?;
+    let callable = serializer.as_callable()?;
+    let res = callable
+        .call(&JsValue::undefined(), std::slice::from_ref(value), ctx)
+        .ok()?;
+    let obj = res.as_object()?;
+    let content_type = match obj.get(js_string!("contentType"), ctx) {
+        Ok(v) => match v.as_string() {
+            Some(s) if !s.is_empty() => Some(s.to_std_string_escaped()),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let bytes_val = obj
+        .get(js_string!("bytes"), ctx)
+        .unwrap_or(JsValue::undefined());
+    let bytes = extract_binary_bytes(&bytes_val, ctx).or_else(|| {
+        let tv = obj.get(js_string!("text"), ctx).ok()?;
+        let s = tv.as_string()?;
+        Some(s.to_std_string_escaped().into_bytes())
+    })?;
+    Some((bytes, content_type))
+}
+
 fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         let mut borrowed = m.borrow_mut();
@@ -2306,13 +2344,20 @@ fn create_context(
                 // headers (simplified — just extract common ones)
                 // Full header iteration via enumerate() skipped for simplicity
                 // since boa 0.20's JsIterator API requires careful handling
-                // body
+                // body: FormData/Blob via normalize, else a plain string.
                 if let Ok(b) = opts.get(js_string!("body"), ctx)
                     && !b.is_undefined()
                     && !b.is_null()
-                    && let Some(s) = b.as_string()
+                    && let Some((bytes, ct)) = normalize_fetch_body(&b, ctx)
                 {
-                    body = Some(s.to_std_string_escaped().into_bytes());
+                    body = Some(bytes);
+                    if let Some(ct) = ct
+                        && !headers
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    {
+                        headers.push(("content-type".to_string(), ct));
+                    }
                 }
                 // timeout
                 if let Ok(t) = opts.get(js_string!("timeout"), ctx)
@@ -2508,11 +2553,18 @@ fn create_context(
             let send_onrsc = onreadystatechange_cb.clone();
             let send_tx = xhr_fetch_tx.clone();
             let send_fn = {
-                NativeFunction::from_closure(move |_this, args, _ctx| {
-                    let body = args
-                        .first()
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped().into_bytes());
+                NativeFunction::from_closure(move |_this, args, ctx| {
+                    let (body, content_type) = match args.first() {
+                        Some(v) => match normalize_fetch_body(v, ctx) {
+                            Some((bytes, ct)) => (Some(bytes), ct),
+                            None => (None, None),
+                        },
+                        None => (None, None),
+                    };
+                    let mut headers: Vec<(String, String)> = Vec::new();
+                    if let Some(ct) = content_type {
+                        headers.push(("content-type".to_string(), ct));
+                    }
                     let method = send_method.read().clone();
                     let url = send_url.read().clone();
                     let _is_async = *send_async.read();
@@ -2530,7 +2582,7 @@ fn create_context(
                             id,
                             url: url.clone(),
                             method: method.clone(),
-                            headers: Vec::new(),
+                            headers,
                             body,
                         };
                         if tx.send(request).is_ok() {
@@ -8547,6 +8599,129 @@ fn register_window_globals(
     if let Err(e) = ctx.eval(Source::from_bytes(WEB_COMPONENTS_BOOTSTRAP)) {
         tracing::warn!(error = %e, "web components bootstrap failed");
     }
+    const FORMDATA_BLOB_BOOTSTRAP: &str = r#"
+(function () {
+  function install(g) {
+    if (typeof g.Blob === 'undefined') {
+      function toBytes(parts) {
+        parts = parts || [];
+        var bytes = [];
+        for (var i = 0; i < parts.length; i++) {
+          var p = parts[i];
+          if (typeof p === 'string') {
+            for (var j = 0; j < p.length; j++) bytes.push(p.charCodeAt(j) & 0xff);
+          } else if (typeof p === 'number') {
+            bytes.push(p & 0xff);
+          } else if (p && typeof p.length === 'number') {
+            for (var j = 0; j < p.length; j++) bytes.push((p[j] || 0) & 0xff);
+          } else if (p && p.__bytes && typeof p.__bytes.length === 'number') {
+            for (var j = 0; j < p.__bytes.length; j++) bytes.push((p.__bytes[j] || 0) & 0xff);
+          }
+        }
+        return bytes;
+      }
+      function Blob(parts, opts) {
+        if (!(this instanceof Blob)) throw new TypeError("Failed to construct 'Blob'");
+        var b = toBytes(parts);
+        this.size = b.length;
+        this.type = (opts && opts.type) ? String(opts.type) : '';
+        this.__bytes = new Uint8Array(b);
+        this.__isBlob = true;
+        var src = b;
+        this.arrayBuffer = function () { return Promise.resolve(new Uint8Array(src)); };
+        this.text = function () { var s = ''; for (var i = 0; i < src.length; i++) s += String.fromCharCode(src[i]); return Promise.resolve(s); };
+        this.slice = function () { return new Blob([]); };
+      }
+      g.Blob = Blob;
+    }
+    if (typeof g.FormData === 'undefined') {
+      function FormData() {
+        if (!(this instanceof FormData)) throw new TypeError("Failed to construct 'FormData'");
+        this.__entries = [];
+        this.__isFormData = true;
+      }
+      FormData.prototype.append = function (name, value, filename) {
+        var isBlob = !!(value && value.__isBlob);
+        var e = { name: String(name), value: value, isBlob: isBlob };
+        if (isBlob) e.filename = (typeof filename === 'string') ? filename : 'blob';
+        this.__entries.push(e);
+      };
+      FormData.prototype.set = function (name, value, filename) { this.delete(name); this.append(name, value, filename); };
+      FormData.prototype.delete = function (name) {
+        var n = String(name), kept = [];
+        for (var i = 0; i < this.__entries.length; i++) if (this.__entries[i].name !== n) kept.push(this.__entries[i]);
+        this.__entries = kept;
+      };
+      FormData.prototype.get = function (name) {
+        var n = String(name);
+        for (var i = 0; i < this.__entries.length; i++) if (this.__entries[i].name === n) return this.__entries[i].value;
+        return null;
+      };
+      FormData.prototype.getAll = function (name) {
+        var n = String(name), r = [];
+        for (var i = 0; i < this.__entries.length; i++) if (this.__entries[i].name === n) r.push(this.__entries[i].value);
+        return r;
+      };
+      FormData.prototype.has = function (name) {
+        var n = String(name);
+        for (var i = 0; i < this.__entries.length; i++) if (this.__entries[i].name === n) return true;
+        return false;
+      };
+      FormData.prototype.entries = function () {
+        var arr = [];
+        for (var i = 0; i < this.__entries.length; i++) arr.push([this.__entries[i].name, this.__entries[i].value]);
+        var idx = 0;
+        return { next: function () { return idx < arr.length ? { value: arr[idx++], done: false } : { value: null, done: true }; } };
+      };
+      g.FormData = FormData;
+    }
+  }
+  install(globalThis);
+  if (globalThis.window) install(globalThis.window);
+  if (typeof globalThis.__oxi_serialize_body === 'undefined') {
+    globalThis.__oxi_serialize_body = function (body) {
+      if (body == null) return null;
+      if (typeof body === 'string') return { bytes: null, text: body, contentType: null };
+      if (body.__isFormData) {
+        var boundary = '----oxiformdata' + Math.random().toString(36).slice(2) + (Date.now ? Date.now().toString(36) : '0');
+        var chunks = [];
+        var entries = body.__entries || [];
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
+          if (e.isBlob) {
+            chunks.push('--' + boundary + '\r\n');
+            chunks.push('Content-Disposition: form-data; name="' + e.name + '"; filename="' + (e.filename || 'blob') + '"\r\n');
+            chunks.push('Content-Type: ' + ((e.value && e.value.type) || 'application/octet-stream') + '\r\n\r\n');
+            var vb = (e.value && e.value.__bytes) || [];
+            for (var k = 0; k < vb.length; k++) chunks.push(String.fromCharCode(vb[k] & 0xff));
+            chunks.push('\r\n');
+          } else {
+            chunks.push('--' + boundary + '\r\n');
+            chunks.push('Content-Disposition: form-data; name="' + e.name + '"\r\n\r\n');
+            chunks.push(String(e.value));
+            chunks.push('\r\n');
+          }
+        }
+        chunks.push('--' + boundary + '--\r\n');
+        var text = chunks.join('');
+        var out = [];
+        for (var j = 0; j < text.length; j++) out.push(text.charCodeAt(j) & 0xff);
+        return { bytes: new Uint8Array(out), text: null, contentType: 'multipart/form-data; boundary=' + boundary };
+      }
+      if (body.__isBlob) {
+        var b = body.__bytes || [];
+        var out = [];
+        for (var j = 0; j < b.length; j++) out.push(b[j] & 0xff);
+        return { bytes: new Uint8Array(out), text: null, contentType: body.type || null };
+      }
+      return { bytes: null, text: String(body), contentType: null };
+    };
+  }
+})();
+"#;
+    if let Err(e) = ctx.eval(Source::from_bytes(FORMDATA_BLOB_BOOTSTRAP)) {
+        tracing::warn!(error = %e, "formdata/blob bootstrap failed");
+    }
 
     const OBSERVER_BOOTSTRAP: &str = r#"
 (function () {
@@ -10345,6 +10520,131 @@ mod tests {
             Some(200.0),
             "fetch POST promise did not settle to 200: {:?}",
             r2.value
+        );
+    }
+
+    #[tokio::test]
+    async fn test_blob_basic() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "var b = new Blob([1,2,3]);\
+                 var b2 = new Blob([new Uint8Array([4,5])], {type:'image/png'});\
+                 var b3 = new Blob(['hi']);\
+                 JSON.stringify({s1:b.size, t1:b.type, s2:b2.size, t2:b2.type, s3:b3.size})",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("blob eval produced no value");
+        let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
+        assert_eq!(v["s1"], 3, "Blob([1,2,3]).size");
+        assert_eq!(v["t1"], "", "default type empty");
+        assert_eq!(v["s2"], 2, "Blob(Uint8Array).size");
+        assert_eq!(v["t2"], "image/png");
+        assert_eq!(v["s3"], 2, "Blob(['hi']).size");
+    }
+
+    #[tokio::test]
+    async fn test_formdata_append_get_has() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "var fd = new FormData();\
+                 fd.append('a','1'); fd.append('b','2'); fd.append('a','3');\
+                 JSON.stringify({hasA: fd.has('a'), hasZ: fd.has('z'),\
+                  getA: fd.get('a'), allA: fd.getAll('a').join(','),\
+                  gone: (fd.delete('b'), fd.has('b'))})",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("formdata eval produced no value");
+        let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
+        assert_eq!(v["hasA"], true);
+        assert_eq!(v["hasZ"], false);
+        assert_eq!(v["getA"], "1", "get returns first appended");
+        assert_eq!(v["allA"], "1,3", "getAll returns every match");
+        assert_eq!(v["gone"], false, "delete removes the entry");
+    }
+
+    /// fetch(FormData) must serialize to multipart/form-data with a boundary,
+    /// and the content-type header must reflect it.
+    #[tokio::test]
+    async fn test_fetch_formdata_serializes_to_multipart() {
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+        let captured = Arc::new(parking_lot::Mutex::new(
+            None::<(Vec<(String, String)>, Vec<u8>)>,
+        ));
+        let cap = captured.clone();
+        let resp_tx2 = resp_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(req) = req_rx.recv() {
+                *cap.lock() = Some((req.headers.clone(), req.body.clone().unwrap_or_default()));
+                let _ = resp_tx2.send(FetchResponseMsg {
+                    id: req.id,
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    url: req.url,
+                    headers: vec![],
+                    body: String::new(),
+                    error: None,
+                });
+            }
+        });
+        let r = rt
+            .evaluate(
+                "var fd = new FormData();\
+                 fd.append('a','1');\
+                 fd.append('file', new Blob([0,1,2,3], {type:'text/plain'}), 'x.bin');\
+                 fetch('http://x/', {method:'POST', body: fd})\
+                   .then(r => { window.__s = r.status; })",
+            )
+            .await
+            .unwrap();
+        if r.value.is_none() && r.exception.is_some() {
+            panic!("fetch FormData eval failed: {:?}", r.exception);
+        }
+        for _ in 0..100 {
+            if captured.lock().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (headers, body) = captured
+            .lock()
+            .clone()
+            .expect("fetch FormData never reached the dispatch channel");
+        let ct = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("multipart/form-data; boundary="),
+            "content-type was {ct:?}"
+        );
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(
+            body_text.contains("name=\"a\""),
+            "missing text field: {body_text}"
+        );
+        assert!(
+            body_text.contains("filename=\"x.bin\""),
+            "missing file field: {body_text}"
+        );
+        assert!(
+            body_text.contains("\r\n--"),
+            "no multipart boundary delimiters"
         );
     }
 
