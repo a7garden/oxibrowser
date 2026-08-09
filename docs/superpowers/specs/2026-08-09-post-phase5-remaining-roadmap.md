@@ -110,10 +110,12 @@ via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-f
 
 ## 5. Phase 8 — iframe / 다중 프레임
 
-- **현재:** `Frame`이 snapshot만 보유. navigate가 자식 프레임을 채우지 않는다(상위 로드맵 §1).
-- **작업:** navigate 시 자식 프레임 population, 분리된 컨텍스트에서 프레임 스크립트 실행,
-  프레임 경계를 가로지르는 hit-test/evaluate.
-- **앵커:** `crates/oxibrowser-core/src/frame.rs`.
+- **✅ 자식 프레임 population** (2026-08-09) — navigate가 `<iframe src>`를 fetch해
+  자식 `Frame`으로 추가 (`Session::populate_iframes`). `Frame` 구조는 자식을 지원했으나
+  채우지 않았음.
+- **남음:** 분리된 컨텍스트에서 프레임 스크립트 실행, 프레임 경계를 가로지르는
+  hit-test/evaluate (큰 규모). 앵커: `crates/oxibrowser-core/src/frame.rs`,
+  `session.rs:634` (`populate_iframes`).
 
 ---
 
@@ -125,23 +127,22 @@ via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-f
 attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
 
 남은 항목:
-- **멀티탭** — `Target.createTarget`가 현재 stub(가짜 targetId 반환). 진짜 멀티탭은
-  CDP 서버의 멀티 페이지/세션 라우팅 + `Browser`/`Page` 모델 확장 필요.
-  앵커: `crates/oxibrowser-cdp/src/domains/target.rs:120` (`create_target`).
-- **request interception 실배선** — Fetch 도메인 핸들러/패턴/레지스트리/
-  `PausedRequest`/`emit_request_paused` 모두 존재하지만 **`emit_request_paused`가
-  어디서도 호출되지 않음** → requestPaused가 발생하지 않아 Playwright `route()`가
-  동작 안 함. navigate(및 이상적으로 JS fetch) 경로에서 패턴 매칭 후
-  `emit_request_paused` + oneshot 대기로 실배선 필요. 계층 문제: fetch는
-  `session.navigate`(core)에 캡슐화되어 있고 patterns/registry/sender는 CDP에 있음.
-  앵커: `crates/oxibrowser-cdp/src/domains/fetch.rs:332` (`emit_request_paused`),
-  `crates/oxibrowser-cdp/src/domains/page.rs:82` (`navigate`), 
-  `crates/oxibrowser-core/src/session.rs:464` (`navigate`).
-- **tracing** — 큰 규모.
-- **viewport device-metrics 실적용** — `setDeviceMetricsOverride`는 저장만 하고
-  렌더/레이아웃 뷰포트에 미반영(`current_device_metrics()` 무소비).
-  앵커: `crates/oxibrowser-cdp/src/domains/emulation.rs:34`, 적용점
-  `crates/oxibrowser-core/src/session.rs:917`(viewport).
+- **멀티탭 (큰 규모)** — `Target.createTarget`가 stub(가짜 targetId). 진짜 구현에 필요:
+  (1) `CdpSession`이 `targetId/sessionId → Arc<RwLock<Session>>` 맵 보유 (Browser의
+  `sessions: Vec` 재사용 가능); (2) `create_target`가 Browser로 새 Session 생성 →
+  targetId 등록 + `Target.targetCreated`/`attachedToTarget`(새 sessionId) 이벤트;
+  (3) `dispatch_command`가 들어오는 메시지의 `sessionId`로 대상 Session 해석 (현재는
+  항상 단일 `self.session` 사용 — `session.rs:161`); (4) 자식 타겟 이벤트에 자식
+  sessionId 부착. Phase 5 flat-protocol sessionId 멀티플렉싱은 응답/이벤트에만 있고
+  수신 라우팅엔 없음. 앵커: `crates/oxibrowser-cdp/src/domains/target.rs:120`,
+  `crates/oxibrowser-cdp/src/session.rs:160`(dispatch ctx), 
+  `crates/oxibrowser-core/src/browser.rs:48`(sessions Vec).
+- **✅ request interception** (2026-08-09) — navigate 경로에서 `emit_request_paused` +
+  oneshot 대기로 실배선 완료. continue/fail/fulfill 지원 (Playwright route()).
+  JS-fetch 경로 인터셉션은 향후 과제.
+- **tracing** — 큰 규모 (미착수).
+- **✅ viewport device-metrics 실적용** (2026-08-09) — `setDeviceMetricsOverride`가
+  `VIEWPORT_OVERRIDE` 정적을 통해 레이아웃 뷰포트에 실반영.
 
 ---
 
