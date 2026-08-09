@@ -7,10 +7,19 @@
 >
 > This doc lists what is **genuinely left**, scoped precisely so the next session
 > doesn't redo finished work or chase closed risks. Branch: `main`.
+>
+> **Status (2026-08-09): ✅ COMPLETE** — all actionable items shipped, verified
+> (commits `f4935e0`→`1a39b93`), `cargo fmt`/`clippy -D warnings`/`cargo test
+> --workspace` green. Sections below are retained as the historical record of
+> what was done; the per-section notes record the resolution. The one
+> sub-item not fully delivered is real source-level exception stack frames
+> (§2.1) — blocked by boa 0.20 (no locations on `JsNativeError`, `Error.stack`
+> undefined); the achievable part (typed console RemoteObjects + real error
+> className + best-effort `.stack`) shipped.
 
 ---
 
-## 1. Primary remaining: screenshot rasterization of shadow content
+## 1. ✅ Done — screenshot rasterization of shadow content
 
 **What:** `Page.captureScreenshot` / CLI screenshots (`capture_png`) do **not**
 reflect Shadow DOM composition. Slotted content is invisible in screenshots.
@@ -43,9 +52,9 @@ Verified end-to-end (probe4: `DOM.querySelector('#slotted')` returns the slotted
 
 ---
 
-## 2. v1 refinements (accepted/deferred during the sink work)
+## 2. ✅ Done — v1 refinements (accepted/deferred during the sink work)
 
-### 2.1 Richer `Runtime.consoleAPICalled` / `exceptionThrown` serialization
+### 2.1 ✅ Done (partial) — Richer `Runtime.consoleAPICalled` / `exceptionThrown` serialization
 - **Now:** console args are stringified in `console_fn` and sent as
   `{type:"string", value}` RemoteObjects; exception `stackTrace.callFrames` is a
   single empty frame (no real line/col).
@@ -55,7 +64,7 @@ Verified end-to-end (probe4: `DOM.querySelector('#slotted')` returns the slotted
   `emit_exception`); arg stringification in `console_fn!`
   (`runtime.rs` ~`:2441`).
 
-### 2.2 CoreEvent drainer graceful shutdown (optional)
+### 2.2 ✅ Done — CoreEvent drainer graceful shutdown (optional)
 - **Now:** the drainer (`CdpSession::new`) polls `core_rx.try_recv()` + 10 ms sleep
   and exits on `Disconnected` (the sender drops when the session/JS-thread
   tears down). Works, no busy-loop, no leak in practice.
@@ -65,7 +74,7 @@ Verified end-to-end (probe4: `DOM.querySelector('#slotted')` returns the slotted
 
 ---
 
-## 3. Shadow DOM follow-ups (cheap now that the registry exists)
+## 3. ✅ Done — Shadow DOM follow-ups (cheap now that the registry exists)
 
 The `SHADOW_ROOTS` registry + compose pass are in place; these add real DOM
 surface on top:
