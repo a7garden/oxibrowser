@@ -158,6 +158,71 @@ fn current_origin() -> Option<String> {
     CURRENT_ORIGIN.with(|c| c.borrow().clone())
 }
 
+// ---------------------------------------------------------------------------
+// Emulation overrides (geolocation / timezone) — cross-thread so the CDP layer
+// (Emulation domain, async main thread) can set them while the JS thread reads.
+// ---------------------------------------------------------------------------
+
+/// Geolocation override coordinates: `(latitude, longitude, accuracy_meters)`.
+static GEOLOCATION_OVERRIDE: std::sync::LazyLock<parking_lot::RwLock<Option<(f64, f64, f64)>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(None));
+
+/// Install a geolocation override consumed by `navigator.geolocation.getCurrentPosition`.
+pub fn set_geolocation_override(lat: f64, lon: f64, accuracy: f64) {
+    *GEOLOCATION_OVERRIDE.write() = Some((lat, lon, accuracy));
+}
+
+/// Clear the geolocation override.
+pub fn clear_geolocation_override() {
+    *GEOLOCATION_OVERRIDE.write() = None;
+}
+
+/// Read the geolocation override (used by the JS geolocation API).
+fn geolocation_override() -> Option<(f64, f64, f64)> {
+    *GEOLOCATION_OVERRIDE.read()
+}
+
+/// Timezone override (IANA name, e.g. `America/New_York`).
+static TIMEZONE_OVERRIDE: std::sync::LazyLock<parking_lot::RwLock<Option<String>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(None));
+
+/// Install a timezone override consumed by `Intl`/`Date`.
+pub fn set_timezone_override(tz: &str) {
+    *TIMEZONE_OVERRIDE.write() = Some(tz.to_string());
+}
+
+/// Clear the timezone override.
+pub fn clear_timezone_override() {
+    *TIMEZONE_OVERRIDE.write() = None;
+}
+
+/// Read the timezone override, falling back to the detected system timezone.
+pub(crate) fn effective_timezone() -> String {
+    TIMEZONE_OVERRIDE
+        .read()
+        .clone()
+        .unwrap_or_else(detect_system_timezone)
+}
+
+/// Detect the system IANA timezone (TZ env, /etc/localtime, fallback UTC).
+fn detect_system_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ")
+        && tz.contains('/')
+    {
+        return tz;
+    }
+    if let Ok(target) = std::fs::read_link("/etc/localtime") {
+        let s = target.to_string_lossy().into_owned();
+        if let Some(idx) = s.rfind("zoneinfo/") {
+            let tail = &s[idx + "zoneinfo/".len()..];
+            if tail.contains('/') {
+                return tail.to_string();
+            }
+        }
+    }
+    "UTC".to_string()
+}
+
 /// Mint a fresh fetch request id on the JS thread (never 0).
 fn next_fetch_id() -> u64 {
     NEXT_FETCH_ID.with(|c| {
@@ -9009,6 +9074,12 @@ fn register_window_globals(
     let stealth = crate::js::stealth::build(ctx, &ua_owned);
     let _ = crate::js::stealth::attach_to_navigator(ctx, &nav_obj, &stealth);
 
+    // navigator.geolocation — backed by the Emulation override. With no
+    // override, getCurrentPosition reports POSITION_UNAVAILABLE (a headless
+    // client has no real location source).
+    let geo_obj = build_geolocation_object(ctx);
+    let _ = nav_obj.set(js_string!("geolocation"), geo_obj, true, ctx);
+
     // window.location
     let parsed_url = url::Url::parse(&url_owned);
     let loc_href = url_owned.clone();
@@ -9342,31 +9413,14 @@ fn register_window_globals(
         tracing::warn!(error = %e, "observer bootstrap failed");
     }
     {
-        let tz = serde_json::to_string(&detect_system_timezone())
-            .unwrap_or_else(|_| "\"UTC\"".to_string());
+        let tz =
+            serde_json::to_string(&effective_timezone()).unwrap_or_else(|_| "\"UTC\"".to_string());
         let parity = V8_PARITY_BOOTSTRAP
             .replace("/*TZ*/", &tz)
             .replace("/*LOCALE*/", "\"en-US\"");
         if let Err(e) = ctx.eval(Source::from_bytes(&parity)) {
             tracing::warn!(error = %e, "v8 parity bootstrap failed");
         }
-    }
-    fn detect_system_timezone() -> String {
-        if let Ok(tz) = std::env::var("TZ")
-            && tz.contains('/')
-        {
-            return tz;
-        }
-        if let Ok(target) = std::fs::read_link("/etc/localtime") {
-            let s = target.to_string_lossy().into_owned();
-            if let Some(idx) = s.rfind("zoneinfo/") {
-                let tail = &s[idx + "zoneinfo/".len()..];
-                if tail.contains('/') {
-                    return tail.to_string();
-                }
-            }
-        }
-        "UTC".to_string()
     }
     // Native ShadowRoot backing: `__oxi_attach_shadow(hostId)` creates a real
     // shadow tree in the DomSnapshot registry and returns a JS shadow-root
@@ -10263,6 +10317,72 @@ fn hit_test_element(doc: &RenderDocument, snap: &DomSnapshot, x: f64, y: f64) ->
             .and_then(|n| n.parent)
             .filter(|&p| is_element(snap, p))
     }
+}
+
+/// Build the `navigator.geolocation` object backed by the Emulation override.
+fn build_geolocation_object(ctx: &mut Context) -> JsValue {
+    let get_current_position = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let success = args.first().cloned().unwrap_or(JsValue::undefined());
+            let error = args.get(1).cloned().unwrap_or(JsValue::undefined());
+            if let Some((lat, lon, acc)) = geolocation_override() {
+                let coords = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(js_string!("latitude"), JsValue::from(lat), Attribute::all())
+                    .property(
+                        js_string!("longitude"),
+                        JsValue::from(lon),
+                        Attribute::all(),
+                    )
+                    .property(js_string!("accuracy"), JsValue::from(acc), Attribute::all())
+                    .property(js_string!("altitude"), JsValue::null(), Attribute::all())
+                    .property(
+                        js_string!("altitudeAccuracy"),
+                        JsValue::null(),
+                        Attribute::all(),
+                    )
+                    .property(js_string!("heading"), JsValue::null(), Attribute::all())
+                    .property(js_string!("speed"), JsValue::null(), Attribute::all())
+                    .build();
+                let pos = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(
+                        js_string!("coords"),
+                        JsValue::from(coords),
+                        Attribute::all(),
+                    )
+                    .property(
+                        js_string!("timestamp"),
+                        JsValue::from(now_ms()),
+                        Attribute::all(),
+                    )
+                    .build();
+                if let Some(cb) = success.as_object() {
+                    let _ = cb.call(&JsValue::undefined(), &[JsValue::from(pos)], ctx);
+                }
+            } else if let Some(cb) = error.as_object() {
+                let err = boa_engine::object::ObjectInitializer::new(ctx)
+                    .property(js_string!("code"), JsValue::from(2u8), Attribute::all())
+                    .property(
+                        js_string!("message"),
+                        JsValue::from(js_string!("Position unavailable")),
+                        Attribute::all(),
+                    )
+                    .build();
+                let _ = cb.call(&JsValue::undefined(), &[JsValue::from(err)], ctx);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+    // watchPosition returns a (fake) watch id; no periodic updates in headless mode.
+    let watch_position =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::from(0i32))) };
+    let clear_watch =
+        unsafe { NativeFunction::from_closure(move |_this, _args, _ctx| Ok(JsValue::undefined())) };
+    boa_engine::object::ObjectInitializer::new(ctx)
+        .function(get_current_position, js_string!("getCurrentPosition"), 3)
+        .function(watch_position, js_string!("watchPosition"), 3)
+        .function(clear_watch, js_string!("clearWatch"), 1)
+        .build()
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -11260,6 +11380,56 @@ mod tests {
             .unwrap();
         assert!(r.is_ok());
         assert_eq!(r.value, Some(Value::String("b".into())), "point in #b");
+    }
+
+    #[tokio::test]
+    async fn test_geolocation_override() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<html><body></body></html>",
+            Some("https://example.com/"),
+            (400, 300),
+        )
+        .await
+        .unwrap();
+
+        // With an override, getCurrentPosition reports the coords synchronously.
+        set_geolocation_override(37.7749, -122.4194, 10.0);
+        let r = rt
+            .evaluate(
+                "var lat, lon;\
+                 navigator.geolocation.getCurrentPosition(function (p) {\
+                   lat = p.coords.latitude; lon = p.coords.longitude;\
+                 });\
+                 lat + ',' + lon",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok(), "eval failed");
+        assert_eq!(
+            r.value,
+            Some(Value::String("37.7749,-122.4194".into())),
+            "geolocation override should be returned"
+        );
+
+        // After clearing, getCurrentPosition reports POSITION_UNAVAILABLE.
+        clear_geolocation_override();
+        let r = rt
+            .evaluate(
+                "var code = -1;\
+                 navigator.geolocation.getCurrentPosition(function(){}, function (e) {\
+                   code = e.code;\
+                 });\
+                 code",
+            )
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        assert_eq!(
+            r.value,
+            Some(Value::Number(2.into())),
+            "POSITION_UNAVAILABLE (2)"
+        );
     }
     #[tokio::test]
     async fn test_document_get_elements_by_tag_name() {

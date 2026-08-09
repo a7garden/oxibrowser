@@ -42,6 +42,13 @@ pub fn handle(method: &str, params: Option<Value>) -> DomainResult {
         "clearDeviceMetricsOverride" => clear_device_metrics_override(),
         "setVisibleSize" => Ok(Some(json!({}))),
         "setUserAgentOverride" => Ok(Some(json!({}))),
+        "setGeolocationOverride" => set_geolocation_override(params),
+        "clearGeolocationOverride" => clear_geolocation_override(),
+        "setTimezoneOverride" => set_timezone_override(params),
+        "clearTimezoneOverride" => {
+            oxibrowser_core::js::clear_timezone_override();
+            Ok(Some(json!({})))
+        }
         _ => Err(CdpError {
             code: -32601,
             message: format!("Emulation.{method} not implemented"),
@@ -98,6 +105,45 @@ fn set_device_metrics_override(params: Option<Value>) -> DomainResult {
 fn clear_device_metrics_override() -> DomainResult {
     *DEVICE_METRICS.write() = None;
     tracing::debug!("Emulation.clearDeviceMetricsOverride");
+    Ok(Some(json!({})))
+}
+
+/// `Emulation.setGeolocationOverride` — install coordinates consumed by
+/// `navigator.geolocation.getCurrentPosition`.
+fn set_geolocation_override(params: Option<Value>) -> DomainResult {
+    let params = params.unwrap_or_default();
+    // Playwright sends {latitude, longitude, accuracy}.
+    let latitude = params
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let longitude = params
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let accuracy = params
+        .get("accuracy")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    oxibrowser_core::js::set_geolocation_override(latitude, longitude, accuracy);
+    Ok(Some(json!({})))
+}
+
+/// `Emulation.clearGeolocationOverride` — drop the override; getCurrentPosition
+/// then reports POSITION_UNAVAILABLE.
+fn clear_geolocation_override() -> DomainResult {
+    oxibrowser_core::js::clear_geolocation_override();
+    Ok(Some(json!({})))
+}
+
+/// `Emulation.setTimezoneOverride` — set the IANA timezone for Intl/Date.
+fn set_timezone_override(params: Option<Value>) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let tz = params
+        .get("timezoneId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UTC");
+    oxibrowser_core::js::set_timezone_override(tz);
     Ok(Some(json!({})))
 }
 

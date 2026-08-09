@@ -37,5 +37,6 @@ pub use job_queue::TokioJobQueue;
 // Runtime (boa context)
 pub use runtime::{
     ConsoleArg, ConsoleLevel, CoreEvent, DialogGate, DialogResult, DialogType, JsEvalResult,
-    JsRuntime, JsRuntimeConfig, NodeInfo, WsDirection,
+    JsRuntime, JsRuntimeConfig, NodeInfo, WsDirection, clear_geolocation_override,
+    clear_timezone_override, set_geolocation_override, set_timezone_override,
 };
