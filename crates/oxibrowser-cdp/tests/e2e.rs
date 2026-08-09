@@ -469,6 +469,74 @@ async fn test_target_domain() {
 }
 
 #[tokio::test]
+async fn test_create_target_creates_drivable_session() {
+    // Multi-tab: Target.createTarget must mint a real session that commands
+    // routed by the new sessionId can drive (navigate + evaluate).
+    let (server, addr) = start_cdp_server().await;
+    let (mut sink, mut ws) = connect_ws(addr).await;
+
+    let resp = send_command(
+        &mut sink,
+        &mut ws,
+        1,
+        "Target.createTarget",
+        Some(json!({ "url": "about:blank" })),
+    )
+    .await;
+    assert_eq!(resp["id"], 1);
+    let _target_id = resp["result"]["targetId"].as_str().unwrap().to_string();
+
+    // The attachedToTarget event carries the child sessionId.
+    let attached = collect_events(&mut ws, "Target.attachedToTarget", 3000)
+        .await
+        .pop()
+        .expect("attachedToTarget event");
+    let child_session = attached["params"]["sessionId"]
+        .as_str()
+        .expect("attachedToTarget should carry sessionId")
+        .to_string();
+
+    // Navigate the child tab (routed by sessionId).
+    let nav_msg = json!({
+        "id": 2, "method": "Page.navigate", "sessionId": child_session,
+        "params": { "url": "data:text/html,<html><body><p id='x'>tab2</p></body></html>" }
+    });
+    sink.send(tungstenite::Message::Text(nav_msg.to_string().into()))
+        .await
+        .unwrap();
+    let nav_resp = read_command_response(&mut ws, 2, 5000).await;
+    assert_eq!(nav_resp["id"], 2);
+    assert!(
+        nav_resp.get("error").is_none(),
+        "child navigate should route by sessionId: {:?}",
+        nav_resp
+    );
+
+    // Evaluate in the child session.
+    let eval_msg = json!({
+        "id": 3, "method": "Runtime.evaluate", "sessionId": child_session,
+        "params": { "expression": "document.getElementById('x').textContent" }
+    });
+    sink.send(tungstenite::Message::Text(eval_msg.to_string().into()))
+        .await
+        .unwrap();
+    let eval_resp = read_command_response(&mut ws, 3, 5000).await;
+    assert_eq!(eval_resp["id"], 3);
+    assert!(
+        eval_resp.get("error").is_none(),
+        "child eval should route by sessionId: {:?}",
+        eval_resp
+    );
+    assert_eq!(
+        eval_resp["result"]["result"]["value"].as_str(),
+        Some("tab2"),
+        "child session should evaluate its own DOM"
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
 async fn test_fetch_domain_enable_disable() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;

@@ -11,13 +11,13 @@ use crate::protocol::CdpError;
 use serde_json::{Value, json};
 
 /// Dispatch Target domain methods.
-pub fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
         "setDiscoverTargets" => set_discover_targets(params, ctx),
         "setAutoAttach" => set_auto_attach(params, ctx),
         "attachToTarget" => attach_to_target(params, ctx),
         "detachFromTarget" => Ok(Some(json!({}))),
-        "createTarget" => create_target(params),
+        "createTarget" => create_target(params, ctx).await,
         "closeTarget" => Ok(Some(json!({ "success": true }))),
         "getTargets" => get_targets(),
         "getTargetInfo" => get_target_info(params),
@@ -116,16 +116,69 @@ fn attach_to_target(params: Option<Value>, ctx: &DispatchContext) -> DomainResul
     Ok(Some(json!({ "sessionId": session_id })))
 }
 
-/// Target.createTarget — creates a new page target.
-fn create_target(params: Option<Value>) -> DomainResult {
+/// Target.createTarget — creates a new page target (a real Browser session).
+///
+/// The new session is registered under a fresh `sessionId` so flat-protocol
+/// commands routed by that `sessionId` reach it. Emits `Target.targetCreated`
+/// and `Target.attachedToTarget`.
+///
+/// Child-target lifecycle events (load, etc.) currently do not flow (each child
+/// needs its own CoreEvent drainer); the command surface (navigate/evaluate/DOM)
+/// works.
+async fn create_target(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
-    let _url = params
+    let url = params
         .get("url")
         .and_then(|v| v.as_str())
         .unwrap_or("about:blank");
 
+    let new_session = ctx.browser.new_session().await.map_err(|e| CdpError {
+        code: -32000,
+        message: format!("failed to create new session: {e}"),
+    })?;
+
+    let target_id = format!("TID-{}", uuid::Uuid::new_v4().as_simple());
+    let session_id = format!("session-{}", uuid::Uuid::new_v4().as_simple());
+
+    // Register the child session so commands routed by sessionId reach it.
+    ctx.child_targets
+        .write()
+        .await
+        .insert(session_id.clone(), new_session.clone());
+
+    ctx.events.send_event(
+        "Target.targetCreated",
+        json!({
+            "targetInfo": {
+                "targetId": target_id,
+                "type": "page",
+                "title": "about:blank",
+                "url": url,
+                "attached": false,
+                "canAccessOpener": false,
+                "browserContextId": "default"
+            }
+        }),
+    );
+    ctx.events.send_event(
+        "Target.attachedToTarget",
+        json!({
+            "sessionId": session_id,
+            "targetInfo": {
+                "targetId": target_id,
+                "type": "page",
+                "title": "about:blank",
+                "url": url,
+                "attached": true,
+                "canAccessOpener": false,
+                "browserContextId": "default"
+            },
+            "waitingForDebugger": false
+        }),
+    );
+
     Ok(Some(json!({
-        "targetId": format!("TID-{}", uuid::Uuid::new_v4().as_simple())
+        "targetId": target_id
     })))
 }
 

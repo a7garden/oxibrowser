@@ -13,6 +13,7 @@ use crate::protocol::{CdpEvent, CdpRequest, CdpResponse};
 use crate::server::MAX_CDP_MESSAGE_SIZE;
 use futures::{SinkExt, StreamExt};
 use oxibrowser_core::Browser;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite;
@@ -49,6 +50,8 @@ pub struct CdpSession {
     fetch_registry: oxibrowser_core::network::SharedRegistry,
     /// Shared dialog-resolution gate (for Page.handleJavaScriptDialog).
     dialog_gate: oxibrowser_core::js::DialogGate,
+    /// Attached child targets (multi-tab): sessionId → child Browser Session.
+    child_targets: crate::domains::ChildTargets,
     /// Event receiver (drained by background task).
     event_receiver: Option<EventReceiver>,
     /// Shutdown signal for the CoreEvent drainer task — sent when `run`
@@ -108,6 +111,7 @@ impl CdpSession {
         // Clone the shared dialog gate so Page.handleJavaScriptDialog can
         // resolve a pending dialog without acquiring the session lock.
         let dialog_gate = session.read().await.dialog_gate();
+        let child_targets: crate::domains::ChildTargets = Arc::new(RwLock::new(HashMap::new()));
 
         info!(session_id = %session_id, "CDP session created");
 
@@ -119,6 +123,7 @@ impl CdpSession {
             browser,
             session,
             dialog_gate,
+            child_targets,
             event_sender,
             fetch_registry: oxibrowser_core::network::intercept::shared_registry(),
             event_receiver: Some(event_receiver),
@@ -162,6 +167,8 @@ impl CdpSession {
                                 events: self.event_sender.clone(),
                                 fetch_registry: self.fetch_registry.clone(),
                                 dialog_gate: self.dialog_gate.clone(),
+                                browser: self.browser.clone(),
+                                child_targets: self.child_targets.clone(),
                             };
                             let response_tx = response_tx.clone();
                             // Spawn so dispatch never blocks the loop — a
@@ -323,7 +330,44 @@ async fn dispatch_command(text: String, ctx: &DispatchContext) -> CdpResponse {
         "dispatching CDP command"
     );
 
-    match domains::dispatch(&request.method, request.params, ctx).await {
+    // Multi-tab: if the command carries a sessionId for an attached child
+    // target, route to that session; otherwise use the default session.
+    let effective_ctx = match &request.session_id {
+        Some(sid) => {
+            let child = ctx.child_targets.read().await.get(sid).cloned();
+            match child {
+                Some(child_session) => DispatchContext {
+                    session: child_session,
+                    events: ctx.events.clone(),
+                    fetch_registry: ctx.fetch_registry.clone(),
+                    dialog_gate: ctx.dialog_gate.clone(),
+                    browser: ctx.browser.clone(),
+                    child_targets: ctx.child_targets.clone(),
+                },
+                None => {
+                    // Unknown sessionId — fall back to the default session.
+                    DispatchContext {
+                        session: ctx.session.clone(),
+                        events: ctx.events.clone(),
+                        fetch_registry: ctx.fetch_registry.clone(),
+                        dialog_gate: ctx.dialog_gate.clone(),
+                        browser: ctx.browser.clone(),
+                        child_targets: ctx.child_targets.clone(),
+                    }
+                }
+            }
+        }
+        None => DispatchContext {
+            session: ctx.session.clone(),
+            events: ctx.events.clone(),
+            fetch_registry: ctx.fetch_registry.clone(),
+            dialog_gate: ctx.dialog_gate.clone(),
+            browser: ctx.browser.clone(),
+            child_targets: ctx.child_targets.clone(),
+        },
+    };
+
+    match domains::dispatch(&request.method, request.params, &effective_ctx).await {
         Ok(result) => CdpResponse {
             id: request_id,
             result: Some(result.unwrap_or(serde_json::json!({}))),

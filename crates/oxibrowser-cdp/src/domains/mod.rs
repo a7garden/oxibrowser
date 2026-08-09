@@ -21,8 +21,14 @@ use crate::protocol::CdpError;
 use oxibrowser_core::network::SharedRegistry;
 use oxibrowser_core::session::Session;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Map of attached child-target sessionId → its Browser Session (multi-tab).
+/// Populated by `Target.createTarget`; the dispatcher resolves the session for
+/// an incoming command from its `sessionId`.
+pub type ChildTargets = Arc<RwLock<HashMap<String, Arc<RwLock<Session>>>>>;
 
 /// Context passed to all domain handlers.
 ///
@@ -39,6 +45,10 @@ pub struct DispatchContext {
     /// Accessible without the session lock so dialogs resolve while a blocking
     /// `evaluate` holds the session write lock.
     pub dialog_gate: oxibrowser_core::js::DialogGate,
+    /// Shared browser instance (for `Target.createTarget` to mint sessions).
+    pub browser: Arc<oxibrowser_core::Browser>,
+    /// Attached child targets (multi-tab), keyed by sessionId.
+    pub child_targets: ChildTargets,
 }
 
 /// Result of handling a CDP domain method.
@@ -68,7 +78,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "Log" => log::handle(method_name, params, ctx).await,
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
-        "Target" => target::handle(method_name, params, ctx),
+        "Target" => target::handle(method_name, params, ctx).await,
         _ => Err(CdpError {
             code: -32601,
             message: format!("unknown domain: {domain}"),

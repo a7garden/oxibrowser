@@ -636,6 +636,7 @@ mod tests {
     use oxibrowser_core::session::Session;
     use oxibrowser_core::{Browser, BrowserConfig};
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -671,6 +672,8 @@ mod tests {
             events,
             fetch_registry: shared_registry(),
             dialog_gate: Arc::new(parking_lot::Mutex::new(None)),
+            browser: browser.clone(),
+            child_targets: Arc::new(RwLock::new(HashMap::new())),
         };
         (ctx, session)
     }
