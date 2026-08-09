@@ -52,6 +52,29 @@ pub struct CookieEntry {
     pub secure: bool,
     pub http_only: bool,
     pub same_site: Option<SameSite>,
+    /// Raw parsed `Expires` attribute as Unix-epoch seconds.
+    #[serde(default)]
+    pub expires: Option<i64>,
+    /// Raw parsed `Max-Age` attribute in seconds.
+    #[serde(default)]
+    pub max_age: Option<i64>,
+    /// Authoritative absolute expiry as Unix-epoch seconds.
+    ///
+    /// `None` = session cookie (lives until the jar is dropped). Computed in
+    /// [`CookieJar::store`] from `max_age`/`expires` + the current time. A past
+    /// value means the cookie is already expired and is purged lazily on read.
+    #[serde(default)]
+    pub expiry: Option<i64>,
+    /// `Partitioned` flag (CHIPS, RFC 6265bis). Stored cookies scoped to a
+    /// partition key (top-level site) so they are not shared cross-site.
+    #[serde(default)]
+    pub partitioned: bool,
+    /// CHIPS partition key (top-level registrable domain) for partitioned
+    /// cookies. `None` for non-partitioned cookies. Until Phase 8 threads the
+    /// real top-level site, this defaults to the cookie's own registrable
+    /// domain (first-party partition).
+    #[serde(default)]
+    pub partition_key: Option<String>,
 }
 
 impl CookieEntry {
@@ -70,6 +93,9 @@ impl CookieEntry {
         let mut secure = false;
         let mut http_only = false;
         let mut same_site = None;
+        let mut expires = None;
+        let mut max_age = None;
+        let mut partitioned = false;
 
         for attr in parts {
             let attr = attr.trim();
@@ -77,10 +103,16 @@ impl CookieEntry {
                 secure = true;
             } else if attr.eq_ignore_ascii_case("httponly") {
                 http_only = true;
+            } else if attr.eq_ignore_ascii_case("partitioned") {
+                partitioned = true;
             } else if let Some(val) = strip_prefix_case_insensitive(attr, "Path=") {
                 path = Some(val.to_string());
             } else if let Some(val) = strip_prefix_case_insensitive(attr, "Domain=") {
                 domain = Some(val.to_string());
+            } else if let Some(val) = strip_prefix_case_insensitive(attr, "Max-Age=") {
+                max_age = val.trim().parse::<i64>().ok();
+            } else if let Some(val) = strip_prefix_case_insensitive(attr, "Expires=") {
+                expires = parse_http_date(val.trim());
             } else if let Some(val) = strip_prefix_case_insensitive(attr, "SameSite=") {
                 same_site = match val {
                     v if v.eq_ignore_ascii_case("strict") => Some(SameSite::Strict),
@@ -99,6 +131,11 @@ impl CookieEntry {
             secure,
             http_only,
             same_site,
+            expires,
+            max_age,
+            expiry: None,
+            partitioned,
+            partition_key: None,
         })
     }
 
@@ -115,6 +152,48 @@ fn strip_prefix_case_insensitive<'a>(s: &'a str, prefix: &str) -> Option<&'a str
     } else {
         None
     }
+}
+
+/// Current time as Unix-epoch seconds.
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Parse an HTTP-date (RFC 7231 IMF-fixdate, e.g. `Wed, 09 Jun 2021 10:18:14 GMT`)
+/// into Unix-epoch seconds. Returns `None` for unparseable dates (the cookie
+/// then falls back to no expiry, matching the "ignore invalid Expires" rule).
+fn parse_http_date(s: &str) -> Option<i64> {
+    let date = httpdate::parse_http_date(s).ok()?;
+    let secs = date
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some(secs)
+}
+
+/// True if the cookie's computed `expiry` is in the past.
+fn is_expired(cookie: &CookieEntry) -> bool {
+    cookie.expiry.is_some_and(|exp| exp <= now_epoch_secs())
+}
+
+/// True if `domain` is itself a public suffix (e.g. `co.uk`, `com`) per the
+/// Mozilla Public Suffix List. Cookies must not be scoped to a bare public
+/// suffix (RFC 6265bis §5.3 step 5 "public suffix" rejection).
+fn is_public_suffix(domain: &str) -> bool {
+    psl::suffix_str(domain).is_some_and(|s| s.eq_ignore_ascii_case(domain))
+}
+
+pub(crate) fn registrable_domain(host: &str) -> String {
+    if is_ip_address(host) {
+        return host.to_lowercase();
+    }
+    if let Some(d) = psl::domain_str(host) {
+        return d.to_lowercase();
+    }
+    host.to_lowercase()
 }
 
 /// Compute the default cookie path from a URL per RFC 6265 §5.1.4.
@@ -245,6 +324,11 @@ impl CookieJar {
                     secure: false,
                     http_only: false,
                     same_site: None,
+                    expires: None,
+                    max_age: None,
+                    expiry: None,
+                    partitioned: false,
+                    partition_key: None,
                 }
             }
         };
@@ -252,6 +336,19 @@ impl CookieJar {
         // Enforce value size limit
         if entry.value.len() > MAX_COOKIE_VALUE_SIZE {
             entry.value.truncate(MAX_COOKIE_VALUE_SIZE);
+        }
+
+        // Cookie-name prefix validation (RFC 6265bis §4.1.3).
+        //   __Secure-Name: requires the Secure attribute.
+        //   __Host-Name:   requires Secure, Path=/, and no Domain attribute.
+        if entry.name.starts_with("__Secure-") {
+            if !entry.secure {
+                return;
+            }
+        } else if entry.name.starts_with("__Host-")
+            && (!entry.secure || entry.path.as_deref() != Some("/") || entry.domain.is_some())
+        {
+            return;
         }
 
         let request_host = url.host_str().unwrap_or("unknown");
@@ -267,6 +364,11 @@ impl CookieJar {
                 return;
             }
 
+            // Reject cookies scoped to a bare public suffix (e.g. Domain=co.uk).
+            if is_public_suffix(&canonical) {
+                return;
+            }
+
             // Store under the canonical domain (without leading dot)
             entry.domain = Some(canonical.clone());
             canonical
@@ -277,9 +379,38 @@ impl CookieJar {
             host
         };
 
+        // CHIPS: a Partitioned cookie is scoped to a partition key (the
+        // top-level registrable domain). Until Phase 8 threads the real
+        // top-level site, default to the cookie's own registrable domain
+        // (first-party partition). Non-partitioned cookies have no key.
+        if entry.partitioned {
+            entry.partition_key = Some(registrable_domain(&storage_domain));
+        }
+
         // Default path per RFC 6265 §5.1.4
         if entry.path.is_none() || entry.path.as_deref() == Some("") {
             entry.path = Some(default_path(url.path()));
+        }
+        // Compute absolute expiry (RFC 6265 §5.2.1–5.2.2 / §5.3 step 11).
+        let now = now_epoch_secs();
+        if let Some(max_age) = entry.max_age {
+            if max_age <= 0 {
+                // Max-Age <= 0: delete any existing matching cookie and don't store.
+                self.remove_matching(&storage_domain, &entry.name, &entry.path);
+                return;
+            }
+            entry.expiry = Some(now.saturating_add(max_age));
+        } else if let Some(expires) = entry.expires {
+            entry.expiry = Some(expires);
+        } else {
+            entry.expiry = None; // session cookie — lives until the jar is dropped
+        }
+
+        // An `Expires` already in the past means the cookie is expired: delete
+        // any existing match and don't store the new one (RFC 6265 §5.4).
+        if entry.expiry.is_some_and(|exp| exp <= now) {
+            self.remove_matching(&storage_domain, &entry.name, &entry.path);
+            return;
         }
 
         // Replace existing cookie with same name and path, or append
@@ -316,6 +447,14 @@ impl CookieJar {
         entries.push(entry);
     }
 
+    /// Remove a cookie matching `(domain, name, path)`, if present.
+    fn remove_matching(&mut self, domain: &str, name: &str, path: &Option<String>) {
+        if let Some(entries) = self.cookies.get_mut(domain) {
+            entries.retain(|c| !(c.name == name && c.path == *path));
+        }
+        self.cookies.retain(|_, v| !v.is_empty());
+    }
+
     /// Get all cookies applicable to a URL as a Cookie header value.
     ///
     /// Per RFC 6265 §5.4, filters by:
@@ -349,6 +488,10 @@ impl CookieJar {
             }
 
             for cookie in entries {
+                // Skip expired cookies (lazy purge, RFC 6265 §5.3/§5.4)
+                if is_expired(cookie) {
+                    continue;
+                }
                 // Secure: only send over HTTPS
                 if cookie.secure && !is_secure {
                     continue;
@@ -410,6 +553,10 @@ impl CookieJar {
             }
 
             for cookie in entries {
+                // Skip expired cookies (lazy purge)
+                if is_expired(cookie) {
+                    continue;
+                }
                 // HttpOnly cookies are never visible to JavaScript
                 if cookie.http_only {
                     continue;
@@ -916,5 +1063,260 @@ mod tests {
             http_cookies.contains("a=1") && http_cookies.contains("b=2"),
             "HttpOnly cookies should be sent in HTTP requests"
         );
+    }
+
+    // --- Phase 6: expiry / Max-Age / Partitioned ---
+
+    #[test]
+    fn test_parse_max_age_attribute() {
+        let entry = CookieEntry::parse("token=abc; Max-Age=3600").unwrap();
+        assert_eq!(entry.max_age, Some(3600));
+        assert!(entry.expires.is_none());
+    }
+
+    #[test]
+    fn test_parse_expires_attribute() {
+        let entry = CookieEntry::parse("token=abc; Expires=Wed, 09 Jun 2021 10:18:14 GMT").unwrap();
+        assert!(entry.expires.is_some());
+        // 09 Jun 2021 10:18:14 UTC == 1623233894
+        assert_eq!(entry.expires, Some(1623233894));
+    }
+
+    #[test]
+    fn test_parse_expires_invalid_is_ignored() {
+        // Invalid Expires → ignored, cookie is a session cookie.
+        let entry = CookieEntry::parse("token=abc; Expires=not-a-date").unwrap();
+        assert!(entry.expires.is_none());
+    }
+
+    #[test]
+    fn test_max_age_zero_deletes_existing_cookie() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "token=abc; Max-Age=3600");
+        assert!(jar.cookies_for_url(&url).contains("token=abc"));
+
+        // Max-Age=0 → immediate deletion
+        jar.store(&url, "token=abc; Max-Age=0");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "Max-Age=0 should delete the cookie"
+        );
+    }
+
+    #[test]
+    fn test_max_age_negative_deletes_existing_cookie() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "pref=dark");
+        assert!(jar.cookies_for_url(&url).contains("pref=dark"));
+
+        jar.store(&url, "pref=dark; Max-Age=-1");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "negative Max-Age should delete the cookie"
+        );
+    }
+
+    #[test]
+    fn test_expired_expires_not_stored() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        // A date firmly in the past (09 Jun 2001 was a Saturday).
+        jar.store(&url, "ghost=1; Expires=Sat, 09 Jun 2001 10:18:14 GMT");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "cookie with past Expires must not be stored/sent"
+        );
+    }
+
+    #[test]
+    fn test_max_age_positive_stores_and_sends() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "token=abc; Max-Age=3600");
+        assert!(
+            jar.cookies_for_url(&url).contains("token=abc"),
+            "cookie with future Max-Age should be sent"
+        );
+        // Verify expiry was computed (absolute, in the future).
+        let entry = jar.cookies.get("example.com").unwrap().first().unwrap();
+        assert!(entry.expiry.is_some());
+        assert!(entry.expiry.unwrap() > now_epoch_secs());
+    }
+
+    #[test]
+    fn test_session_cookie_has_no_expiry() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "sess=xyz");
+        let entry = jar.cookies.get("example.com").unwrap().first().unwrap();
+        assert!(entry.expiry.is_none(), "session cookie must have no expiry");
+        assert!(jar.cookies_for_url(&url).contains("sess=xyz"));
+    }
+
+    #[test]
+    fn test_lazy_purge_skips_expired_on_read() {
+        // Inject a cookie that is already expired directly into the jar map,
+        // then verify retrieval skips it.
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        let past = now_epoch_secs() - 100;
+        jar.cookies.insert(
+            "example.com".to_string(),
+            vec![CookieEntry {
+                name: "dead".to_string(),
+                value: "1".to_string(),
+                path: Some("/".to_string()),
+                domain: Some("example.com".to_string()),
+                secure: false,
+                http_only: false,
+                same_site: None,
+                expires: None,
+                max_age: None,
+                expiry: Some(past),
+                partitioned: false,
+                partition_key: None,
+            }],
+        );
+        assert!(
+            !jar.cookies_for_url(&url).contains("dead=1"),
+            "expired cookie must not be sent"
+        );
+        assert!(
+            !jar.cookies_for_js(&url).contains("dead=1"),
+            "expired cookie must not be visible to JS"
+        );
+    }
+
+    #[test]
+    fn test_parse_partitioned_attribute() {
+        let entry =
+            CookieEntry::parse("chip=abc; Secure; Path=/; SameSite=None; Partitioned").unwrap();
+        assert!(entry.partitioned);
+    }
+
+    #[test]
+    fn test_partitioned_cookie_gets_partition_key() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://app.example.com/").unwrap();
+        jar.store(&url, "chip=abc; Secure; Path=/; SameSite=None; Partitioned");
+        let entry = jar.cookies.get("app.example.com").unwrap().first().unwrap();
+        assert!(entry.partitioned);
+        assert_eq!(
+            entry.partition_key.as_deref(),
+            Some("example.com"),
+            "partition key defaults to the cookie's own registrable domain"
+        );
+        // First-party request still receives the cookie.
+        assert!(jar.cookies_for_url(&url).contains("chip=abc"));
+    }
+
+    #[test]
+    fn test_expiry_survives_serialization_roundtrip() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "token=abc; Max-Age=3600");
+
+        let json = serde_json::to_string(&jar).unwrap();
+        let loaded: CookieJar = serde_json::from_str(&json).unwrap();
+        let entry = loaded.cookies.get("example.com").unwrap().first().unwrap();
+        assert!(entry.expiry.is_some(), "expiry must survive serialization");
+        assert!(loaded.cookies_for_url(&url).contains("token=abc"));
+    }
+
+    // --- Phase 6: Public Suffix List + cookie-name prefixes ---
+
+    #[test]
+    fn test_psl_rejects_public_suffix_domain() {
+        let mut jar = CookieJar::new();
+        // co.uk is a public suffix → Domain=co.uk must be rejected.
+        let url = Url::parse("https://site.co.uk/").unwrap();
+        jar.store(&url, "evil=1; Domain=co.uk");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "cookie scoped to public suffix co.uk must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_psl_rejects_bare_tld() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "evil=1; Domain=com");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "cookie scoped to bare TLD com must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_psl_allows_normal_domain() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://sub.example.com/").unwrap();
+        jar.store(&url, "ok=1; Domain=example.com");
+        assert!(
+            jar.cookies_for_url(&Url::parse("https://example.com/").unwrap())
+                .contains("ok=1"),
+            "normal registrable domain must be allowed"
+        );
+    }
+
+    #[test]
+    fn test_secure_prefix_rejects_without_secure() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "__Secure-bad=1");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "__Secure- without Secure must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_secure_prefix_accepts_with_secure() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "__Secure-good=1; Secure");
+        assert!(
+            jar.cookies_for_url(&url).contains("__Secure-good=1"),
+            "__Secure- with Secure must be stored"
+        );
+    }
+
+    #[test]
+    fn test_host_prefix_rejects_without_all_constraints() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+
+        // Missing Secure
+        jar.store(&url, "__Host-a=1; Path=/");
+        // Has Domain
+        jar.store(&url, "__Host-b=1; Secure; Path=/; Domain=example.com");
+        // Wrong path
+        jar.store(&url, "__Host-c=1; Secure; Path=/app");
+        assert!(
+            jar.cookies_for_url(&url).is_empty(),
+            "__Host- must require Secure + Path=/ + no Domain"
+        );
+    }
+
+    #[test]
+    fn test_host_prefix_accepts_valid() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://example.com/").unwrap();
+        jar.store(&url, "__Host-good=1; Secure; Path=/");
+        assert!(
+            jar.cookies_for_url(&url).contains("__Host-good=1"),
+            "valid __Host- cookie must be stored"
+        );
+    }
+
+    #[test]
+    fn test_registrable_domain_helper() {
+        assert_eq!(registrable_domain("a.b.example.com"), "example.com");
+        assert_eq!(registrable_domain("example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("localhost"), "localhost");
+        assert_eq!(registrable_domain("127.0.0.1"), "127.0.0.1");
     }
 }

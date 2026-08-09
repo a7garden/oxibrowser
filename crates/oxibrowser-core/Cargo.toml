@@ -37,6 +37,8 @@ pollster = "0.4"
 serde_yaml = "0.9"
 regex = "1.10"
 chrono = "0.4"
+httpdate = { workspace = true }
+psl = { workspace = true }
 
 oxibrowser-render = { version = "0.18.0", path = "../oxibrowser-render" }
 getrandom = { workspace = true }

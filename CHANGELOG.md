@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
+- **Cookie expiry / `Max-Age`** — `CookieEntry` now parses `Expires` (HTTP-date via `httpdate`) and `Max-Age`; `CookieJar::store` computes an absolute expiry. `Max-Age <= 0` and past `Expires` delete any existing matching cookie; expired cookies are purged lazily on read. Closes the Phase 6 cookie-expiry gap.
+- **Public Suffix List** — cookie `Domain=` attributes are rejected when they scope to a bare public suffix (e.g. `co.uk`, `com`) via the bundled Mozilla PSL (`psl` crate). A `registrable_domain` (eTLD+1) helper is exposed for partition keys.
+- **Cookie-name prefixes (`__Host-` / `__Secure-`)** — RFC 6265bis §4.1.3 prefix validation: `__Secure-` requires the `Secure` attribute; `__Host-` requires `Secure` + `Path=/` + no `Domain`. Violations are rejected.
+- **CHIPS partitioned cookies (storage path)** — the `Partitioned` attribute is parsed and partitioned cookies carry a partition key (top-level registrable domain), defaulting to the cookie's own site until Phase 8 threads the real top-level frame.
 - **CoreEvent sink (core → CDP)** — a neutral `CoreEvent` enum (`oxibrowser-core::js::CoreEvent`) flows JS-thread events (console, exceptions, fetch/XHR lifecycle, WebSocket frames, dialogs) to the CDP layer over a shared `mpsc` channel. `JsRuntime::set_event_sink` / `set_dialog_gate` install it; `Session` exposes both. Closes the Phase 5 follow-up that left `Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, JS-initiated `Network.*`, `Page.javascriptDialogOpening`, and `Log.entryAdded` un-emitted.
 - **`Runtime.consoleAPICalled`** — every `console.log/info/warn/error` now mirrors to the sink (in addition to the existing captured-output buffer).
 - **`Runtime.exceptionThrown`** — uncaught exceptions from `Runtime.evaluate` and navigation `<script>` tags push an exception event.

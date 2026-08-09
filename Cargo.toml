@@ -48,6 +48,8 @@ base64 = "0.22"
 boa_engine = "0.20"
 boa_gc = "0.20"
 getrandom = "0.3"
+httpdate = "1"
+psl = "2"
 
 # Rendering stack (Blitz integration) — isolated to oxibrowser-render so the
 # Stylo / html5ever 0.39 / vello dependency trees stay out of the rest of the workspace.
