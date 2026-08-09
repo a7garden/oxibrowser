@@ -1767,6 +1767,25 @@ fn js_thread_loop(
                                 process_declarative_shadow_dom(doc);
                             }
                         }
+                        // Build the DomSnapshot from the render doc so its node
+                        // ids stay consistent with the Taffy layout boxes (used
+                        // by layout-based hit-testing and getBoundingClientRect).
+                        {
+                            let guard = render_doc_cell.borrow();
+                            if let Some(doc) = guard.as_ref() {
+                                let title = doc
+                                    .query_selector("title")
+                                    .map(|id| doc.node_text(id))
+                                    .unwrap_or_default();
+                                let snap =
+                                    crate::js::dom_snapshot::DomSnapshot::from_render_document(
+                                        doc,
+                                        base_url.as_deref().unwrap_or(""),
+                                        &title,
+                                    );
+                                *dom_snapshot.write() = Some(snap);
+                            }
+                        }
                         run_navigation_scripts(
                             &mut ctx,
                             &job_queue,
@@ -6489,16 +6508,15 @@ fn register_document_object(
                 let snap_efp = dom_snapshot.clone();
                 let mutations_efp = mutations.clone();
                 let dom_efp = dom_snapshot.clone();
+                let rd_efp = render_doc_rc.clone();
                 unsafe {
                     let fn_ptr: NativeFunction =
                         NativeFunction::from_closure(move |_this, args, ctx| {
-                            // elementFromPoint(x, y) — approximate element lookup.
+                            // elementFromPoint(x, y) — layout-based hit test.
                             //
-                            // Since there is no real layout engine, we estimate Y positions
-                            // from DOM order using tag-based height heuristics. X is used to
-                            // narrow down among children at a given depth: if a parent element
-                            // has multiple visible children at the estimated Y band, we pick
-                            // the child whose index corresponds to X / (viewport_width / num_children).
+                            // Uses the RenderDocument's Taffy layout boxes to find the
+                            // deepest element whose laid-out box contains (x, y). Falls
+                            // back to null when no rendered document is available.
                             let x = args
                                 .first()
                                 .and_then(|v| v.to_number(ctx).ok())
@@ -6507,74 +6525,17 @@ fn register_document_object(
                                 .get(1)
                                 .and_then(|v| v.to_number(ctx).ok())
                                 .unwrap_or(0.0);
+                            // Layout-based hit test against the live DomSnapshot
+                            // (kept consistent with the render doc's Taffy boxes)
+                            // + RenderDocument layout rects.
                             let snap = snap_efp.read();
-                            if let Some(ref s) = *snap
-                                && let Some(bid) = s.body_id
-                                && let Some(body) = s.nodes.get(&bid)
-                            {
-                                // Walk body children in order, estimate Y positions
-                                let mut estimated_y = 0.0;
-                                let mut last_visible_el: Option<&DomNode> = None;
-                                for &child_id in &body.children {
-                                    if let Some(el) = s.nodes.get(&child_id) {
-                                        let el_h = estimate_element_height(el);
-                                        if el_h <= 0.0 {
-                                            continue; // skip invisible elements
-                                        }
-                                        if y >= estimated_y && y < estimated_y + el_h {
-                                            // Found the approximate Y band.
-                                            // If this element has visible children, try to
-                                            // narrow down using X coordinate.
-                                            let visible_children: Vec<u32> = el
-                                                .children
-                                                .iter()
-                                                .filter(|&&cid| {
-                                                    s.nodes
-                                                        .get(&cid)
-                                                        .map(|c| estimate_element_height(c) > 0.0)
-                                                        .unwrap_or(false)
-                                                })
-                                                .copied()
-                                                .collect();
-
-                                            if !visible_children.is_empty() {
-                                                // Estimate viewport width (fallback 1280).
-                                                // TODO: pass actual viewport from the runtime config.
-                                                let vp_w: f64 = 1280.0;
-                                                // Pick child based on X position
-                                                let idx = ((x / vp_w)
-                                                    * visible_children.len() as f64)
-                                                    .floor()
-                                                    as usize;
-                                                let idx = idx.min(visible_children.len() - 1);
-                                                if let Some(&picked_id) = visible_children.get(idx)
-                                                    && let Some(picked) = s.nodes.get(&picked_id)
-                                                {
-                                                    return Ok(create_element_object(
-                                                        s,
-                                                        picked,
-                                                        ctx,
-                                                        &mutations_efp,
-                                                        &dom_efp,
-                                                    ));
-                                                }
-                                            }
-
-                                            // No suitable children — return this element
-                                            return Ok(create_element_object(
-                                                s,
-                                                el,
-                                                ctx,
-                                                &mutations_efp,
-                                                &dom_efp,
-                                            ));
-                                        }
-                                        estimated_y += el_h;
-                                        last_visible_el = Some(el);
-                                    }
-                                }
-                                // If y exceeds all estimated heights, return the last visible element
-                                if let Some(el) = last_visible_el {
+                            if let Some(ref s) = *snap {
+                                let el = rd_efp
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|d| hit_test_element(d, s, x, y))
+                                    .and_then(|id| s.nodes.get(&id));
+                                if let Some(el) = el {
                                     return Ok(create_element_object(
                                         s,
                                         el,
@@ -6583,14 +6544,6 @@ fn register_document_object(
                                         &dom_efp,
                                     ));
                                 }
-                                // Fallback: return body itself
-                                return Ok(create_element_object(
-                                    s,
-                                    body,
-                                    ctx,
-                                    &mutations_efp,
-                                    &dom_efp,
-                                ));
                             }
                             Ok(JsValue::null())
                         });
@@ -10265,25 +10218,50 @@ mod js_sys_helpers {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Estimate the height of a DOM element for elementFromPoint approximation.
-fn estimate_element_height(node: &DomNode) -> f64 {
-    let tag = node.tag.to_uppercase();
-    match tag.as_str() {
-        "H1" => 40.0,
-        "H2" => 36.0,
-        "H3" => 32.0,
-        "H4" | "H5" | "H6" => 28.0,
-        "P" => 24.0,
-        "DIV" | "SECTION" | "ARTICLE" | "HEADER" | "FOOTER" | "NAV" | "MAIN" | "ASIDE" => 40.0,
-        "UL" | "OL" => 24.0,
-        "LI" => 20.0,
-        "TABLE" => 32.0,
-        "TR" => 24.0,
-        "IMG" | "IFRAME" => 300.0,
-        "INPUT" | "TEXTAREA" | "SELECT" => 32.0,
-        "SCRIPT" | "STYLE" | "LINK" | "META" => 0.0, // invisible
-        "SVG" | "CANVAS" => 200.0,
-        _ => 24.0, // default line height
+/// Layout-based hit test (Phase 7): the deepest **element** node whose
+/// laid-out box contains the viewport point `(x, y)`, or `None`.
+///
+/// Uses the `RenderDocument`'s Taffy layout boxes (`node_layout_rect`). A node
+/// with a non-positive box is skipped (not painted). Children are searched
+/// before the parent so the most specific (deepest) element wins. Falls back to
+/// the parent element when the deepest match is a text node.
+fn hit_test_element(doc: &RenderDocument, snap: &DomSnapshot, x: f64, y: f64) -> Option<u32> {
+    fn is_element(snap: &DomSnapshot, id: u32) -> bool {
+        snap.nodes
+            .get(&id)
+            .is_some_and(|n| n.node_type == 1 || !n.tag.is_empty())
+    }
+
+    fn contains(doc: &RenderDocument, snap: &DomSnapshot, id: u32, x: f64, y: f64) -> Option<u32> {
+        let (rx, ry, rw, rh) = doc.node_layout_rect(id as usize);
+        if rw <= 0.0 || rh <= 0.0 {
+            return None;
+        }
+        if !(x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
+            return None;
+        }
+        // Recurse into children first — deepest match wins.
+        if let Some(node) = snap.nodes.get(&id) {
+            for &child_id in &node.children {
+                if let Some(deep) = contains(doc, snap, child_id, x, y) {
+                    return Some(deep);
+                }
+            }
+        }
+        Some(id)
+    }
+
+    let raw = snap
+        .body_id
+        .and_then(|bid| contains(doc, snap, bid, x, y))?;
+    if is_element(snap, raw) {
+        Some(raw)
+    } else {
+        // Text node — walk up to the enclosing element.
+        snap.nodes
+            .get(&raw)
+            .and_then(|n| n.parent)
+            .filter(|&p| is_element(snap, p))
     }
 }
 
@@ -11252,6 +11230,37 @@ mod tests {
         assert_eq!(result.value, Some(Value::String("main".into())));
     }
 
+    #[tokio::test]
+    async fn test_element_from_point_layout_hit_test() {
+        // Layout-based hit test: two stacked divs; elementFromPoint must return
+        // the element whose laid-out box contains the point (not a heuristic).
+        let mut rt = JsRuntime::new();
+        let html = concat!(
+            "<!DOCTYPE html><html><head><style>",
+            "body { margin: 0; }",
+            "#a { width: 100px; height: 50px; background: red; }",
+            "#b { width: 100px; height: 50px; background: blue; }",
+            "</style></head><body><div id=\"a\"></div><div id=\"b\"></div></body></html>"
+        );
+        rt.set_document(html, Some("https://example.com/"), (200, 200))
+            .await
+            .expect("set_document should build the render doc");
+
+        // #a occupies y=0..50; #b occupies y=50..100.
+        let r = rt
+            .evaluate("var e=document.elementFromPoint(10,10); e?e.id:'null'")
+            .await
+            .unwrap();
+        assert!(r.is_ok(), "eval failed");
+        assert_eq!(r.value, Some(Value::String("a".into())), "point in #a");
+
+        let r = rt
+            .evaluate("var e=document.elementFromPoint(10,70); e?e.id:'null'")
+            .await
+            .unwrap();
+        assert!(r.is_ok());
+        assert_eq!(r.value, Some(Value::String("b".into())), "point in #b");
+    }
     #[tokio::test]
     async fn test_document_get_elements_by_tag_name() {
         let mut rt = JsRuntime::new();
