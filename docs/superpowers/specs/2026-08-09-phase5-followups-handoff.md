@@ -2,7 +2,7 @@
 
 > **Status:** Sub-session A (CoreEvent sink + emitters) ✅ complete.
 > Sub-session B — lifecycle callbacks + geometry methods ✅ complete; slot
-> composition 🔴 blocked on the unified live DOM (§4).
+> composition 🔴 blocked on the external Blitz render engine (§4).
 >
 > **Phase 4+5 core:** ✅ complete — see `docs/superpowers/plans/2026-08-09-phase4-5-completion.md`.
 > **Branch:** `main`
@@ -233,17 +233,19 @@ Each ships with a focused test and the raw-CDP probe re-run as regression.
 ## 4. Sub-session B — Phase 7 (geometry + lifecycle)
 
 **Status (2026-08-09):** lifecycle callbacks + geometry methods ✅ shipped;
-slot composition 🔴 **blocked** on the unified live DOM (see below).
+slot composition 🔴 **blocked on the external Blitz render engine** (see the
+table row for the audited root cause).
 
-These are gated on a **unified live DOM** (or at minimum a hook from the
-appendChild mutation path into JS). Out of scope for the CoreEvent sink work.
+The unified live DOM already exists (`RenderDocument` on the JS thread); the
+geometry + lifecycle items landed via hooks into it. Slot composition alone is
+blocked by Blitz (see below). Out of scope for the CoreEvent sink work.
 
 | Item | Status | How |
 |---|---|---|
 | `connectedCallback`/`disconnectedCallback` on DOM insertion | ✅ done | Native `appendChild`/`remove` hooks on the render-doc element path call `__oxi_fire_connected`/`__oxi_fire_disconnected` (JS helpers in `WEB_COMPONENTS_BOOTSTRAP`); fires on the appended/removed node (+ best-effort subtree walk). Verified by `test_custom_element_lifecycle_callbacks`. |
 | `attributeChangedCallback` for `observedAttributes` | ✅ done | Render-doc `setAttribute` hook captures the old value and calls `__oxi_fire_attr_changed`, gated by `observedAttributes` inside the helper. |
 | `getBoxModel` / `getContentQuads` / `getNodeForLocation` | ✅ done | `domains/dom.rs` methods backed by `LayoutEngine::compute_rect(snapshot, node_id)`. Verified end-to-end via raw-CDP probe (`getBoxModel` 8-pt quad + dims; `getContentQuads`; `getNodeForLocation` returns a nodeId). |
-| slot rendering / real ShadowRoot composition | 🔴 blocked | `DomSnapshot` has no shadow/slot fields; `LayoutEngine`/`render_box_model_png` operate on the flat snapshot; `attachShadow` only stores a `__shadowRoot` JS object. Real slot distribution requires the unified live DOM with shadow-tree traversal in the render pipeline — a separate architectural initiative. |
+| slot rendering / real ShadowRoot composition | 🔴 blocked (external dep) | **Root cause (audited 2026-08-09):** the unified live DOM *does* exist (`RenderDocument` on the JS thread — runtime.rs:1029 "single source of truth after unification"), so this is NOT gated on it. The real blocker is the **Blitz render engine**: `RenderDocument` wraps `blitz_dom::BaseDocument`, an **external crates.io crate** (`blitz-dom = "0.3.0-beta.1"`, registry-sourced — not a workspace member), which models a single flat tree with no shadow/host/slot concept. All rasterization (`capture_png`) flows through Blitz; `DomSnapshot`/`LayoutEngine` have no shadow fields; `attachShadow` is a JS-only stub. Real shadow-DOM rendering requires either forking Blitz+Stylo (foreign codebase) or replacing the render engine — a decision beyond this goal. |
 
 The DOM-methods survey (`history://DomMethodSurvey`) enumerated the full gap;
 the 9 JS-eval/Snapshot-feasible methods shipped, the 3 geometry ones are here.
