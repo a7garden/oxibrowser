@@ -8722,6 +8722,105 @@ fn register_window_globals(
     if let Err(e) = ctx.eval(Source::from_bytes(FORMDATA_BLOB_BOOTSTRAP)) {
         tracing::warn!(error = %e, "formdata/blob bootstrap failed");
     }
+    const CANVAS_BOOTSTRAP: &str = r#"
+(function () {
+  if (globalThis.__oxi_canvas_patched) return;
+  globalThis.__oxi_canvas_patched = true;
+  function makeContext2d(canvas) {
+    return {
+      canvas: canvas,
+      fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, font: '10px sans-serif',
+      textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1, lineCap: 'butt',
+      lineJoin: 'miter', miterLimit: 10, shadowBlur: 0, shadowColor: 'rgba(0, 0, 0, 0)',
+      shadowOffsetX: 0, shadowOffsetY: 0, globalCompositeOperation: 'source-over',
+      imageSmoothingEnabled: true, imageSmoothingQuality: 'low', direction: 'ltr',
+      letterSpacing: '0px', fontKerning: 'auto', filter: 'none',
+      fillRect: function () {}, strokeRect: function () {}, clearRect: function () {},
+      beginPath: function () {}, closePath: function () {}, moveTo: function () {}, lineTo: function () {},
+      arc: function () {}, arcTo: function () {}, ellipse: function () {}, rect: function () {},
+      bezierCurveTo: function () {}, quadraticCurveTo: function () {}, roundRect: function () {},
+      fill: function () {}, stroke: function () {}, clip: function () {},
+      fillText: function () {}, strokeText: function () {}, drawImage: function () {},
+      save: function () {}, restore: function () {}, scale: function () {}, rotate: function () {},
+      translate: function () {}, transform: function () {}, setTransform: function () {}, resetTransform: function () {},
+      setLineDash: function () {}, getLineDash: function () { return []; }, lineDashOffset: 0,
+      createLinearGradient: function () { return { addColorStop: function () {} }; },
+      createRadialGradient: function () { return { addColorStop: function () {} }; },
+      createConicGradient: function () { return { addColorStop: function () {} }; },
+      createPattern: function () { return {}; },
+      measureText: function (s) {
+        var n = String(s == null ? '' : s).length;
+        return { width: n * 6, actualBoundingBoxLeft: 0, actualBoundingBoxRight: n * 6,
+                 actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+                 fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 2 };
+      },
+      getImageData: function (x, y, w, h) {
+        var sw = Math.max(0, (w | 0)), sh = Math.max(0, (h | 0));
+        return { data: new Uint8ClampedArray(sw * sh * 4), width: sw, height: sh, colorSpace: 'srgb' };
+      },
+      putImageData: function () {},
+      createImageData: function (w, h) {
+        var sw, sh;
+        if (h === undefined) { sw = (w && w.width) || 0; sh = (w && w.height) || 0; } else { sw = w | 0; sh = h | 0; }
+        return { data: new Uint8ClampedArray(Math.max(0, sw * sh * 4)), width: sw, height: sh, colorSpace: 'srgb' };
+      },
+      isPointInPath: function () { return false; }, isPointInStroke: function () { return false; },
+      getContextAttributes: function () { return { alpha: true, willReadFrequently: false }; },
+      drawFocusIfNeeded: function () {}
+    };
+  }
+  function makeWebGL(canvas) {
+    var no = function () {};
+    return {
+      canvas: canvas, drawingBufferWidth: canvas.width || 300, drawingBufferHeight: canvas.height || 150,
+      getParameter: function () { return null; }, getExtension: function () { return null; },
+      getSupportedExtensions: function () { return []; },
+      createShader: function () { return {}; }, shaderSource: no, compileShader: no, getShaderParameter: function () { return null; },
+      createProgram: function () { return {}; }, attachShader: no, linkProgram: no, useProgram: no,
+      getProgramParameter: function () { return null; }, getAttribLocation: function () { return -1; },
+      getUniformLocation: function () { return null; },
+      createBuffer: function () { return {}; }, bindBuffer: no, bufferData: no, deleteShader: no, deleteProgram: no, deleteBuffer: no,
+      enableVertexAttribArray: no, disableVertexAttribArray: no, vertexAttribPointer: no,
+      uniform1f: no, uniform2f: no, uniform3f: no, uniform4f: no, uniform1i: no, uniform2i: no, uniform3i: no, uniform4i: no,
+      uniformMatrix2fv: no, uniformMatrix3fv: no, uniformMatrix4fv: no,
+      viewport: no, drawArrays: no, drawElements: no, clearColor: no, clear: no, enable: no, disable: no,
+      blendFunc: no, depthFunc: no, cullFace: no, frontFace: no, pixelStorei: no, hint: no,
+      createContextAttributes: function () { return { alpha: true, antialias: true }; },
+      getContextAttributes: function () { return { alpha: true, antialias: true }; }
+    };
+  }
+  function patchCanvas(el) {
+    if (el.__oxiCanvas) return el;
+    el.__oxiCanvas = true;
+    if (typeof el.width !== 'number') el.width = 300;
+    if (typeof el.height !== 'number') el.height = 150;
+    el.getContext = function (type) {
+      var t = String(type || '');
+      if (t === '2d') return makeContext2d(el);
+      if (t === 'webgl' || t === 'webgl2' || t === 'experimental-webgl') return makeWebGL(el);
+      return null;
+    };
+    el.toDataURL = function () { return 'data:,'; };
+    el.toBlob = function (cb) { try { if (typeof cb === 'function') cb(new globalThis.Blob([])); } catch (e) {} };
+    el.captureStream = function () { return { getTracks: function () { return []; }, getVideoTracks: function () { return []; } }; };
+    el.transferControlToOffscreen = function () { return makeContext2d(el); };
+    return el;
+  }
+  globalThis.__oxi_patchCanvas = patchCanvas;
+  if (typeof document !== 'undefined' && typeof document.createElement === 'function' && !document.__oxiCeWrap) {
+    document.__oxiCeWrap = true;
+    var origCE = document.createElement.bind(document);
+    document.createElement = function (tag) {
+      var el = origCE(String(tag));
+      try { if (String(tag).toLowerCase() === 'canvas') patchCanvas(el); } catch (e) {}
+      return el;
+    };
+  }
+})();
+"#;
+    if let Err(e) = ctx.eval(Source::from_bytes(CANVAS_BOOTSTRAP)) {
+        tracing::warn!(error = %e, "canvas bootstrap failed");
+    }
 
     const OBSERVER_BOOTSTRAP: &str = r#"
 (function () {
@@ -10646,6 +10745,42 @@ mod tests {
             body_text.contains("\r\n--"),
             "no multipart boundary delimiters"
         );
+    }
+
+    /// canvas 2D shim: getContext('2d') must exist and not throw, measureText
+    /// returns a TextMetrics, toDataURL returns a data: URL, webgl context truthy.
+    #[tokio::test]
+    async fn test_canvas_2d_shim() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "var c = document.createElement('canvas');\
+                 var ctx = c.getContext('2d');\
+                 ctx.fillRect(0,0,10,10);\
+                 ctx.fillStyle = '#ffffff';\
+                 var m = ctx.measureText('hello');\
+                 JSON.stringify({\
+                   hasCtx: !!ctx,\
+                   measure: typeof ctx.measureText === 'function',\
+                   mwPos: m.width > 0,\
+                   dataUrl: c.toDataURL().slice(0, 5),\
+                   gl: !!c.getContext('webgl'),\
+                   img: !!ctx.getImageData\
+                 })",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("canvas eval produced no value");
+        let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
+        assert_eq!(v["measure"], true);
+        assert_eq!(v["mwPos"], true, "measureText width should be > 0");
+        assert_eq!(v["dataUrl"], "data:", "toDataURL should return a data: URL");
+        assert_eq!(v["gl"], true, "getContext('webgl') should be truthy");
+        assert_eq!(v["img"], true, "getImageData should exist");
     }
 
     /// Background fetch handler for tests: spawn-per-request, each responding
