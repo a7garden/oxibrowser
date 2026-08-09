@@ -12,8 +12,52 @@
 
 use crate::css::ComputedStyle;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+// ── Shadow-DOM composition registry ─────────────────────────────────────────
+//
+// `attachShadow` (native, in `runtime.rs`) records the render-doc node ids
+// appended to each shadow root here. `compose_shadow_trees` (called from
+// `from_render_document`) reads them and flattens the shadow trees into the
+// snapshot — distributing light-DOM children into `<slot>` positions — so every
+// DomSnapshot-backed read (CDP DOM.*, box models, extract, LayoutEngine) sees
+// the composed tree. (Screenshot rasterization via `capture_png` is the one
+// Blitz-gated path that does NOT reflect this.)
+thread_local! {
+    /// host node id → the render-doc node ids appended to its shadow root.
+    pub(crate) static SHADOW_ROOTS: RefCell<HashMap<u32, ShadowHost>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Recorded shadow root for one host element.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ShadowHost {
+    /// Render-doc node ids appended to the shadow root, in append order.
+    pub child_ids: Vec<u32>,
+}
+
+/// Register (or reset) a shadow root for `host_id`.
+pub(crate) fn register_shadow_host(host_id: u32) {
+    SHADOW_ROOTS.with(|m| {
+        m.borrow_mut().insert(host_id, ShadowHost::default());
+    });
+}
+
+/// Record that `child_id` was appended to `host_id`'s shadow root.
+pub(crate) fn push_shadow_child(host_id: u32, child_id: u32) {
+    SHADOW_ROOTS.with(|m| {
+        if let Some(host) = m.borrow_mut().get_mut(&host_id) {
+            host.child_ids.push(child_id);
+        }
+    });
+}
+
+/// Drop all shadow roots (called on navigation / document rebuild).
+pub fn clear_shadow_roots() {
+    SHADOW_ROOTS.with(|m| m.borrow_mut().clear());
+}
 
 /// DOM 변경 사항
 ///
@@ -239,6 +283,9 @@ impl DomSnapshot {
             &mut body_id,
             &mut head_id,
         );
+        // Flatten shadow trees into the snapshot: merge each host's shadow
+        // subtree and distribute its light-DOM children into <slot> positions.
+        compose_shadow_trees(&mut nodes, &mut order, doc);
         // Element text_content = concatenation of descendant text (mirrors
         // `collect_text_content` in the retired `from_frame` path).
         fill_element_text(&mut nodes, root as u32);
@@ -1192,6 +1239,164 @@ fn collect_from_render(
     order.push(id_u32);
     for &child in &node.children {
         collect_from_render(child, doc, Some(id_u32), nodes, order, body_id, head_id);
+    }
+}
+
+/// Flatten shadow trees into the flat snapshot.
+///
+/// For each host that has a shadow root (recorded in [`SHADOW_ROOTS`]), this
+/// merges the shadow subtree (read from `doc` by id — works for the detached
+/// nodes `attachShadow`/`shadowRoot.appendChild` left in the render doc) into
+/// `nodes`, splices the shadow root's children into the host's `children`, and
+/// distributes the host's former light-DOM children into `<slot>` positions by
+/// name. The result is the standard Shadow DOM **flattened tree**, visible to
+/// every DomSnapshot-backed read (DOM queries, box models, `extract`, …).
+fn compose_shadow_trees(
+    nodes: &mut HashMap<u32, DomNode>,
+    order: &mut Vec<u32>,
+    doc: &oxibrowser_render::BaseDocument,
+) {
+    // Hosts present in this snapshot that also have a shadow root.
+    let hosts: Vec<(u32, Vec<u32>)> = SHADOW_ROOTS.with(|m| {
+        let borrowed = m.borrow();
+        borrowed
+            .iter()
+            .filter(|(h, _)| nodes.contains_key(*h))
+            .map(|(h, info)| (*h, info.child_ids.clone()))
+            .collect()
+    });
+
+    for (host_id, shadow_child_ids) in hosts {
+        if shadow_child_ids.is_empty() {
+            continue;
+        }
+        // Merge each shadow subtree (detached render-doc nodes) into `nodes`.
+        let mut collected_top: Vec<u32> = Vec::new();
+        for cid in &shadow_child_ids {
+            let before = nodes.len();
+            collect_from_render(
+                *cid as usize,
+                doc,
+                Some(host_id),
+                nodes,
+                order,
+                &mut None,
+                &mut None,
+            );
+            if nodes.len() > before {
+                collected_top.push(*cid);
+            }
+        }
+        if collected_top.is_empty() {
+            continue;
+        }
+        // The host's current children are its light-DOM children; they get
+        // distributed into <slot> positions within the shadow content. The
+        // composed children become the shadow root's top-level children.
+        let light_children = nodes
+            .get_mut(&host_id)
+            .map(|h| std::mem::take(&mut h.children))
+            .unwrap_or_default();
+        // Install the shadow content as the host's children FIRST, so a
+        // top-level <slot> (parent == host) can be spliced in distribute_slots.
+        if let Some(h) = nodes.get_mut(&host_id) {
+            h.children = collected_top.clone();
+        }
+        distribute_slots(nodes, &collected_top, &light_children);
+    }
+}
+
+/// Distribute `light_children` into `<slot>` positions within the shadow
+/// subtree whose top-level nodes are `shadow_top`.
+///
+/// - A `<slot name="x">` receives light children whose `slot` attr == "x".
+/// - A default `<slot>` (no name) receives light children with no `slot` attr
+///   (only the first default slot is filled; later ones show fallback content).
+/// - A slot with no assignment falls back to its own shadow-DOM children.
+fn distribute_slots(nodes: &mut HashMap<u32, DomNode>, shadow_top: &[u32], light_children: &[u32]) {
+    // Collect every <slot> node id in the shadow subtree (DFS).
+    let mut slots: Vec<u32> = Vec::new();
+    collect_slot_ids(nodes, shadow_top, &mut slots);
+    if slots.is_empty() {
+        return;
+    }
+
+    // Partition light children by their `slot` attribute.
+    let mut named: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut default_kids: Vec<u32> = Vec::new();
+    for &lc in light_children {
+        match nodes
+            .get(&lc)
+            .and_then(|n| n.attributes.get("slot").cloned())
+        {
+            Some(name) => named.entry(name).or_default().push(lc),
+            None => default_kids.push(lc),
+        }
+    }
+
+    // Gather replacement plans first (parent, replacement, slot) so we never
+    // hold two mutable borrows of `nodes` at once.
+    let mut plans: Vec<(u32, Vec<u32>, u32)> = Vec::new();
+    for &slot_id in &slots {
+        let (slot_name, fallback) = nodes
+            .get(&slot_id)
+            .map(|s| {
+                (
+                    s.attributes.get("name").cloned().unwrap_or_default(),
+                    s.children.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let assigned: Vec<u32> = if slot_name.is_empty() {
+            std::mem::take(&mut default_kids)
+        } else {
+            named.remove(&slot_name).unwrap_or_default()
+        };
+        let replacement: Vec<u32> = if assigned.is_empty() {
+            fallback
+        } else {
+            assigned
+        };
+        let parent_id = match nodes.get(&slot_id).and_then(|n| n.parent) {
+            Some(p) => p,
+            None => continue,
+        };
+        plans.push((parent_id, replacement, slot_id));
+    }
+
+    // Apply: reparent each replacement, then splice it into the parent
+    // (re-finding the slot's index so multiple slots in one parent survive).
+    for (pid, replacement, slot_id) in plans {
+        for &r in &replacement {
+            if let Some(n) = nodes.get_mut(&r) {
+                n.parent = Some(pid);
+            }
+        }
+        if let Some(p) = nodes.get_mut(&pid)
+            && let Some(idx) = p.children.iter().position(|c| *c == slot_id)
+        {
+            p.children.splice(idx..=idx, replacement.iter().copied());
+        }
+    }
+
+    // Drop the now-replaced slot nodes from the map (they're unreferenced).
+    for &slot_id in &slots {
+        nodes.remove(&slot_id);
+    }
+}
+
+/// DFS over the shadow subtree rooted at `top`, collecting `<slot>` node ids.
+fn collect_slot_ids(nodes: &HashMap<u32, DomNode>, top: &[u32], out: &mut Vec<u32>) {
+    for &id in top {
+        let Some(node) = nodes.get(&id) else { continue };
+        if node.tag == "slot" {
+            out.push(id);
+        }
+        // Recurse into children (skip into slots themselves — slot children are
+        // fallback content, not slotted content).
+        if node.tag != "slot" {
+            collect_slot_ids(nodes, &node.children, out);
+        }
     }
 }
 

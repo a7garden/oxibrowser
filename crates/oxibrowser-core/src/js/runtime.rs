@@ -1461,6 +1461,8 @@ fn js_thread_loop(
                 match RenderDocument::from_html(&html, base_url.as_deref(), vp) {
                     Ok(doc) => {
                         *render_doc_cell.borrow_mut() = Some(doc);
+                        // Shadow roots are per-document; drop stale entries.
+                        crate::js::dom_snapshot::clear_shadow_roots();
                         run_navigation_scripts(
                             &mut ctx,
                             &job_queue,
@@ -8999,6 +9001,41 @@ fn register_window_globals(
         }
         "UTC".to_string()
     }
+    // Native ShadowRoot backing: `__oxi_attach_shadow(hostId)` creates a real
+    // shadow tree in the DomSnapshot registry and returns a JS shadow-root
+    // object whose appendChild records child node ids for the compose pass
+    // (see dom_snapshot::compose_shadow_trees). The JS `Element.prototype.
+    // attachShadow` (WEB_COMPONENTS_BOOTSTRAP) delegates to this.
+    let attach_shadow_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let host_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            crate::js::dom_snapshot::register_shadow_host(host_id);
+            let host_val = args.first().cloned().unwrap_or(JsValue::undefined());
+            let append_host = host_id;
+            let append_fn = NativeFunction::from_closure(move |_this, args, ctx| {
+                let child = args.first().cloned().unwrap_or(JsValue::undefined());
+                let child_id = child
+                    .as_object()
+                    .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                    .and_then(|v| v.as_number().map(|n| n as u32));
+                if let Some(cid) = child_id {
+                    crate::js::dom_snapshot::push_shadow_child(append_host, cid);
+                }
+                Ok(child)
+            });
+            let root = boa_engine::object::ObjectInitializer::new(ctx)
+                .property(js_string!("nodeType"), JsValue::from(11), Attribute::all())
+                .property(js_string!("host"), host_val, Attribute::all())
+                .function(append_fn, js_string!("appendChild"), 1)
+                .build();
+            Ok(JsValue::from(root))
+        })
+    };
+    let _ = ctx.register_global_callable(js_string!("__oxi_attach_shadow"), 1, attach_shadow_fn);
     if let Err(e) = ctx.eval(Source::from_bytes(WEB_COMPONENTS_BOOTSTRAP)) {
         tracing::warn!(error = %e, "web components bootstrap failed");
     }
@@ -9482,7 +9519,9 @@ fn register_window_globals(
   if (globalThis.Element && !globalThis.Element.prototype.attachShadow) {
     globalThis.Element.prototype.attachShadow = function (init) {
       if (this.__shadowRoot) throw new Error("Failed to execute 'attachShadow': Shadow root already attached");
-      var root = (typeof document !== 'undefined' && document.createDocumentFragment) ? document.createDocumentFragment() : {};
+      var root = (typeof __oxi_attach_shadow === 'function')
+        ? __oxi_attach_shadow(this.__nodeId)
+        : ((typeof document !== 'undefined' && document.createDocumentFragment) ? document.createDocumentFragment() : {});
       root.host = this; root.mode = (init && init.mode) || 'open';
       this.__shadowRoot = root; return root;
     };
@@ -11394,6 +11433,145 @@ mod tests {
         assert!(
             s.contains("disconnected"),
             "disconnectedCallback should fire: {s}"
+        );
+    }
+
+    /// Shadow DOM slot composition: a custom element's shadow `<slot>`
+    /// distributes the host's light-DOM children into the composed (flattened)
+    /// snapshot tree, so DomSnapshot-backed reads see slotted content.
+    #[tokio::test]
+    async fn test_shadow_dom_slot_composition() {
+        use std::collections::HashSet;
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class MyCard extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var slot = document.createElement('slot');\
+                     s.appendChild(slot);\
+                   }\
+                 }\
+                 customElements.define('my-card', MyCard);\
+                 var card = document.createElement('my-card');\
+                 var light = document.createElement('p');\
+                 light.id = 'light'; light.textContent = 'slotted';\
+                 card.appendChild(light);\
+                 document.body.appendChild(card);",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "shadow setup threw: {:?}",
+            r.exception
+        );
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let body = snap.body_id.expect("body exists");
+        // Walk the composed tree from <body>.
+        let mut reachable = HashSet::new();
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(n) = snap.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        let light_id = snap.id_index.get("light").copied();
+        assert!(light_id.is_some(), "light child should be in the snapshot");
+        assert!(
+            reachable.contains(&light_id.unwrap()),
+            "light child must be composed into the rendered tree via the default <slot>"
+        );
+        // The <slot> itself should be replaced by its assigned light child.
+        let slot_reachable = reachable
+            .iter()
+            .any(|id| snap.nodes.get(id).is_some_and(|n| n.tag == "slot"));
+        assert!(
+            !slot_reachable,
+            "default <slot> should be replaced by its assigned light child"
+        );
+    }
+
+    /// Named-slot composition: a child with `slot="header"` is distributed
+    /// into `<slot name="header">`; a child with no matching slot is dropped
+    /// from the rendered (flattened) tree.
+    #[tokio::test]
+    async fn test_shadow_dom_named_slot_composition() {
+        use std::collections::HashSet;
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class MyCard extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var hslot = document.createElement('slot');\
+                     hslot.setAttribute('name', 'header');\
+                     s.appendChild(hslot);\
+                   }\
+                 }\
+                 customElements.define('my-card', MyCard);\
+                 var card = document.createElement('my-card');\
+                 var hdr = document.createElement('h1');\
+                 hdr.setAttribute('slot', 'header'); hdr.id = 'hdr';\
+                 var orphan = document.createElement('p');\
+                 orphan.id = 'orphan';\
+                 card.appendChild(hdr); card.appendChild(orphan);\
+                 document.body.appendChild(card);",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "named-slot setup threw: {:?}",
+            r.exception
+        );
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let body = snap.body_id.expect("body exists");
+        let mut reachable = HashSet::new();
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(n) = snap.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        // The named child is distributed into <slot name="header">.
+        let hdr_id = snap.id_index.get("hdr").copied();
+        assert!(hdr_id.is_some(), "header child should be in the snapshot");
+        assert!(
+            reachable.contains(&hdr_id.unwrap()),
+            "slot='header' child must be composed into the rendered tree"
+        );
+        // The orphan (no matching slot, no default slot) is NOT rendered.
+        let orphan_reachable = snap
+            .id_index
+            .get("orphan")
+            .map(|id| reachable.contains(id))
+            .unwrap_or(false);
+        assert!(
+            !orphan_reachable,
+            "child with no matching slot must be dropped from the flattened tree"
         );
     }
 
