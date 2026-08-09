@@ -2004,6 +2004,19 @@ fn normalize_fetch_body(value: &JsValue, ctx: &mut Context) -> Option<(Vec<u8>, 
     Some((bytes, content_type))
 }
 
+/// Upgrade a freshly-created element via the `globalThis.__oxi_upgrade_custom`
+/// helper installed by `WEB_COMPONENTS_BOOTSTRAP`: if its tag is a registered
+/// custom element, apply the constructor's prototype + body. No-op otherwise.
+fn upgrade_custom_element(value: JsValue, ctx: &mut Context) -> JsValue {
+    if let Ok(helper) = ctx.global_object().get(js_string!("__oxi_upgrade_custom"), ctx)
+        && let Some(callable) = helper.as_callable()
+        && let Ok(upgraded) = callable.call(&JsValue::undefined(), std::slice::from_ref(&value), ctx)
+    {
+        return upgraded;
+    }
+    value
+}
+
 fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         let mut borrowed = m.borrow_mut();
@@ -5357,7 +5370,10 @@ fn register_document_object(
                 guard.as_mut().map(|doc| doc.create_element(&tag))
             };
             if let Some(nid) = nid_opt {
-                return Ok(create_render_element_object(ctx, rd_ce.clone(), nid));
+            return Ok(upgrade_custom_element(
+                create_render_element_object(ctx, rd_ce.clone(), nid),
+                ctx,
+            ));
             }
 
             // Generate a unique node ID using an atomic counter (avoids collisions in tight loops)
@@ -5549,7 +5565,7 @@ fn register_document_object(
                 .function(click_fn, js_string!("click"), 0)
                 .function(append_child_fn, js_string!("appendChild"), 1)
                 .build();
-            Ok(JsValue::from(obj))
+            Ok(upgrade_custom_element(JsValue::from(obj), ctx))
         })
     };
 
@@ -9042,6 +9058,20 @@ fn register_window_globals(
     };
     globalThis.customElements = CE;
   }
+  // Upgrade helper called from the native createElement path: if the element's
+  // tag is a registered custom element, apply its prototype + constructor.
+  // Lives on globalThis (not window) so it survives document rebuilds.
+  globalThis.__oxi_upgrade_custom = function (node) {
+    try {
+      if (node && globalThis.customElements) {
+        var tag = (node.tagName && node.tagName.toLowerCase) ? node.tagName.toLowerCase() : '';
+        if (tag && typeof globalThis.customElements.upgrade === 'function') {
+          globalThis.customElements.upgrade(node);
+        }
+      }
+    } catch (e) {}
+    return node;
+  };
   // window is rebuilt every navigation → sync unconditionally.
   if (globalThis.window) {
     var w = globalThis.window;
@@ -10746,6 +10776,35 @@ mod tests {
             "no multipart boundary delimiters"
         );
     }
+    /// createElement of a defined custom element upgrades it: the returned
+    /// element is an instance of the constructor with its prototype methods.
+    #[tokio::test]
+    async fn test_custom_element_create_element_upgrade() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "class XFoo extends HTMLElement { greet() { return 'hi'; } }\
+                 customElements.define('x-foo', XFoo);\
+                 var el = document.createElement('x-foo');\
+                 JSON.stringify({\
+                   isInstance: (el instanceof XFoo),\
+                   hasGreet: typeof el.greet === 'function',\
+                   res: el.greet && el.greet()\
+                 })",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("custom-element eval produced no value");
+        let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
+        assert_eq!(v["isInstance"], true, "createElement must upgrade to the ctor");
+        assert_eq!(v["hasGreet"], true, "prototype method must be present");
+        assert_eq!(v["res"], "hi");
+    }
+
 
     /// canvas 2D shim: getContext('2d') must exist and not throw, measureText
     /// returns a TextMetrics, toDataURL returns a data: URL, webgl context truthy.
