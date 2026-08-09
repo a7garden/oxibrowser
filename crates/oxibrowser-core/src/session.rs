@@ -6,6 +6,7 @@
 use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
+use crate::frame::Frame;
 use crate::js::JsRuntime;
 use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
@@ -564,7 +565,13 @@ impl Session {
         tracing::debug!(html_bytes = html.len(), "response decoded");
 
         // Create a new page for this navigation (use final URL after redirects)
-        let page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
+        let mut page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
+
+        // Phase 8 (partial): populate child <iframe> frames by fetching each
+        // src (resolved against the page URL) and parsing it into a child Frame.
+        // Frame scripts run in the parent context for now; isolated per-frame
+        // contexts + cross-frame evaluate remain future work.
+        self.populate_iframes(&mut page, &final_url).await;
 
         // Update history
         if self.history.is_empty() {
@@ -623,6 +630,41 @@ impl Session {
         }
         tracing::info!(url = %url, filename = %safe, bytes = bytes.len(), "download saved");
         Ok(())
+    }
+
+    /// Fetch each `<iframe src>` in the page's root frame and attach the
+    /// fetched document as a child [`Frame`] (Phase 8 population step).
+    /// Failures (bad URL, network error) are logged and skipped so a single
+    /// broken iframe can't abort navigation.
+    async fn populate_iframes(&self, page: &mut Page, base_url: &Url) {
+        let iframe_srcs: Vec<String> = page
+            .root_frame()
+            .document()
+            .extract_resource_urls()
+            .into_iter()
+            .filter(|r| matches!(r.kind, crate::js::dom_snapshot::ResourceKind::Iframe))
+            .map(|r| r.url)
+            .collect();
+        for src in iframe_srcs {
+            let Ok(full) = base_url.join(&src) else {
+                continue;
+            };
+            // Skip non-http(s) iframes (about:, javascript:, etc.).
+            if full.scheme() != "http" && full.scheme() != "https" {
+                continue;
+            }
+            match self.http_client.fetch_text(&full).await {
+                Ok(child_html) => match Frame::from_html(full.clone(), &child_html).await {
+                    Ok(child) => page.root_frame_mut().add_child(child),
+                    Err(e) => {
+                        tracing::warn!(src = %src, error = %e, "failed to parse iframe document")
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(src = %src, error = %e, "failed to fetch iframe")
+                }
+            }
+        }
     }
 
     /// Navigate to a URL with automatic retries on transient failures.
@@ -1410,6 +1452,50 @@ mod tests {
         );
         set_download_behavior(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_iframe_population() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "<html><body><iframe src=\"/child.html\"></iframe></body></html>",
+                ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/child.html"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html><body><p>inside-iframe</p></body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut session = make_session().await;
+        session
+            .navigate(&format!("{}/", server.uri()))
+            .await
+            .expect("navigate");
+
+        let children = session.page().expect("page").root_frame().children();
+        assert_eq!(children.len(), 1, "iframe should populate one child frame");
+        let has_text = children[0]
+            .document()
+            .nodes
+            .values()
+            .any(|n| n.text_content.contains("inside-iframe"));
+        assert!(
+            has_text,
+            "child frame should contain the fetched iframe content"
+        );
     }
 
     #[tokio::test]
