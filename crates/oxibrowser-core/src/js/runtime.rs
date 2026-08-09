@@ -1939,6 +1939,33 @@ fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
     ws_fire(&obj, "message", event.into(), ctx);
 }
 
+/// Best-effort extraction of a byte buffer from a JS value, for WebSocket
+/// binary `send()`. Recognises ArrayBuffer / TypedArray / a plain `Array` of
+/// numbers — anything exposing a numeric `length` (or `byteLength`) whose
+/// indexed elements are numbers. Returns `None` for strings/other values.
+fn extract_binary_bytes(v: &JsValue, ctx: &mut Context) -> Option<Vec<u8>> {
+    let obj = v.as_object()?;
+    let len = obj
+        .get(js_string!("length"), ctx)
+        .ok()
+        .and_then(|l| l.as_number())
+        .or_else(|| {
+            obj.get(js_string!("byteLength"), ctx)
+                .ok()
+                .and_then(|l| l.as_number())
+        })?;
+    let n = len as usize;
+    if n == 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(n);
+    for i in 0..n {
+        let val = obj.get(i as u32, ctx).ok()?;
+        bytes.push(val.as_number()? as u8);
+    }
+    Some(bytes)
+}
+
 fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         let mut borrowed = m.borrow_mut();
@@ -2698,10 +2725,13 @@ fn create_context(
 
             // ws.send(data): text from a JS string, binary otherwise (best-effort).
             let send_id = id;
-            let send_fn = NativeFunction::from_closure(move |_this, args, _| {
+            let send_fn = NativeFunction::from_closure(move |_this, args, ctx| {
                 let data = match args.first() {
                     Some(JsValue::String(s)) => WsData::Text(s.to_std_string_escaped()),
-                    Some(v) => WsData::Text(format!("{}", v.display())),
+                    Some(v) => match extract_binary_bytes(v, ctx) {
+                        Some(bytes) => WsData::Binary(bytes),
+                        None => WsData::Text(format!("{}", v.display())),
+                    },
                     None => return Ok(JsValue::undefined()),
                 };
                 let _ = WS_REQ_TX.with(|c| {
@@ -11242,6 +11272,52 @@ mod tests {
         rt.set_ws_channel(req_tx, ev_rx);
         std::thread::spawn(move || crate::session::handle_ws_requests(req_rx, ev_tx));
         rt
+    }
+
+    /// ws.send(Uint8Array) must produce a binary frame, not coerce to text.
+    /// Uses a controlled req channel (no real server) so we can inspect the
+    /// emitted `WsReqMsg::Send` directly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_ws_send_binary_from_typed_array() {
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<WsReqMsg>();
+        let (_ev_tx, ev_rx) = std::sync::mpsc::channel::<WsEvent>();
+        rt.set_ws_channel(req_tx, ev_rx);
+
+        let r = rt
+            .evaluate(
+                "var ws = new WebSocket('ws://127.0.0.1:1/x');\
+                 ws.send(new Uint8Array([1,2,3]));\
+                 ws.close();\
+                 'sent'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.value
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            Some("sent".to_string()),
+            "eval failed: {:?}",
+            r.exception
+        );
+
+        // Drain: Connect first, then Send — capture the Send payload.
+        let mut got: Option<WsData> = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match req_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(WsReqMsg::Send { data, .. }) => {
+                    got = Some(data);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let data = got.expect("no Send captured on the ws req channel");
+        assert_eq!(data, WsData::Binary(vec![1, 2, 3]), "expected binary frame");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
