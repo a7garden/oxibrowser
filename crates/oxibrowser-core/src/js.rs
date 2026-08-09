@@ -36,6 +36,6 @@ pub use job_queue::TokioJobQueue;
 
 // Runtime (boa context)
 pub use runtime::{
-    ConsoleLevel, CoreEvent, DialogGate, DialogResult, DialogType, JsEvalResult, JsRuntime,
-    JsRuntimeConfig, NodeInfo, WsDirection,
+    ConsoleArg, ConsoleLevel, CoreEvent, DialogGate, DialogResult, DialogType, JsEvalResult,
+    JsRuntime, JsRuntimeConfig, NodeInfo, WsDirection,
 };

@@ -457,13 +457,21 @@ pub enum CoreEvent {
     /// `console.log/info/warn/error` call.
     Console {
         level: ConsoleLevel,
-        /// Already-stringified arguments (joined with spaces by `console_fn`).
-        args: Vec<String>,
+        /// Typed arguments (preserve number/boolean/object/null/undefined so
+        /// the CDP layer builds proper `RemoteObject`s instead of always
+        /// stringifying). See [`ConsoleArg`].
+        args: Vec<ConsoleArg>,
         timestamp: f64,
     },
     /// Uncaught exception from `evaluate()` / navigation scripts.
     Exception {
         message: String,
+        /// Error constructor name (e.g. `TypeError`, `RangeError`); used as the
+        /// CDP `exceptionDetails.exception.className`. Defaults to `Error`.
+        name: String,
+        /// Best-effort `.stack` string from the thrown object, if any. boa 0.20
+        /// does not surface real source locations on `JsNativeError`/`Error`,
+        /// so this is typically `None` or a synthetic trace.
         stack: Option<String>,
         timestamp: f64,
     },
@@ -523,6 +531,92 @@ impl ConsoleLevel {
             Self::Warn => "warning",
             Self::Error => "error",
         }
+    }
+}
+
+/// A single `console.*` argument, preserving enough type info for the CDP
+/// layer to build a typed `RemoteObject` (instead of always stringifying).
+/// Core cannot name CDP types, so this neutral enum is translated by
+/// `emit_console` in the CDP crate.
+#[derive(Debug, Clone)]
+pub enum ConsoleArg {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+    Null,
+    Undefined,
+    /// A non-primitive: its constructor name (for `className`) and its
+    /// stringified form (for console output / `description`).
+    Object {
+        class_name: String,
+        description: String,
+    },
+}
+
+impl ConsoleArg {
+    /// The display string used for the `console` output buffer and the
+    /// `Log.entryAdded` text (mirrors `JsValue::to_string`).
+    pub fn display(&self) -> String {
+        match self {
+            Self::String(s) => s.clone(),
+            Self::Number(n) => format_console_number(*n),
+            Self::Boolean(b) => b.to_string(),
+            Self::Null => "null".to_string(),
+            Self::Undefined => "undefined".to_string(),
+            Self::Object { description, .. } => description.clone(),
+        }
+    }
+}
+
+/// Format an f64 the way JS `console` would display it (integer-valued
+/// numbers render without a trailing `.0`, matching boa's `toString`).
+fn format_console_number(n: f64) -> String {
+    if n.is_nan() {
+        "NaN".to_string()
+    } else if n.is_infinite() {
+        if n > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
+    } else if n.fract() == 0.0 && n.abs() < 1e21 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Classify a JS argument into a typed [`ConsoleArg`]. `display` is the
+/// precomputed `JsValue::to_string` form (used for object descriptions and
+/// kept consistent for primitives).
+fn classify_console_arg(arg: &JsValue, display: &str, ctx: &mut Context) -> ConsoleArg {
+    match arg {
+        JsValue::String(_) => ConsoleArg::String(display.to_string()),
+        JsValue::Integer(n) => ConsoleArg::Number(*n as f64),
+        JsValue::Rational(n) => ConsoleArg::Number(*n),
+        JsValue::Boolean(b) => ConsoleArg::Boolean(*b),
+        JsValue::Null => ConsoleArg::Null,
+        JsValue::Undefined => ConsoleArg::Undefined,
+        JsValue::Object(obj) => {
+            let class_name = (|| {
+                let ctor = obj.get(js_string!("constructor"), ctx).ok()?;
+                let co = ctor.as_object()?;
+                let name_val = co.get(js_string!("name"), ctx).ok()?;
+                name_val
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .filter(|s| !s.is_empty())
+            })()
+            .unwrap_or_else(|| "Object".to_string());
+            ConsoleArg::Object {
+                class_name,
+                description: display.to_string(),
+            }
+        }
+        JsValue::Symbol(_) | JsValue::BigInt(_) => ConsoleArg::Object {
+            class_name: "Object".to_string(),
+            description: display.to_string(),
+        },
     }
 }
 
@@ -1475,11 +1569,12 @@ fn js_thread_loop(
                         });
                     }
                     Err(err) => {
-                        let msg = format_js_error(&err, &mut ctx);
+                        let (msg, err_name, err_stack) = error_sink_details(&err, &mut ctx);
                         // Mirror to the CoreEvent sink (CDP Runtime.exceptionThrown).
                         push_event(CoreEvent::Exception {
                             message: msg.clone(),
-                            stack: None,
+                            name: err_name,
+                            stack: err_stack,
                             timestamp: now_ms(),
                         });
                         // Check if it was a runtime limit error (loop/recursion/stack)
@@ -1889,10 +1984,11 @@ fn run_navigation_scripts(
         // evals, and a prior script's runaway would otherwise starve siblings.
         apply_limits(ctx);
         if let Err(err) = ctx.eval(Source::from_bytes(script.source.as_str())) {
-            let msg = format_js_error(&err, ctx);
+            let (msg, err_name, err_stack) = error_sink_details(&err, ctx);
             push_event(CoreEvent::Exception {
                 message: msg.clone(),
-                stack: None,
+                name: err_name,
+                stack: err_stack,
                 timestamp: now_ms(),
             });
             tracing::warn!(error = %msg, src = ?script.src_url, "page script threw; continuing");
@@ -2673,11 +2769,13 @@ fn create_context(
                 NativeFunction::from_closure(
                     move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
                         let mut strs: Vec<String> = Vec::with_capacity(args.len());
+                        let mut typed: Vec<ConsoleArg> = Vec::with_capacity(args.len());
                         for arg in args.iter() {
                             let s = arg
                                 .to_string(ctx)
                                 .map(|s| s.to_std_string_escaped())
                                 .unwrap_or_else(|_| "undefined".to_string());
+                            typed.push(classify_console_arg(arg, &s, ctx));
                             strs.push(s);
                         }
                         let line = strs.join(" ");
@@ -2689,7 +2787,7 @@ fn create_context(
                         // Log.entryAdded). No-op when no observer is attached.
                         push_event(CoreEvent::Console {
                             level: $level,
-                            args: strs,
+                            args: typed,
                             timestamp: now_ms(),
                         });
                         Ok(JsValue::undefined())
@@ -8672,6 +8770,44 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
     "Unknown JavaScript error".to_string()
 }
 
+/// Extract `(message, name, stack)` from a [`boa_engine::JsError`] for the
+/// `CoreEvent::Exception` sink.
+///
+/// `name` is the error's constructor name (e.g. `TypeError`) when recoverable,
+/// else `Error`. `stack` is the thrown object's `.stack` string if present —
+/// best-effort, since boa 0.20 does not populate real source locations on
+/// `JsNativeError` or `Error.stack` (the synthetic trace comes from the
+/// `Error.prototype.stack` polyfill).
+fn error_sink_details(
+    err: &boa_engine::JsError,
+    context: &mut Context,
+) -> (String, String, Option<String>) {
+    let message = format_js_error(err, context);
+    let mut name = "Error".to_string();
+    let mut stack: Option<String> = None;
+    if let Some(opaque) = err.as_opaque()
+        && let Some(obj) = opaque.as_object()
+    {
+        if let Ok(nv) = obj.get(js_string!("name"), context)
+            && let Some(ns) = nv.as_string()
+        {
+            let s = ns.to_std_string_escaped();
+            if !s.is_empty() {
+                name = s;
+            }
+        }
+        if let Ok(sv) = obj.get(js_string!("stack"), context)
+            && let Some(ss) = sv.as_string()
+        {
+            let s = ss.to_std_string_escaped();
+            if !s.is_empty() && s != "undefined" {
+                stack = Some(s);
+            }
+        }
+    }
+    (message, name, stack)
+}
+
 // ---------------------------------------------------------------------------
 // `window` global object
 #[allow(clippy::too_many_arguments)]
@@ -10561,7 +10697,10 @@ mod tests {
         let mut rt = JsRuntime::new();
         let (tx, rx) = std::sync::mpsc::channel::<CoreEvent>();
         rt.set_event_sink(tx);
-        let result = rt.evaluate("console.warn('watch', 42)").await.unwrap();
+        let result = rt
+            .evaluate("console.warn('watch', 42, true, null, {a:1})")
+            .await
+            .unwrap();
         assert!(result.is_ok());
         let ev = rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -10569,7 +10708,21 @@ mod tests {
         match ev {
             CoreEvent::Console { level, args, .. } => {
                 assert_eq!(level, ConsoleLevel::Warn);
-                assert_eq!(args, vec!["watch".to_string(), "42".to_string()]);
+                assert_eq!(args.len(), 5, "5 console args: {args:?}");
+                // Typed RemoteObjects: string / number / boolean / null / object.
+                assert!(matches!(args[0], ConsoleArg::String(ref s) if s == "watch"));
+                assert!(
+                    matches!(args[1], ConsoleArg::Number(n) if (n - 42.0).abs() < 1e-9),
+                    "numeric arg preserved as Number, got {:?}",
+                    args[1]
+                );
+                assert!(matches!(args[2], ConsoleArg::Boolean(true)));
+                assert!(matches!(args[3], ConsoleArg::Null));
+                assert!(
+                    matches!(args[4], ConsoleArg::Object { ref class_name, .. } if class_name == "Object"),
+                    "object arg classified with className, got {:?}",
+                    args[4]
+                );
             }
             other => panic!("expected Console, got {other:?}"),
         }
@@ -10586,8 +10739,12 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("expected a CoreEvent::Exception");
         assert!(
-            matches!(ev, CoreEvent::Exception { ref message, .. } if message.contains("boom")),
-            "expected Exception containing 'boom', got {ev:?}"
+            matches!(
+                ev,
+                CoreEvent::Exception { ref message, ref name, .. }
+                    if message.contains("boom") && name == "Error"
+            ),
+            "expected Exception 'boom' with name 'Error', got {ev:?}"
         );
     }
 

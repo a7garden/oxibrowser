@@ -7,7 +7,7 @@
 //! flag on the [`EventSender`]).
 
 use crate::event::EventSender;
-use oxibrowser_core::js::{ConsoleLevel, CoreEvent, WsDirection};
+use oxibrowser_core::js::{ConsoleArg, ConsoleLevel, CoreEvent, WsDirection};
 use serde_json::{Value, json};
 
 /// Translate one [`CoreEvent`] into its CDP event(s) on the given sender.
@@ -24,9 +24,10 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
         } => emit_console(events, level, args, timestamp),
         CoreEvent::Exception {
             message,
+            name,
             stack,
             timestamp,
-        } => emit_exception(events, message, stack, timestamp),
+        } => emit_exception(events, message, name, stack, timestamp),
         CoreEvent::FetchRequest {
             request_id,
             url,
@@ -99,12 +100,10 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
     }
 }
 
-fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<String>, timestamp: f64) {
-    // Runtime.consoleAPICalled — args as simple string RemoteObjects (v1).
-    let remote_args: Vec<Value> = args
-        .iter()
-        .map(|a| json!({ "type": "string", "value": a }))
-        .collect();
+fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<ConsoleArg>, timestamp: f64) {
+    // Runtime.consoleAPICalled — typed RemoteObjects (number/boolean/object/
+    // null/undefined), not always-string.
+    let remote_args: Vec<Value> = args.iter().map(console_arg_to_remote_object).collect();
     events.send_runtime_event(
         "Runtime.consoleAPICalled",
         json!({
@@ -116,13 +115,18 @@ fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<String>, ti
     );
 
     // Log.entryAdded — mirror console messages into the Log domain.
+    let text = args
+        .iter()
+        .map(|a| a.display())
+        .collect::<Vec<_>>()
+        .join(" ");
     events.send_log_event(
         "Log.entryAdded",
         json!({
             "entry": {
                 "source": "console",
                 "level": log_level(&level),
-                "text": args.join(" "),
+                "text": text,
                 "timestamp": timestamp,
                 "url": Value::Null,
                 "lineNumber": Value::Null,
@@ -131,7 +135,48 @@ fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<String>, ti
     );
 }
 
-fn emit_exception(events: &EventSender, message: String, stack: Option<String>, timestamp: f64) {
+/// Map a [`ConsoleArg`] to a CDP `RemoteObject` JSON value.
+fn console_arg_to_remote_object(arg: &ConsoleArg) -> Value {
+    match arg {
+        ConsoleArg::String(s) => json!({ "type": "string", "value": s }),
+        ConsoleArg::Number(n) => {
+            // CDP encodes NaN/Infinity as their string forms inside `value`.
+            let value = if n.is_nan() {
+                json!("NaN")
+            } else if *n == f64::INFINITY {
+                json!("Infinity")
+            } else if *n == f64::NEG_INFINITY {
+                json!("-Infinity")
+            } else {
+                json!(n)
+            };
+            json!({ "type": "number", "value": value })
+        }
+        ConsoleArg::Boolean(b) => json!({ "type": "boolean", "value": b }),
+        ConsoleArg::Null => json!({ "type": "object", "subtype": "null", "value": Value::Null }),
+        ConsoleArg::Undefined => json!({ "type": "undefined" }),
+        ConsoleArg::Object {
+            class_name,
+            description,
+        } => json!({
+            "type": "object",
+            "className": class_name,
+            "description": description,
+        }),
+    }
+}
+
+fn emit_exception(
+    events: &EventSender,
+    message: String,
+    name: String,
+    stack: Option<String>,
+    timestamp: f64,
+) {
+    // boa 0.20 has no real source locations; the stack (if any) is a synthetic
+    // trace string. Surface it as the stackTrace description with a single
+    // placeholder frame so clients that demand a non-empty callFrames array
+    // don't choke.
     let stack_trace = match &stack {
         Some(s) => json!({
             "callFrames": [{ "functionName": "", "scriptId": "0", "url": "", "lineNumber": 0, "columnNumber": 0 }],
@@ -153,7 +198,7 @@ fn emit_exception(events: &EventSender, message: String, stack: Option<String>, 
                 "exception": {
                     "type": "object",
                     "subtype": "error",
-                    "className": "Error",
+                    "className": name,
                     "description": message,
                 }
             }
