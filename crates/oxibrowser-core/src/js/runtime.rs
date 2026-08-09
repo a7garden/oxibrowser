@@ -627,6 +627,152 @@ fn capture_png_composed(
     fresh.capture_png(opts)
 }
 
+/// Parse `html` and append the resulting nodes as shadow children of `host_id`
+/// in the live [`RenderDocument`]. Powers `shadowRoot.innerHTML = html`.
+///
+/// The fragment is parsed into a throwaway snapshot (via Blitz), then each
+/// top-level node is recreated in the live render doc and registered as a
+/// shadow child (detached — never parented under the host, which would make it
+/// light DOM). Descendants are appended normally so the compose pass's subtree
+/// walk picks them up.
+fn append_html_fragment_to_shadow(
+    rd: &Rc<RefCell<Option<RenderDocument>>>,
+    host_id: u32,
+    html: &str,
+) {
+    let snap = crate::js::dom_snapshot::parse_html_fragment_to_snapshot(html);
+    let body_id = snap.body_id.unwrap_or(snap.root_id);
+    let top: Vec<u32> = snap
+        .nodes
+        .get(&body_id)
+        .map(|n| n.children.clone())
+        .unwrap_or_default();
+    let mut guard = rd.borrow_mut();
+    let Some(doc) = guard.as_mut() else {
+        return;
+    };
+    for snap_child in top {
+        if let Some(live_id) = recreate_subtree_from_snapshot(doc, &snap, snap_child, None) {
+            crate::js::dom_snapshot::push_shadow_child(host_id, live_id as u32);
+        }
+    }
+}
+
+/// Recreate a snapshot subtree in the live [`RenderDocument`].
+///
+/// If `live_parent` is `Some`, the recreated node is appended to it; if
+/// `None`, it is left detached (a top-level shadow child). Returns the new
+/// live node id, or `None` for nodes we don't model (comments, the document).
+fn recreate_subtree_from_snapshot(
+    doc: &mut RenderDocument,
+    snap: &crate::js::dom_snapshot::DomSnapshot,
+    snap_id: u32,
+    live_parent: Option<usize>,
+) -> Option<usize> {
+    let node = snap.nodes.get(&snap_id)?;
+    let live_id = match node.node_type {
+        // Text node.
+        3 => doc.create_text_node(&node.text_content),
+        // Element.
+        1 => {
+            let id = doc.create_element(&node.tag);
+            for (k, v) in &node.attributes {
+                doc.set_attribute(id, k, v);
+            }
+            for &child in &node.children {
+                recreate_subtree_from_snapshot(doc, snap, child, Some(id));
+            }
+            id
+        }
+        // Comments / document / unknown — skip.
+        _ => return None,
+    };
+    if let Some(p) = live_parent {
+        doc.append_child(p, live_id);
+    }
+    Some(live_id)
+}
+
+/// Build a throwaway composed snapshot from the live document (refreshing the
+/// slot-assignment registries) and return the light children distributed into
+/// the `<slot>` with id `node_id`. Used by `slot.assignedNodes()`/
+/// `assignedElements()` so they reflect live state without a prior snapshot.
+fn refresh_slot_assignments(rd: &Rc<RefCell<Option<RenderDocument>>>, node_id: usize) -> Vec<u32> {
+    let guard = rd.borrow();
+    if let Some(d) = guard.as_ref() {
+        let _ = crate::js::dom_snapshot::DomSnapshot::from_render_document(d, "", "");
+        crate::js::dom_snapshot::slot_assigned_nodes(node_id as u32)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Attach declarative shadow roots (`<template shadowrootmode="open|closed">`)
+/// found in the parsed document, before page scripts run.
+///
+/// For each such template, its parent element (the host) gets a shadow root
+/// whose children are the template's content; the template node is then
+/// detached (Blitz's `remove_node` keeps the subtree accessible by id, so the
+/// compose pass can still walk it). Mirrors the HTML spec's declarative shadow
+/// DOM create-a-shadow-root step.
+fn process_declarative_shadow_dom(doc: &mut RenderDocument) {
+    use crate::js::dom_snapshot::ShadowMode;
+    // Collect candidate templates with an immutable borrow, then mutate.
+    let found: Vec<(usize, ShadowMode, usize, Vec<usize>)> = {
+        let base = doc.document();
+        let root = doc.root_element_id();
+        let mut found = Vec::new();
+        let mut stack = vec![root];
+        let mut visited = std::collections::HashSet::<usize>::new();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let Some(node) = base.get_node(id) else {
+                continue;
+            };
+            let is_dsd_template = node
+                .data
+                .downcast_element()
+                .is_some_and(|e| e.name.local.as_ref() == "template")
+                && node.attrs().is_some_and(|a| {
+                    a.iter()
+                        .any(|x| x.name.local.as_ref() == "shadowrootmode" && !x.value.is_empty())
+                });
+            if is_dsd_template
+                && let (Some(mode_str), Some(parent)) = (
+                    node.attrs().and_then(|a| {
+                        a.iter()
+                            .find(|x| x.name.local.as_ref() == "shadowrootmode")
+                            .map(|x| x.value.clone())
+                    }),
+                    node.parent,
+                )
+            {
+                let mode = if mode_str.eq_ignore_ascii_case("closed") {
+                    ShadowMode::Closed
+                } else {
+                    ShadowMode::Open
+                };
+                found.push((id, mode, parent, node.children.clone()));
+                // Don't descend: the template's content is captured above.
+                continue;
+            }
+            for &c in &node.children {
+                stack.push(c);
+            }
+        }
+        found
+    };
+    for (tmpl_id, mode, parent_id, child_ids) in found {
+        crate::js::dom_snapshot::register_shadow_host(parent_id as u32, mode);
+        for cid in &child_ids {
+            crate::js::dom_snapshot::push_shadow_child(parent_id as u32, *cid as u32);
+        }
+        doc.remove_node(tmpl_id);
+    }
+}
+
 /// Block (poll) the JS thread until the pending dialog is resolved or the
 /// timeout elapses. Returns `default` on timeout. Never blocks on a channel
 /// `recv()` — the CDP async layer writes the resolution via the [`DialogGate`].
@@ -1404,6 +1550,7 @@ fn js_thread_loop(
                     &url,
                     &user_agent,
                     &fetch_tx_arc,
+                    &render_doc_cell,
                 );
                 // Preserve localStorage across URL changes.
                 // TODO(#sop): Check same-origin before preserving localStorage.
@@ -1489,6 +1636,15 @@ fn js_thread_loop(
                         *render_doc_cell.borrow_mut() = Some(doc);
                         // Shadow roots are per-document; drop stale entries.
                         crate::js::dom_snapshot::clear_shadow_roots();
+                        // Attach declarative shadow roots
+                        // (`<template shadowrootmode>`) from the parsed
+                        // document before scripts run, so the page sees them.
+                        {
+                            let mut guard = render_doc_cell.borrow_mut();
+                            if let Some(doc) = guard.as_mut() {
+                                process_declarative_shadow_dom(doc);
+                            }
+                        }
                         run_navigation_scripts(
                             &mut ctx,
                             &job_queue,
@@ -3400,6 +3556,7 @@ fn create_context(
         page_url,
         user_agent,
         fetch_tx_arc,
+        render_doc_cell,
     );
 
     // --- atob / btoa (Base64) ---
@@ -5062,6 +5219,64 @@ fn create_render_element_object(
         .name(js_string!("get src"))
         .build();
 
+    // slot.assignedNodes() / assignedElements(): the light-DOM children
+    // distributed into this <slot>. Refreshes the compose view from the live
+    // tree, then reads the slot-assignment registry. Returns [] for non-slot
+    // nodes (a harmless no-op on ordinary elements).
+    let an_rd = render_doc.clone();
+    let assigned_nodes_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let assigned = refresh_slot_assignments(&an_rd, node_id);
+            let objs: Vec<JsValue> = assigned
+                .into_iter()
+                .map(|cid| create_render_element_object(ctx, an_rd.clone(), cid as usize))
+                .collect();
+            Ok(JsArray::from_iter(objs, ctx).into())
+        })
+    };
+    let ae_rd = render_doc.clone();
+    let assigned_elements_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let assigned = refresh_slot_assignments(&ae_rd, node_id);
+            let objs: Vec<JsValue> = assigned
+                .into_iter()
+                .filter(|cid| {
+                    ae_rd
+                        .borrow()
+                        .as_ref()
+                        .and_then(|d| d.tag_name(*cid as usize))
+                        .is_some()
+                })
+                .map(|cid| create_render_element_object(ctx, ae_rd.clone(), cid as usize))
+                .collect();
+            Ok(JsArray::from_iter(objs, ctx).into())
+        })
+    };
+    // node.assignedSlot: the <slot> this node was distributed into (open trees
+    // only; slots in closed roots yield null), or null.
+    let as_rd = render_doc.clone();
+    let assigned_slot_get_fn = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            {
+                let guard = as_rd.borrow();
+                if let Some(d) = guard.as_ref() {
+                    let _ = crate::js::dom_snapshot::DomSnapshot::from_render_document(d, "", "");
+                }
+            }
+            match crate::js::dom_snapshot::assigned_slot_of(node_id as u32) {
+                Some(slot_id) => Ok(create_render_element_object(
+                    ctx,
+                    as_rd.clone(),
+                    slot_id as usize,
+                )),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+    let assigned_slot_getter_fn = FunctionObjectBuilder::new(ctx.realm(), assigned_slot_get_fn)
+        .name(js_string!("get assignedSlot"))
+        .build();
+
     let obj = boa_engine::object::ObjectInitializer::new(ctx)
         .property(
             js_string!("tagName"),
@@ -5135,6 +5350,14 @@ fn create_render_element_object(
         .accessor(
             js_string!("src"),
             Some(src_getter_fn),
+            None,
+            Attribute::all(),
+        )
+        .function(assigned_nodes_fn, js_string!("assignedNodes"), 0)
+        .function(assigned_elements_fn, js_string!("assignedElements"), 0)
+        .accessor(
+            js_string!("assignedSlot"),
+            Some(assigned_slot_getter_fn),
             None,
             Attribute::all(),
         )
@@ -8451,8 +8674,7 @@ fn format_js_error(err: &boa_engine::JsError, context: &mut Context) -> String {
 
 // ---------------------------------------------------------------------------
 // `window` global object
-// ---------------------------------------------------------------------------
-
+#[allow(clippy::too_many_arguments)]
 /// Register `window` global object with browser property stubs.
 ///
 /// This makes `typeof window === 'object'` true and provides common
@@ -8465,6 +8687,7 @@ fn register_window_globals(
     page_url: &str,
     user_agent: &str,
     fetch_tx_arc: &Arc<RwLock<Option<std::sync::mpsc::Sender<FetchRequestMsg>>>>,
+    render_doc_cell: &Rc<RefCell<Option<RenderDocument>>>,
 ) {
     let _ = fetch_tx_arc; // suppress unused warning
     let url_owned = page_url.to_string();
@@ -9032,6 +9255,7 @@ fn register_window_globals(
     // object whose appendChild records child node ids for the compose pass
     // (see dom_snapshot::compose_shadow_trees). The JS `Element.prototype.
     // attachShadow` (WEB_COMPONENTS_BOOTSTRAP) delegates to this.
+    let rd_for_inner_html = render_doc_cell.clone();
     let attach_shadow_fn = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let host_id = args
@@ -9039,29 +9263,84 @@ fn register_window_globals(
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            crate::js::dom_snapshot::register_shadow_host(host_id);
+            // mode: 'closed' → Closed, anything else → Open (default).
+            let mode = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .map(|m| {
+                    if m.eq_ignore_ascii_case("closed") {
+                        crate::js::dom_snapshot::ShadowMode::Closed
+                    } else {
+                        crate::js::dom_snapshot::ShadowMode::Open
+                    }
+                })
+                .unwrap_or_default();
+            crate::js::dom_snapshot::register_shadow_host(host_id, mode);
             let host_val = args.first().cloned().unwrap_or(JsValue::undefined());
-            let append_host = host_id;
-            let append_fn = NativeFunction::from_closure(move |_this, args, ctx| {
+            // appendChild: record the child node id as a shadow child of host.
+            let append_child_host = host_id;
+            let append_child_fn = NativeFunction::from_closure(move |_this, args, ctx| {
                 let child = args.first().cloned().unwrap_or(JsValue::undefined());
                 let child_id = child
                     .as_object()
                     .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                     .and_then(|v| v.as_number().map(|n| n as u32));
                 if let Some(cid) = child_id {
-                    crate::js::dom_snapshot::push_shadow_child(append_host, cid);
+                    crate::js::dom_snapshot::push_shadow_child(append_child_host, cid);
                 }
                 Ok(child)
+            });
+            // ParentNode.append: append every (element) argument to the shadow
+            // root. Mirrors appendChild for the multi-arg case.
+            let append_host = host_id;
+            let append_fn = NativeFunction::from_closure(move |_this, args, ctx| {
+                for a in args.iter() {
+                    let cid = a
+                        .as_object()
+                        .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
+                        .and_then(|v| v.as_number().map(|n| n as u32));
+                    if let Some(cid) = cid {
+                        crate::js::dom_snapshot::push_shadow_child(append_host, cid);
+                    }
+                }
+                Ok(JsValue::undefined())
             });
             let root = boa_engine::object::ObjectInitializer::new(ctx)
                 .property(js_string!("nodeType"), JsValue::from(11), Attribute::all())
                 .property(js_string!("host"), host_val, Attribute::all())
-                .function(append_fn, js_string!("appendChild"), 1)
+                .function(append_child_fn, js_string!("appendChild"), 1)
+                .function(append_fn, js_string!("append"), 1)
                 .build();
             Ok(JsValue::from(root))
         })
     };
-    let _ = ctx.register_global_callable(js_string!("__oxi_attach_shadow"), 1, attach_shadow_fn);
+    // __oxi_shadow_set_inner_html(hostId, html): parse `html` and append the
+    // resulting nodes as shadow children of `hostId` (used by the
+    // `shadowRoot.innerHTML` setter installed in WEB_COMPONENTS_BOOTSTRAP).
+    let rd_ih = rd_for_inner_html.clone();
+    let shadow_set_inner_html_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let host_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let html = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            append_html_fragment_to_shadow(&rd_ih, host_id, &html);
+            Ok(JsValue::undefined())
+        })
+    };
+    let _ = ctx.register_global_callable(
+        js_string!("__oxi_shadow_set_inner_html"),
+        2,
+        shadow_set_inner_html_fn,
+    );
+    let _ = ctx.register_global_callable(js_string!("__oxi_attach_shadow"), 2, attach_shadow_fn);
     if let Err(e) = ctx.eval(Source::from_bytes(WEB_COMPONENTS_BOOTSTRAP)) {
         tracing::warn!(error = %e, "web components bootstrap failed");
     }
@@ -9545,10 +9824,21 @@ fn register_window_globals(
   if (globalThis.Element && !globalThis.Element.prototype.attachShadow) {
     globalThis.Element.prototype.attachShadow = function (init) {
       if (this.__shadowRoot) throw new Error("Failed to execute 'attachShadow': Shadow root already attached");
+      var mode = (init && init.mode) || 'open';
       var root = (typeof __oxi_attach_shadow === 'function')
-        ? __oxi_attach_shadow(this.__nodeId)
+        ? __oxi_attach_shadow(this.__nodeId, mode)
         : ((typeof document !== 'undefined' && document.createDocumentFragment) ? document.createDocumentFragment() : {});
-      root.host = this; root.mode = (init && init.mode) || 'open';
+      root.host = this; root.mode = mode;
+      // shadowRoot.innerHTML setter: parse the fragment and append the nodes
+      // as shadow children of this host (native __oxi_shadow_set_inner_html).
+      if (typeof __oxi_shadow_set_inner_html === 'function') {
+        var hostNode = this;
+        Object.defineProperty(root, 'innerHTML', {
+          configurable: true,
+          get: function () { return ''; },
+          set: function (html) { __oxi_shadow_set_inner_html(hostNode.__nodeId, String(html)); }
+        });
+      }
       this.__shadowRoot = root; return root;
     };
     Object.defineProperty(globalThis.Element.prototype, 'shadowRoot', {
@@ -11714,6 +12004,349 @@ mod tests {
         assert!(
             red > 500,
             "expected the shadow red box in the screenshot, got {red} red px"
+        );
+    }
+
+    /// `slot.assignedNodes()`/`assignedElements()` return the light-DOM
+    /// children distributed into the (default) `<slot>`; `node.assignedSlot`
+    /// resolves back to that slot for open shadow trees.
+    #[tokio::test]
+    async fn test_slot_assigned_nodes_and_assigned_slot() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class SlotHost extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var slot = document.createElement('slot');\
+                     s.appendChild(slot);\
+                     globalThis.__slotRef = slot;\
+                   }\
+                 }\
+                 customElements.define('slot-host', SlotHost);\
+                 var h = document.createElement('slot-host');\
+                 var kid = document.createElement('p');\
+                 kid.id = 'kid'; kid.textContent = 'hi';\
+                 h.appendChild(kid);\
+                 document.body.appendChild(h);\
+                 globalThis.__assignedLen = globalThis.__slotRef.assignedNodes().length;\
+                 globalThis.__assignedElLen = globalThis.__slotRef.assignedElements().length;\
+                 globalThis.__kidAssignedSlotIsNull = (kid.assignedSlot === null);\
+                 globalThis.__kidAssignedSlotId = kid.assignedSlot && kid.assignedSlot.tagName;\
+                 var alsoText = document.createElement('span'); alsoText.id = 'noSlot';\
+                 globalThis.__unrelated = (alsoText.assignedSlot === null);",
+            )
+            .await
+            .unwrap();
+        assert!(r.exception.is_none(), "slot setup threw: {:?}", r.exception);
+
+        let len = rt.evaluate("globalThis.__assignedLen").await.unwrap().value;
+        assert_eq!(
+            len,
+            Some(Value::Number(1.into())),
+            "default slot assigns 1 child"
+        );
+
+        let elen = rt
+            .evaluate("globalThis.__assignedElLen")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            elen,
+            Some(Value::Number(1.into())),
+            "assignedElements returns the <p> element"
+        );
+
+        // The slotted child's assignedSlot points back at the <slot> ('SLOT').
+        let is_null = rt
+            .evaluate("globalThis.__kidAssignedSlotIsNull")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            is_null,
+            Some(Value::Bool(false)),
+            "assignedSlot must not be null"
+        );
+        let slot_tag = rt
+            .evaluate("globalThis.__kidAssignedSlotId")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            slot_tag,
+            Some(Value::String("SLOT".into())),
+            "assignedSlot must be the slot element"
+        );
+
+        // A node never distributed into a slot has assignedSlot === null.
+        let unrelated = rt.evaluate("globalThis.__unrelated").await.unwrap().value;
+        assert_eq!(
+            unrelated,
+            Some(Value::Bool(true)),
+            "unrelated node.assignedSlot must be null"
+        );
+    }
+
+    /// `attachShadow({ mode: 'closed' })` hides the root from
+    /// `element.shadowRoot` and from `node.assignedSlot`, but the shadow
+    /// content still renders and internal `assignedNodes()` keeps working.
+    #[tokio::test]
+    async fn test_closed_shadow_hiding() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class ClosedHost extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'closed' });\
+                     var slot = document.createElement('slot');\
+                     s.appendChild(slot);\
+                     globalThis.__closedSlotRef = slot;\
+                   }\
+                 }\
+                 customElements.define('closed-host', ClosedHost);\
+                 var h = document.createElement('closed-host');\
+                 var kid = document.createElement('p'); kid.id = 'ckid';\
+                 h.appendChild(kid);\
+                 document.body.appendChild(h);\
+                 globalThis.__closedSRNull = (h.shadowRoot === null);\
+                 globalThis.__closedAssignedSlotNull = (kid.assignedSlot === null);\
+                 globalThis.__closedAssignedNodes = globalThis.__closedSlotRef.assignedNodes().length;",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "closed setup threw: {:?}",
+            r.exception
+        );
+
+        let sr_null = rt
+            .evaluate("globalThis.__closedSRNull")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            sr_null,
+            Some(Value::Bool(true)),
+            "closed shadow root must be hidden from element.shadowRoot"
+        );
+        let aslot_null = rt
+            .evaluate("globalThis.__closedAssignedSlotNull")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            aslot_null,
+            Some(Value::Bool(true)),
+            "assignedSlot must be null for a slot in a closed tree"
+        );
+        let nodes = rt
+            .evaluate("globalThis.__closedAssignedNodes")
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(
+            nodes,
+            Some(Value::Number(1.into())),
+            "internal assignedNodes() still works on closed roots"
+        );
+    }
+
+    /// `shadowRoot.innerHTML = html` parses the fragment and appends the nodes
+    /// as shadow children; the composed tree then contains them.
+    #[tokio::test]
+    async fn test_shadow_root_inner_html() {
+        use std::collections::HashSet;
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class IhHost extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     s.innerHTML = '<div id=\"inner\">hello</div><span id=\"tail\">x</span>';\
+                   }\
+                 }\
+                 customElements.define('ih-host', IhHost);\
+                 var h = document.createElement('ih-host');\
+                 document.body.appendChild(h);",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "innerHTML setup threw: {:?}",
+            r.exception
+        );
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let body = snap.body_id.expect("body exists");
+        let mut reachable = HashSet::new();
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(n) = snap.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        let inner = snap.id_index.get("inner").copied();
+        assert!(inner.is_some(), "innerHTML <div id=inner> should exist");
+        assert!(
+            reachable.contains(&inner.unwrap()),
+            "innerHTML shadow content must be composed into the flattened tree"
+        );
+        // The text inside the parsed <div> survives.
+        let has_hello = snap
+            .nodes
+            .values()
+            .any(|n| n.text_content.contains("hello"));
+        assert!(has_hello, "innerHTML text content must be present");
+    }
+
+    /// `shadowRoot.append(a, b, …)` records multiple shadow children.
+    #[tokio::test]
+    async fn test_shadow_root_append_multiple() {
+        use std::collections::HashSet;
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class AppendHost extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var a = document.createElement('p'); a.id = 'ap1';\
+                     var b = document.createElement('p'); b.id = 'ap2';\
+                     s.append(a, b);\
+                   }\
+                 }\
+                 customElements.define('append-host', AppendHost);\
+                 var h = document.createElement('append-host');\
+                 document.body.appendChild(h);",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "append setup threw: {:?}",
+            r.exception
+        );
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let body = snap.body_id.expect("body exists");
+        let mut reachable = HashSet::new();
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(n) = snap.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        for marker in ["ap1", "ap2"] {
+            let id = snap.id_index.get(marker).copied();
+            assert!(id.is_some(), "appended <{marker}> should exist");
+            assert!(
+                reachable.contains(&id.unwrap()),
+                "shadowRoot.append child <{marker}> must be composed into the tree"
+            );
+        }
+    }
+
+    /// Declarative shadow DOM: `<template shadowrootmode="open">` parsed at
+    /// navigate time attaches a shadow root to its host; the template's content
+    /// becomes the shadow tree and the host's light children distribute into
+    /// any `<slot>`.
+    #[tokio::test]
+    async fn test_declarative_shadow_dom() {
+        use std::collections::HashSet;
+        let mut rt = JsRuntime::new();
+        let html = concat!(
+            "<!DOCTYPE html><html><head></head><body>",
+            "<host-elem>",
+            "<p id=\"light\">slotted</p>",
+            "<template shadowrootmode=\"open\">",
+            "<div id=\"shadow\">shadow-content</div>",
+            "<slot></slot>",
+            "</template>",
+            "</host-elem>",
+            "</body></html>"
+        );
+        rt.set_document(html, None, (400, 300)).await.unwrap();
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let body = snap.body_id.expect("body exists");
+        let mut reachable = HashSet::new();
+        let mut stack = vec![body];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(n) = snap.nodes.get(&id) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        // The declarative shadow <div id=shadow> is composed into the tree.
+        let shadow_id = snap.id_index.get("shadow").copied();
+        assert!(
+            shadow_id.is_some(),
+            "declarative shadow <div id=shadow> should exist"
+        );
+        assert!(
+            reachable.contains(&shadow_id.unwrap()),
+            "declarative shadow content must be composed into the flattened tree"
+        );
+        // The host's light child is distributed into the default <slot>.
+        let light_id = snap.id_index.get("light").copied();
+        assert!(light_id.is_some(), "light child should exist");
+        assert!(
+            reachable.contains(&light_id.unwrap()),
+            "light child must be composed (distributed into the declarative <slot>)"
+        );
+        // The declarative shadow text rendered.
+        assert!(
+            snap.nodes
+                .values()
+                .any(|n| n.text_content.contains("shadow-content")),
+            "declarative shadow text content must be present"
+        );
+        // The <template> wrapper itself is detached (not in the flattened tree).
+        let template_reachable = reachable
+            .iter()
+            .any(|id| snap.nodes.get(id).is_some_and(|n| n.tag == "template"));
+        assert!(
+            !template_reachable,
+            "the declarative <template> wrapper must be detached after processing"
         );
     }
 

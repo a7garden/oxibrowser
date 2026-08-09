@@ -29,6 +29,28 @@ thread_local! {
     /// host node id → the render-doc node ids appended to its shadow root.
     pub(crate) static SHADOW_ROOTS: RefCell<HashMap<u32, ShadowHost>> =
         RefCell::new(HashMap::new());
+
+    /// `<slot>` node id → the light-DOM child node ids distributed into it,
+    /// in document order. Populated by [`distribute_slots`] during the compose
+    /// pass. Read by the JS `slot.assignedNodes()`/`assignedElements()` APIs.
+    /// Cleared at the start of every compose so it reflects the latest tree.
+    pub(crate) static SLOT_ASSIGNMENTS: RefCell<HashMap<u32, Vec<u32>>> =
+        RefCell::new(HashMap::new());
+
+    /// light-DOM child node id → the `<slot>` node id it was distributed into.
+    /// Only records assignments into **open** shadow trees (a slot in a closed
+    /// root yields `null` for `node.assignedSlot`, per the HTML spec). Drives
+    /// the JS `node.assignedSlot` getter.
+    pub(crate) static ASSIGNED_SLOT: RefCell<HashMap<u32, u32>> =
+        RefCell::new(HashMap::new());
+}
+
+/// `attachShadow({ mode })` — only `'open'` vs `'closed'` matter here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ShadowMode {
+    #[default]
+    Open,
+    Closed,
 }
 
 /// Recorded shadow root for one host element.
@@ -36,12 +58,22 @@ thread_local! {
 pub(crate) struct ShadowHost {
     /// Render-doc node ids appended to the shadow root, in append order.
     pub child_ids: Vec<u32>,
+    /// `open` (default) or `closed`. Closed roots still render (Chrome paints
+    /// closed shadow content) but are hidden from `element.shadowRoot` and
+    /// `node.assignedSlot`.
+    pub mode: ShadowMode,
 }
 
-/// Register (or reset) a shadow root for `host_id`.
-pub(crate) fn register_shadow_host(host_id: u32) {
+/// Register (or reset) a shadow root for `host_id` with the given `mode`.
+pub(crate) fn register_shadow_host(host_id: u32, mode: ShadowMode) {
     SHADOW_ROOTS.with(|m| {
-        m.borrow_mut().insert(host_id, ShadowHost::default());
+        m.borrow_mut().insert(
+            host_id,
+            ShadowHost {
+                mode,
+                ..Default::default()
+            },
+        );
     });
 }
 
@@ -57,6 +89,8 @@ pub(crate) fn push_shadow_child(host_id: u32, child_id: u32) {
 /// Drop all shadow roots (called on navigation / document rebuild).
 pub fn clear_shadow_roots() {
     SHADOW_ROOTS.with(|m| m.borrow_mut().clear());
+    SLOT_ASSIGNMENTS.with(|m| m.borrow_mut().clear());
+    ASSIGNED_SLOT.with(|m| m.borrow_mut().clear());
 }
 
 /// Whether any shadow root is currently registered.
@@ -66,6 +100,20 @@ pub fn clear_shadow_roots() {
 /// the no-shadow fast path rasterizes the live document directly.
 pub fn has_shadow_roots() -> bool {
     SHADOW_ROOTS.with(|m| !m.borrow().is_empty())
+}
+
+/// Light-DOM child ids distributed into `slot_id` during the last compose.
+/// Returns an empty vec when the slot has no assignment (callers should then
+/// fall back to the slot's own shadow-DOM children, per the slot algorithm).
+pub fn slot_assigned_nodes(slot_id: u32) -> Vec<u32> {
+    SLOT_ASSIGNMENTS.with(|m| m.borrow().get(&slot_id).cloned().unwrap_or_default())
+}
+
+/// The `<slot>` node id `child_id` was distributed into, if any (and only when
+/// that slot lives in an **open** shadow tree). `None` otherwise — the basis
+/// for `node.assignedSlot` returning `null`.
+pub fn assigned_slot_of(child_id: u32) -> Option<u32> {
+    ASSIGNED_SLOT.with(|m| m.borrow().get(&child_id).copied())
 }
 
 /// DOM 변경 사항
@@ -1302,17 +1350,23 @@ fn compose_shadow_trees(
     order: &mut Vec<u32>,
     doc: &oxibrowser_render::BaseDocument,
 ) {
+    // Reset the slot-assignment view: it is rebuilt from scratch below so the
+    // JS `assignedNodes()`/`assignedSlot` APIs reflect the current tree, not a
+    // prior snapshot.
+    SLOT_ASSIGNMENTS.with(|m| m.borrow_mut().clear());
+    ASSIGNED_SLOT.with(|m| m.borrow_mut().clear());
+
     // Hosts present in this snapshot that also have a shadow root.
-    let hosts: Vec<(u32, Vec<u32>)> = SHADOW_ROOTS.with(|m| {
+    let hosts: Vec<(u32, Vec<u32>, ShadowMode)> = SHADOW_ROOTS.with(|m| {
         let borrowed = m.borrow();
         borrowed
             .iter()
             .filter(|(h, _)| nodes.contains_key(*h))
-            .map(|(h, info)| (*h, info.child_ids.clone()))
+            .map(|(h, info)| (*h, info.child_ids.clone(), info.mode))
             .collect()
     });
 
-    for (host_id, shadow_child_ids) in hosts {
+    for (host_id, shadow_child_ids, mode) in hosts {
         if shadow_child_ids.is_empty() {
             continue;
         }
@@ -1348,7 +1402,7 @@ fn compose_shadow_trees(
         if let Some(h) = nodes.get_mut(&host_id) {
             h.children = collected_top.clone();
         }
-        distribute_slots(nodes, &collected_top, &light_children);
+        distribute_slots(nodes, &collected_top, &light_children, mode);
     }
 }
 
@@ -1359,7 +1413,12 @@ fn compose_shadow_trees(
 /// - A default `<slot>` (no name) receives light children with no `slot` attr
 ///   (only the first default slot is filled; later ones show fallback content).
 /// - A slot with no assignment falls back to its own shadow-DOM children.
-fn distribute_slots(nodes: &mut HashMap<u32, DomNode>, shadow_top: &[u32], light_children: &[u32]) {
+fn distribute_slots(
+    nodes: &mut HashMap<u32, DomNode>,
+    shadow_top: &[u32],
+    light_children: &[u32],
+    mode: ShadowMode,
+) {
     // Collect every <slot> node id in the shadow subtree (DFS).
     let mut slots: Vec<u32> = Vec::new();
     collect_slot_ids(nodes, shadow_top, &mut slots);
@@ -1398,6 +1457,23 @@ fn distribute_slots(nodes: &mut HashMap<u32, DomNode>, shadow_top: &[u32], light
         } else {
             named.remove(&slot_name).unwrap_or_default()
         };
+        // Record the slot→assignment view for the JS `assignedNodes()`/
+        // `assignedElements()` APIs (works regardless of mode — internal
+        // component access). `node.assignedSlot` is only exposed for slots in
+        // OPEN trees (closed roots hide it), per the HTML spec.
+        if !assigned.is_empty() {
+            SLOT_ASSIGNMENTS.with(|m| {
+                m.borrow_mut().insert(slot_id, assigned.clone());
+            });
+            if mode == ShadowMode::Open {
+                ASSIGNED_SLOT.with(|m| {
+                    let mut bm = m.borrow_mut();
+                    for &c in &assigned {
+                        bm.insert(c, slot_id);
+                    }
+                });
+            }
+        }
         let replacement: Vec<u32> = if assigned.is_empty() {
             fallback
         } else {
@@ -1663,7 +1739,7 @@ fn build_indices(nodes: &HashMap<u32, DomNode>, order: &[u32]) -> DomIndices {
 
 /// Parse an HTML fragment through the Blitz-backed RenderDocument and convert
 /// it to a [`DomSnapshot`]. Used by `set_inner_html` (and available for tests).
-fn parse_html_fragment_to_snapshot(html: &str) -> DomSnapshot {
+pub(crate) fn parse_html_fragment_to_snapshot(html: &str) -> DomSnapshot {
     let rd = oxibrowser_render::RenderDocument::from_html(
         html,
         None,
