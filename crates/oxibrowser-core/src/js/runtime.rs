@@ -2008,9 +2008,12 @@ fn normalize_fetch_body(value: &JsValue, ctx: &mut Context) -> Option<(Vec<u8>, 
 /// helper installed by `WEB_COMPONENTS_BOOTSTRAP`: if its tag is a registered
 /// custom element, apply the constructor's prototype + body. No-op otherwise.
 fn upgrade_custom_element(value: JsValue, ctx: &mut Context) -> JsValue {
-    if let Ok(helper) = ctx.global_object().get(js_string!("__oxi_upgrade_custom"), ctx)
+    if let Ok(helper) = ctx
+        .global_object()
+        .get(js_string!("__oxi_upgrade_custom"), ctx)
         && let Some(callable) = helper.as_callable()
-        && let Ok(upgraded) = callable.call(&JsValue::undefined(), std::slice::from_ref(&value), ctx)
+        && let Ok(upgraded) =
+            callable.call(&JsValue::undefined(), std::slice::from_ref(&value), ctx)
     {
         return upgraded;
     }
@@ -5370,10 +5373,10 @@ fn register_document_object(
                 guard.as_mut().map(|doc| doc.create_element(&tag))
             };
             if let Some(nid) = nid_opt {
-            return Ok(upgrade_custom_element(
-                create_render_element_object(ctx, rd_ce.clone(), nid),
-                ctx,
-            ));
+                return Ok(upgrade_custom_element(
+                    create_render_element_object(ctx, rd_ce.clone(), nid),
+                    ctx,
+                ));
             }
 
             // Generate a unique node ID using an atomic counter (avoids collisions in tight loops)
@@ -10800,11 +10803,13 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("custom-element eval produced no value");
         let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
-        assert_eq!(v["isInstance"], true, "createElement must upgrade to the ctor");
+        assert_eq!(
+            v["isInstance"], true,
+            "createElement must upgrade to the ctor"
+        );
         assert_eq!(v["hasGreet"], true, "prototype method must be present");
         assert_eq!(v["res"], "hi");
     }
-
 
     /// canvas 2D shim: getContext('2d') must exist and not throw, measureText
     /// returns a TextMetrics, toDataURL returns a data: URL, webgl context truthy.
