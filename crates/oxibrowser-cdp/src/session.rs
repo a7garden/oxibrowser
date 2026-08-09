@@ -51,6 +51,9 @@ pub struct CdpSession {
     dialog_gate: oxibrowser_core::js::DialogGate,
     /// Event receiver (drained by background task).
     event_receiver: Option<EventReceiver>,
+    /// Shutdown signal for the CoreEvent drainer task — sent when `run`
+    /// ends so the drainer exits promptly (not just on channel disconnect).
+    core_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl CdpSession {
@@ -80,10 +83,14 @@ impl CdpSession {
             s.set_event_sink(core_tx);
         }
         // Spawn a drainer that pumps CoreEvents into CDP events. Exits when the
-        // core sender drops (session/JS-thread teardown).
+        // core sender drops (session/JS-thread teardown) OR when the shutdown
+        // oneshot fires (run() ending) — whichever comes first — for a prompt,
+        // deterministic exit instead of relying solely on disconnect.
+        let (core_shutdown_tx, mut core_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let drain_events = event_sender.clone();
         tokio::spawn(async move {
             loop {
+                // Drain everything currently queued without blocking.
                 loop {
                     match core_rx.try_recv() {
                         Ok(ev) => crate::core_event::emit_core_event(&drain_events, ev),
@@ -91,7 +98,11 @@ impl CdpSession {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                // Wait for a new event tick or a shutdown signal.
+                tokio::select! {
+                    _ = &mut core_shutdown_rx => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
             }
         });
         // Clone the shared dialog gate so Page.handleJavaScriptDialog can
@@ -111,6 +122,7 @@ impl CdpSession {
             event_sender,
             fetch_registry: oxibrowser_core::network::intercept::shared_registry(),
             event_receiver: Some(event_receiver),
+            core_shutdown: Some(core_shutdown_tx),
         })
     }
     /// Run the message dispatch loop.
@@ -128,6 +140,10 @@ impl CdpSession {
             .event_receiver
             .take()
             .ok_or_else(|| anyhow::anyhow!("event_receiver must be present at session start"))?;
+
+        // Take the CoreEvent drainer shutdown signal so we can fire it when the
+        // dispatch loop ends (prompt, deterministic drainer exit).
+        let core_shutdown = self.core_shutdown.take();
 
         // Command responses flow back from spawned dispatch tasks through this
         // channel, keeping the select! free to poll ws input, events, and
@@ -205,6 +221,11 @@ impl CdpSession {
         // Drop our response sender; in-flight dispatch tasks finish and their
         // sends are dropped (channel receiver gone on return).
         drop(response_tx);
+        // Signal the CoreEvent drainer to exit promptly (it also exits on
+        // channel disconnect once the Session closes below).
+        if let Some(tx) = core_shutdown {
+            let _ = tx.send(());
+        }
 
         // Close the underlying Session so is_closed() returns true.
         self.session.write().await.close().await.ok();
