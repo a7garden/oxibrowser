@@ -2301,6 +2301,18 @@ fn upgrade_custom_element(value: JsValue, ctx: &mut Context) -> JsValue {
     value
 }
 
+/// Call a `globalThis.__oxi_*` helper (installed by a bootstrap) with `args`,
+/// swallowing any error. Used to fire custom-element lifecycle callbacks
+/// (`__oxi_fire_connected` / `__oxi_fire_disconnected` / `__oxi_fire_attr_changed`)
+/// from the native appendChild / remove / setAttribute hooks.
+fn call_global_helper(ctx: &mut Context, name: &str, args: &[JsValue]) {
+    if let Ok(helper) = ctx.global_object().get(JsString::from(name), ctx)
+        && let Some(callable) = helper.as_callable()
+    {
+        let _ = callable.call(&JsValue::undefined(), args, ctx);
+    }
+}
+
 fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         let mut borrowed = m.borrow_mut();
@@ -4631,7 +4643,6 @@ fn create_render_element_object(
     render_doc: Rc<RefCell<Option<RenderDocument>>>,
     node_id: usize,
 ) -> JsValue {
-    // Read the (immutable) tag up front; tag names never change.
     let tag = render_doc
         .borrow()
         .as_ref()
@@ -4642,7 +4653,7 @@ fn create_render_element_object(
     // ── attribute methods ──
     let rd_set = render_doc.clone();
     let set_attr_fn = unsafe {
-        NativeFunction::from_closure(move |_this, args, _ctx| {
+        NativeFunction::from_closure(move |this: &JsValue, args, ctx| {
             let name = args
                 .first()
                 .and_then(|v| v.as_string())
@@ -4653,9 +4664,28 @@ fn create_render_element_object(
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let old_val = rd_set
+                .borrow()
+                .as_ref()
+                .and_then(|d| d.node_attr(node_id, &name));
             if let Some(doc) = rd_set.borrow_mut().as_mut() {
                 doc.set_attribute(node_id, &name, &value);
             }
+            // Fire attributeChangedCallback for custom elements (gated by
+            // observedAttributes inside the helper).
+            let old_js = old_val
+                .map(|v| JsValue::from(JsString::from(v.as_str())))
+                .unwrap_or(JsValue::null());
+            call_global_helper(
+                ctx,
+                "__oxi_fire_attr_changed",
+                &[
+                    this.clone(),
+                    JsValue::from(JsString::from(name.as_str())),
+                    old_js,
+                    JsValue::from(JsString::from(value.as_str())),
+                ],
+            );
             Ok(JsValue::undefined())
         })
     };
@@ -4706,6 +4736,8 @@ fn create_render_element_object(
             if let (Some(cid), Some(doc)) = (child_id, rd_ac.borrow_mut().as_mut()) {
                 doc.append_child(node_id, cid);
                 notify_mutation_observers(ctx, "childList", node_id as u32);
+                // Fire connectedCallback for the appended (now-connected) node.
+                call_global_helper(ctx, "__oxi_fire_connected", std::slice::from_ref(&child));
             }
             Ok(child)
         })
@@ -4713,9 +4745,11 @@ fn create_render_element_object(
 
     let rd_rem = render_doc.clone();
     let remove_fn = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _ctx| {
+        NativeFunction::from_closure(move |this: &JsValue, _args, ctx| {
             if let Some(doc) = rd_rem.borrow_mut().as_mut() {
                 doc.remove_node(node_id);
+                // Fire disconnectedCallback for the removed (now-disconnected) node.
+                call_global_helper(ctx, "__oxi_fire_disconnected", std::slice::from_ref(this));
             }
             Ok(JsValue::undefined())
         })
@@ -9492,6 +9526,35 @@ fn register_window_globals(
     } catch (e) {}
     return node;
   };
+  // Lifecycle helpers called from the native appendChild / remove /
+  // setAttribute hooks: fire the custom-element callback if present. Best-
+  // effort subtree walk for connected/disconnected (render-doc elements lack
+  // a children accessor, so only the appended node fires in that case).
+  globalThis.__oxi_fire_connected = function (node) {
+    var stack = [node];
+    while (stack.length) {
+      var n = stack.pop(); if (!n) continue;
+      try { if (typeof n.connectedCallback === 'function') n.connectedCallback(); } catch (e) {}
+      var kids = n.children || n.childNodes; if (kids) for (var i = 0; i < kids.length; i++) stack.push(kids[i]);
+    }
+  };
+  globalThis.__oxi_fire_disconnected = function (node) {
+    var stack = [node];
+    while (stack.length) {
+      var n = stack.pop(); if (!n) continue;
+      try { if (typeof n.disconnectedCallback === 'function') n.disconnectedCallback(); } catch (e) {}
+      var kids = n.children || n.childNodes; if (kids) for (var i = 0; i < kids.length; i++) stack.push(kids[i]);
+    }
+  };
+  globalThis.__oxi_fire_attr_changed = function (node, name, oldVal, newVal) {
+    try {
+      if (node && typeof node.attributeChangedCallback === 'function') {
+        var Ctor = node.constructor;
+        var obs = (Ctor && Ctor.observedAttributes) || null;
+        if (!obs || obs.indexOf(name) >= 0) node.attributeChangedCallback(name, oldVal, newVal);
+      }
+    } catch (e) {}
+  };
   // window is rebuilt every navigation → sync unconditionally.
   if (globalThis.window) {
     var w = globalThis.window;
@@ -11262,6 +11325,55 @@ mod tests {
         );
         assert_eq!(v["hasGreet"], true, "prototype method must be present");
         assert_eq!(v["res"], "hi");
+    }
+
+    /// connectedCallback / disconnectedCallback / attributeChangedCallback fire
+    /// on the render-doc appendChild / remove / setAttribute hooks.
+    #[tokio::test]
+    async fn test_custom_element_lifecycle_callbacks() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "var log = [];\
+                 class XLc extends HTMLElement {\
+                   connectedCallback() { log.push('connected'); }\
+                   disconnectedCallback() { log.push('disconnected'); }\
+                   static get observedAttributes() { return ['data-x']; }\
+                   attributeChangedCallback(n, o, v) { log.push('attr:' + n + '=' + v); }\
+                 }\
+                 customElements.define('x-lc', XLc);\
+                 var el = document.createElement('x-lc');\
+                 document.body.appendChild(el);\
+                 el.setAttribute('data-x', '1');\
+                 el.remove();\
+                 JSON.stringify(log)",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("lifecycle eval produced no value");
+        assert!(
+            s.contains("connected"),
+            "connectedCallback should fire: {s}"
+        );
+        assert!(
+            s.contains("attr:data-x=1"),
+            "attributeChangedCallback should fire: {s}"
+        );
+        assert!(
+            s.contains("disconnected"),
+            "disconnectedCallback should fire: {s}"
+        );
     }
 
     /// canvas 2D shim: getContext('2d') must exist and not throw, measureText

@@ -9,6 +9,7 @@
 
 use crate::domains::{DispatchContext, DomainResult};
 use crate::protocol::CdpError;
+use oxibrowser_core::css::{LayoutEngine, LayoutRect};
 use oxibrowser_core::js::dom_snapshot::DomSnapshot;
 use serde_json::{Value, json};
 
@@ -30,6 +31,9 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "focus" => focus(params, ctx).await,
         "scrollIntoViewIfNeeded" => scroll_into_view_if_needed(params, ctx).await,
         "setFileInputFiles" => set_file_input_files(params, ctx).await,
+        "getBoxModel" => get_box_model(params, ctx).await,
+        "getContentQuads" => get_content_quads(params, ctx).await,
+        "getNodeForLocation" => get_node_for_location(params, ctx).await,
         _ => Err(CdpError {
             code: -32601,
             message: format!("Method not found: DOM.{method}"),
@@ -517,6 +521,106 @@ fn build_cdp_node(snapshot: &DomSnapshot, node_id: u32, depth: usize) -> Value {
         "children": children,
         "attributes": attributes,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Layout geometry (LayoutEngine-backed)
+// ---------------------------------------------------------------------------
+
+/// Flatten a [`LayoutRect`] into a CDP quad: 4 (x, y) points clockwise from
+/// the top-left. CDP represents a quad as `[x1,y1, x2,y2, x3,y3, x4,y4]`.
+fn quad_from_rect(r: &LayoutRect) -> Vec<f64> {
+    let (x, y, w, h) = (r.x, r.y, r.width, r.height);
+    vec![x, y, x + w, y, x + w, y + h, x, y + h]
+}
+
+/// DOM.getBoxModel — returns the box model for a node.
+///
+/// LayoutEngine produces a single bounding rect (no separate
+/// content/padding/border/margin boxes), so all four quads share it.
+async fn get_box_model(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let mut guard = ctx.session.write().await;
+    let snap = guard.dom_snapshot().await?;
+    let Some(s) = snap else {
+        return Err(CdpError {
+            code: -32000,
+            message: "Could not find document root".into(),
+        });
+    };
+    let rect = LayoutEngine::compute_rect(&s, node_id);
+    let quad = quad_from_rect(&rect);
+    Ok(Some(json!({
+        "model": {
+            "content": quad.clone(),
+            "padding": quad.clone(),
+            "border": quad.clone(),
+            "margin": quad,
+            "width": rect.width,
+            "height": rect.height,
+        }
+    })))
+}
+
+/// DOM.getContentQuads — returns the content quads for a node.
+async fn get_content_quads(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let node_id = params.get("nodeId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let mut guard = ctx.session.write().await;
+    let snap = guard.dom_snapshot().await?;
+    let Some(s) = snap else {
+        return Ok(Some(json!({ "quads": [] })));
+    };
+    let rect = LayoutEngine::compute_rect(&s, node_id);
+    Ok(Some(json!({ "quads": [quad_from_rect(&rect)] })))
+}
+
+/// DOM.getNodeForLocation — returns the node at the given viewport coordinate.
+///
+/// Picks the smallest-area element whose rect contains the point (the most
+/// specific / topmost-painted element under the cursor).
+async fn get_node_for_location(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+    let mut guard = ctx.session.write().await;
+    let snap = guard.dom_snapshot().await?;
+    let Some(s) = snap else {
+        return Err(CdpError {
+            code: -32000,
+            message: "Could not find document root".into(),
+        });
+    };
+    let mut best: Option<(f64, u32, String)> = None;
+    for (&id, node) in &s.nodes {
+        // Only elements are hit-testable.
+        if node.node_type != 1 {
+            continue;
+        }
+        let rect = LayoutEngine::compute_rect(&s, id);
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            continue;
+        }
+        if x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height {
+            let area = rect.width * rect.height;
+            if best.as_ref().is_none_or(|(a, _, _)| area < *a) {
+                best = Some((area, id, node.tag.clone()));
+            }
+        }
+    }
+    match best {
+        Some((_, id, tag)) => Ok(Some(json!({
+            "nodeId": id,
+            "backendNodeId": id,
+            "frameId": "main",
+            "nodeName": tag.to_uppercase(),
+        }))),
+        None => Err(CdpError {
+            code: -32000,
+            message: format!("No node found at given location ({x}, {y})"),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
