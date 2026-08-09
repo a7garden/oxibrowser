@@ -37,6 +37,16 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "printToPDF" => print_to_pdf(params, ctx).await,
         "getLifecycleEvents" => Ok(Some(json!({ "events": [] }))),
         "setLifecycleEventsEnabled" => set_lifecycle_events_enabled(params, ctx),
+        // Dialog handling: alert/confirm/prompt default to non-blocking
+        // (no-throw), so acknowledging the dialog is a no-op ack.
+        "handleJavaScriptDialog" => Ok(Some(json!({}))),
+        // Common Playwright/Puppeteer Page methods — acknowledged as no-ops so
+        // they don't 404 the client. Real implementations land per phase.
+        "addScriptToEvaluateOnNewDocument" => Ok(Some(json!({ "identifier": "0" }))),
+        "removeScriptToEvaluateOnNewDocument" => Ok(Some(json!({}))),
+        "bringToFront" => Ok(Some(json!({}))),
+        "getNavigationHistory" => Ok(Some(json!({ "currentIndex": 0, "entries": [] }))),
+        "setBypassCSP" => Ok(Some(json!({}))),
         _ => Err(CdpError {
             code: -32601,
             message: format!("Page.{} not implemented", method),

@@ -8840,6 +8840,21 @@ fn register_window_globals(
     if let Err(e) = ctx.eval(Source::from_bytes(CANVAS_BOOTSTRAP)) {
         tracing::warn!(error = %e, "canvas bootstrap failed");
     }
+    const DIALOG_BOOTSTRAP: &str = r#"
+(function () {
+  function install(g) {
+    if (typeof g.alert === 'undefined') g.alert = function () {};
+    if (typeof g.confirm === 'undefined') g.confirm = function () { return false; };
+    if (typeof g.prompt === 'undefined') g.prompt = function () { return null; };
+    if (typeof g.print === 'undefined') g.print = function () {};
+  }
+  install(globalThis);
+  if (globalThis.window) install(globalThis.window);
+})();
+"#;
+    if let Err(e) = ctx.eval(Source::from_bytes(DIALOG_BOOTSTRAP)) {
+        tracing::warn!(error = %e, "dialog bootstrap failed");
+    }
 
     const OBSERVER_BOOTSTRAP: &str = r#"
 (function () {
@@ -10845,6 +10860,32 @@ mod tests {
         assert_eq!(v["dataUrl"], "data:", "toDataURL should return a data: URL");
         assert_eq!(v["gl"], true, "getContext('webgl') should be truthy");
         assert_eq!(v["img"], true, "getImageData should exist");
+    }
+
+    /// window.alert/confirm/prompt must exist and not throw; defaults are
+    /// no-op / false / null (no event-driven dialog plumbing yet).
+    #[tokio::test]
+    async fn test_dialog_functions_no_throw() {
+        let mut rt = JsRuntime::new();
+        let r = rt
+            .evaluate(
+                "var c = confirm('q'); var p = prompt('q'); alert('a');\
+                 JSON.stringify({a: typeof alert, c: typeof confirm, p: typeof prompt,\
+                 cv: c, pv: p === null})",
+            )
+            .await
+            .unwrap();
+        let s = r
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .expect("dialog eval produced no value");
+        let v: serde_json::Value = serde_json::from_str(s).expect("valid json");
+        assert_eq!(v["a"], "function");
+        assert_eq!(v["c"], "function");
+        assert_eq!(v["p"], "function");
+        assert_eq!(v["cv"], false, "confirm defaults to false");
+        assert_eq!(v["pv"], true, "prompt defaults to null");
     }
 
     /// Background fetch handler for tests: spawn-per-request, each responding

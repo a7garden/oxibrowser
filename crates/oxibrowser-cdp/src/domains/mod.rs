@@ -4,12 +4,12 @@
 //! The `dispatch` function is async and receives a `DispatchContext` that
 //! includes the browser `Session` for page interaction AND the `EventSender`
 //! so domain handlers can emit CDP events.
-
 pub mod browser;
 pub mod dom;
 pub mod emulation;
 pub mod fetch;
 pub mod input;
+pub mod log;
 pub mod network;
 pub mod oxi;
 pub mod page;
@@ -54,7 +54,6 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
     }
 
     let (domain, method_name) = (parts[0], parts[1]);
-
     match domain {
         "Browser" => browser::handle(method_name, params),
         "DOM" => dom::handle(method_name, params, ctx).await,
@@ -62,7 +61,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "Fetch" => fetch::handle(method_name, params, ctx).await,
         "Network" => network::handle(method_name, params, ctx).await,
         "OXI" => oxi::handle(method_name, params, ctx).await,
-        "Input" => input::handle(method_name, params, ctx).await,
+        "Log" => log::handle(method_name, params, ctx).await,
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
         "Target" => target::handle(method_name, params, ctx),
