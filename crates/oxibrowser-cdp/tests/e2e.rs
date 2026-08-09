@@ -5,6 +5,7 @@
 //!
 //! Pure Rust — uses tokio-tungstenite as the CDP client. No Node.js/Puppeteer.
 
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use oxibrowser_cdp::CdpServer;
 use oxibrowser_core::Browser;
@@ -192,6 +193,49 @@ async fn send_command(
             Ok(Some(Ok(_))) => continue,
             Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
             Ok(None) => panic!("WebSocket stream ended before response"),
+            Err(_) => panic!("timeout waiting for response to command {id}"),
+        }
+    }
+}
+
+/// Read the response for a previously-sent command by id (it may already be
+/// buffered in the sidecar, or arrive on the stream). Used when a command was
+/// sent without awaiting (e.g. a paused navigation that completes later).
+async fn read_command_response(
+    ws: &mut futures::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    id: u64,
+    timeout_ms: u64,
+) -> Value {
+    // Check the sidecar buffer first (concurrent dispatch may have delivered it).
+    let buffered = SIDECAR_EVENTS.with(|b| {
+        let mut buf = b.borrow_mut();
+        buf.iter()
+            .position(|v| v.get("id").and_then(|x| x.as_u64()) == Some(id))
+            .map(|pos| buf.remove(pos))
+    });
+    if let Some(v) = buffered {
+        return v;
+    }
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timeout waiting for response to command {id}");
+        }
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
+                let response: Value = serde_json::from_str(&text).unwrap();
+                if response.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                    return response;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
+            Ok(None) => panic!("WebSocket stream ended"),
             Err(_) => panic!("timeout waiting for response to command {id}"),
         }
     }
@@ -949,37 +993,56 @@ async fn test_fetch_fulfill_request() {
     let (server, addr) = start_cdp_server().await;
     let (mut sink, mut ws) = connect_ws(addr).await;
 
-    // Enable Fetch domain with wildcard pattern
+    // Enable Fetch domain with a wildcard pattern (matches any http URL).
     let resp = send_command(
         &mut sink,
         &mut ws,
         1,
         "Fetch.enable",
-        Some(json!({
-            "patterns": [{"urlPattern": "http://*"}]
-        })),
+        Some(json!({ "patterns": [{"urlPattern": "http://*"}] })),
     )
     .await;
     assert_eq!(resp["id"], 1);
 
-    // Navigate to example.com — this will trigger Fetch.requestPaused
-    // because our pattern matches "http://example.com/"
+    // Send Page.navigate WITHOUT awaiting — the server pauses the request and
+    // emits Fetch.requestPaused; we must answer before it can complete.
+    let nav_msg =
+        json!({ "id": 2, "method": "Page.navigate", "params": { "url": "http://example.com/" } });
+    sink.send(tungstenite::Message::Text(nav_msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Collect the Fetch.requestPaused event and extract its requestId.
+    let paused = collect_events(&mut ws, "Fetch.requestPaused", 3000)
+        .await
+        .pop()
+        .expect("expected a Fetch.requestPaused event");
+    let intercept_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("requestPaused should carry a requestId")
+        .to_string();
+
+    // Fulfill the paused request with a mock HTML body.
     let resp = send_command(
         &mut sink,
         &mut ws,
-        2,
-        "Page.navigate",
+        3,
+        "Fetch.fulfillRequest",
         Some(json!({
-            "url": "http://example.com/"
+            "requestId": intercept_id,
+            "responseCode": 200,
+            "responseHeaders": [{"name": "content-type", "value": "text/html"}],
+            "body": base64::engine::general_purpose::STANDARD.encode("<html><body>mocked</body></html>")
         })),
     )
     .await;
-    // Navigation response (may succeed or fail depending on server)
-    assert_eq!(resp["id"], 2);
-    // Note: example.com may not be running, so navigation might fail.
-    // That's fine — we're testing that Fetch.fulfillRequest handles
-    // the case where a requestId exists in the registry.
-    let _ = send_command(&mut sink, &mut ws, 3, "Fetch.disable", None).await;
+    assert_eq!(resp["id"], 3);
+
+    // The navigate (id 2) should now complete (fulfilled → data-URL navigation).
+    let nav_resp = read_command_response(&mut ws, 2, 5000).await;
+    assert_eq!(nav_resp["id"], 2);
+
+    let _ = send_command(&mut sink, &mut ws, 4, "Fetch.disable", None).await;
     server.shutdown();
 }
 

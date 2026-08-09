@@ -124,9 +124,45 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
         }),
     );
 
+    // 1b. Fetch interception: if enabled and the URL matches a pattern, emit
+    // `Fetch.requestPaused` and await the client's decision (continue/fail/fulfill).
+    let mut effective_url = url.to_string();
+    let patterns = ctx.events.get_fetch_patterns();
+    if !patterns.is_empty() && crate::domains::fetch::matches_patterns(url, &patterns) {
+        use base64::Engine;
+        use oxibrowser_core::network::InterceptAction;
+        let intercept_id = format!("INT-{}", uuid::Uuid::new_v4().as_simple());
+        let decision = crate::domains::fetch::emit_request_paused(
+            &intercept_id,
+            url,
+            "GET",
+            &[],
+            "Document",
+            &ctx.fetch_registry,
+            &ctx.events,
+        )
+        .await;
+        match decision {
+            Ok(InterceptAction::Fail { error_reason }) => {
+                return Ok(Some(json!({
+                    "frameId": "main",
+                    "loaderId": loader_id,
+                    "errorText": error_reason
+                })));
+            }
+            Ok(InterceptAction::Continue { url: Some(u), .. }) => effective_url = u,
+            Ok(InterceptAction::Fulfill { body, .. }) => {
+                // Mock the response: navigate to a data: URL carrying the body.
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&body);
+                effective_url = format!("data:text/html;charset=utf-8;base64,{b64}");
+            }
+            _ => {} // Continue unmodified, or no decision — proceed normally.
+        }
+    }
+
     // 2. Execute navigation
     let mut guard = ctx.session.write().await;
-    match guard.navigate(url).await {
+    match guard.navigate(&effective_url).await {
         Ok(()) => {
             // Capture timestamp after navigation completes
             let timestamp = EventSender::timestamp_ms();
