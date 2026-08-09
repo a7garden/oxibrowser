@@ -121,6 +121,10 @@ impl RenderDocument {
     pub fn document(&self) -> &BaseDocument {
         &self.doc
     }
+    /// The viewport this document was constructed (and laid out) against.
+    pub fn viewport(&self) -> Viewport {
+        self.viewport
+    }
 
     /// Borrow the inner [`BaseDocument`] mutably. Callers are responsible for
     /// re-running [`BaseDocument::resolve`] after mutation before capturing.

@@ -59,6 +59,15 @@ pub fn clear_shadow_roots() {
     SHADOW_ROOTS.with(|m| m.borrow_mut().clear());
 }
 
+/// Whether any shadow root is currently registered.
+///
+/// Used by the screenshot path to decide whether the compose-then-feed
+/// round-trip (serialize the flattened tree → reparse → rasterize) is needed;
+/// the no-shadow fast path rasterizes the live document directly.
+pub fn has_shadow_roots() -> bool {
+    SHADOW_ROOTS.with(|m| !m.borrow().is_empty())
+}
+
 /// DOM 변경 사항
 ///
 /// Records mutations applied to the DOM so they can be replayed,
@@ -305,6 +314,43 @@ impl DomSnapshot {
             tag_index,
             style_cache: Mutex::new(None),
         }
+    }
+
+    /// Serialize the composed (shadow-flattened) tree to an HTML document.
+    ///
+    /// Round-trips structure, text, and the element attributes present in the
+    /// snapshot (`class`, `id`, inline `style=`, etc.). Used to feed the
+    /// flattened tree back into a fresh [`RenderDocument`] for screenshot
+    /// rasterization: Blitz's flat `BaseDocument` has no shadow/host/slot
+    /// concept, so the live document's shadow content is invisible to
+    /// `capture_png`. Reparsing this serialized tree renders it.
+    ///
+    /// **Lossy by design** (accepted when option 2 was chosen over forking
+    /// Blitz): CSSOM inline styles set via `element.style.x = …`, event
+    /// listeners, and computed styles from stylesheets are not in the snapshot
+    /// and are dropped. Structural + `style=`-attribute fidelity is preserved.
+    pub fn to_html(&self) -> String {
+        let mut out = String::new();
+        out.push_str("<!DOCTYPE html>\n");
+        // `root_id` is the Document node (type 9) when Blitz synthesized one,
+        // else `<html>` itself. Serialize the document's element children.
+        let is_doc = self
+            .nodes
+            .get(&self.root_id)
+            .map(|n| n.node_type == 9)
+            .unwrap_or(false);
+        let top: Vec<u32> = if is_doc {
+            self.nodes
+                .get(&self.root_id)
+                .map(|n| n.children.clone())
+                .unwrap_or_default()
+        } else {
+            vec![self.root_id]
+        };
+        for id in top {
+            serialize_node(&self.nodes, id, &mut out);
+        }
+        out
     }
 
     /// Bump the snapshot revision, invalidating the style cache AND marking
@@ -1424,6 +1470,128 @@ fn set_element_text_recursive(nodes: &mut HashMap<u32, DomNode>, id: u32) -> Str
         n.text_content = text.clone();
     }
     text
+}
+
+// ── HTML serialization (for compose-then-feed screenshot rasterization) ────
+
+/// Serialize a single node (and its subtree) into `out` as HTML.
+fn serialize_node(nodes: &HashMap<u32, DomNode>, id: u32, out: &mut String) {
+    let Some(node) = nodes.get(&id) else {
+        return;
+    };
+    match node.node_type {
+        // Text node: emit its own content, entity-escaped.
+        3 => escape_text(&node.text_content, out),
+        // Comments are irrelevant to rasterization; skip.
+        8 => {}
+        // Document node (shouldn't normally be hit here): recurse children.
+        9 => {
+            for &child in &node.children {
+                serialize_node(nodes, child, out);
+            }
+        }
+        // Element (node_type == 1) and any other element-like node.
+        _ => {
+            let tag = node.tag.as_str();
+            if tag.is_empty() {
+                // Unknown element kind; still recurse so children survive.
+                for &child in &node.children {
+                    serialize_node(nodes, child, out);
+                }
+                return;
+            }
+            out.push('<');
+            out.push_str(tag);
+            for (name, value) in &node.attributes {
+                out.push(' ');
+                out.push_str(name);
+                out.push_str("=\"");
+                escape_attr(value, out);
+                out.push('"');
+            }
+            out.push('>');
+            if is_void_element(tag) {
+                return;
+            }
+            if is_raw_text_element(tag) {
+                // script/style: descendant text is raw — no escaping.
+                collect_raw_text(nodes, id, out);
+            } else {
+                for &child in &node.children {
+                    serialize_node(nodes, child, out);
+                }
+            }
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        }
+    }
+}
+
+/// Concatenate all descendant text-node content of `id` (raw, unescaped) —
+/// used for `<script>`/`<style>` bodies.
+fn collect_raw_text(nodes: &HashMap<u32, DomNode>, id: u32, out: &mut String) {
+    let Some(node) = nodes.get(&id) else {
+        return;
+    };
+    if node.node_type == 3 {
+        out.push_str(&node.text_content);
+        return;
+    }
+    for &child in &node.children {
+        collect_raw_text(nodes, child, out);
+    }
+}
+
+/// HTML void elements — no closing tag, no children.
+fn is_void_element(tag: &str) -> bool {
+    matches!(
+        tag,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// Raw-text elements whose content must not be entity-escaped on reparse.
+fn is_raw_text_element(tag: &str) -> bool {
+    matches!(tag, "script" | "style")
+}
+
+/// Escape text content for HTML: `&`, `<`, `>`.
+fn escape_text(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+/// Escape an attribute value: `&`, `"`, plus newlines (kept literal would
+/// survive but normalizing avoids parser quirks).
+fn escape_attr(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("&#10;"),
+            _ => out.push(c),
+        }
+    }
 }
 
 /// Build id/class/tag indices from `nodes` in the order given by `order`

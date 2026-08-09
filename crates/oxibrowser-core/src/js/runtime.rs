@@ -601,6 +601,32 @@ fn now_ms() -> f64 {
         * 1000.0
 }
 
+/// Capture a PNG of the live `RenderDocument`, composing shadow trees first
+/// when any are present.
+///
+/// Blitz's `BaseDocument` is a single flat tree with no shadow/host/slot
+/// concept, so shadow + slotted content is invisible to a direct
+/// [`RenderDocument::capture_png`]. When shadow roots are registered, this
+/// builds the flattened [`DomSnapshot`] (whose compose pass distributes light
+/// children into `<slot>` positions), serializes it to HTML, reparses into a
+/// throwaway `RenderDocument` at the same viewport, and rasterizes that. The
+/// no-shadow fast path rasterizes the live document directly (no round-trip,
+/// no lossiness).
+fn capture_png_composed(
+    doc: &mut RenderDocument,
+    opts: &CaptureOpts,
+) -> std::result::Result<Vec<u8>, RenderError> {
+    if !crate::js::dom_snapshot::has_shadow_roots() {
+        return doc.capture_png(opts);
+    }
+    let snap = crate::js::dom_snapshot::DomSnapshot::from_render_document(doc, "", "");
+    let html = snap.to_html();
+    let vp = opts.viewport.unwrap_or_else(|| doc.viewport());
+    let mut fresh = RenderDocument::from_html(&html, None, vp)
+        .map_err(|e| RenderError::Render(format!("shadow compose reparse failed: {e}")))?;
+    fresh.capture_png(opts)
+}
+
 /// Block (poll) the JS thread until the pending dialog is resolved or the
 /// timeout elapses. Returns `default` on timeout. Never blocks on a channel
 /// `recv()` — the CDP async layer writes the resolution via the [`DialogGate`].
@@ -1484,7 +1510,7 @@ fn js_thread_loop(
             JsCommand::Capture { opts, response_tx } => {
                 let mut guard = render_doc_cell.borrow_mut();
                 let result = match guard.as_mut() {
-                    Some(doc) => doc.capture_png(&opts),
+                    Some(doc) => capture_png_composed(doc, &opts),
                     None => Err(RenderError::Render("no render document set".into())),
                 };
                 drop(guard);
@@ -11572,6 +11598,122 @@ mod tests {
         assert!(
             !orphan_reachable,
             "child with no matching slot must be dropped from the flattened tree"
+        );
+    }
+
+    /// `DomSnapshot::to_html` serializes the composed (shadow-flattened) tree:
+    /// shadow content and slotted light children appear; `<slot>` elements are
+    /// replaced by their assignments. This is exactly what the
+    /// compose-then-feed screenshot path re-parses into Blitz.
+    #[tokio::test]
+    async fn test_to_html_serializes_composed_shadow_tree() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (400, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class MyHost extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var wrap = document.createElement('div');\
+                     wrap.id = 'shadow-wrap';\
+                     wrap.textContent = 'SHADOW-MARKER';\
+                     s.appendChild(wrap);\
+                     var slot = document.createElement('slot');\
+                     s.appendChild(slot);\
+                   }\
+                 }\
+                 customElements.define('my-host', MyHost);\
+                 var host = document.createElement('my-host');\
+                 var light = document.createElement('span');\
+                 light.id = 'light'; light.textContent = 'LIGHT-MARKER';\
+                 host.appendChild(light);\
+                 document.body.appendChild(host);",
+            )
+            .await
+            .unwrap();
+        assert!(r.exception.is_none(), "setup threw: {:?}", r.exception);
+
+        let snap = rt.dom_snapshot("about:blank").await.unwrap();
+        let html = snap.to_html();
+
+        // Shadow content is composed into the flattened tree.
+        assert!(
+            html.contains("SHADOW-MARKER"),
+            "shadow content must survive to_html; got: {html}"
+        );
+        // The default <slot> is replaced by its assigned light child.
+        assert!(
+            html.contains("LIGHT-MARKER"),
+            "slotted light child must survive to_html; got: {html}"
+        );
+        // Slots themselves are gone (replaced, not emitted).
+        assert!(
+            !html.contains("<slot"),
+            "<slot> must be replaced by its assignment in to_html; got: {html}"
+        );
+    }
+
+    /// Screenshot rasterization reflects Shadow DOM content: a colored box
+    /// appended to a shadow root is invisible to Blitz's flat tree, but the
+    /// compose-then-feed path (flatten → serialize → reparse → rasterize)
+    /// paints it.
+    #[tokio::test]
+    async fn test_screenshot_renders_shadow_content() {
+        let mut rt = JsRuntime::new();
+        rt.set_document(
+            "<!DOCTYPE html><html><head></head><body></body></html>",
+            None,
+            (300, 300),
+        )
+        .await
+        .unwrap();
+        let r = rt
+            .evaluate(
+                "class RedShadow extends HTMLElement {\
+                   connectedCallback() {\
+                     var s = this.attachShadow({ mode: 'open' });\
+                     var box = document.createElement('div');\
+                     box.setAttribute('style', 'width:200px;height:200px;background-color:#ff0000');\
+                     s.appendChild(box);\
+                   }\
+                 }\
+                 customElements.define('red-shadow', RedShadow);\
+                 var el = document.createElement('red-shadow');\
+                 document.body.appendChild(el);",
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.exception.is_none(),
+            "shadow setup threw: {:?}",
+            r.exception
+        );
+
+        let png = rt
+            .capture_png(CaptureOpts {
+                full_page: true,
+                ..Default::default()
+            })
+            .await
+            .expect("capture_png should render the composed shadow tree");
+
+        // Decode and count red pixels — the shadow box. Only present if the
+        // compose-then-feed path flattened the shadow subtree before raster.
+        let red = image::load_from_memory(&png)
+            .expect("decode captured png")
+            .to_rgba8()
+            .pixels()
+            .filter(|p| p[0] > 200 && p[1] < 80 && p[2] < 80)
+            .count();
+        assert!(
+            red > 500,
+            "expected the shadow red box in the screenshot, got {red} red px"
         );
     }
 
