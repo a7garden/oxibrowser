@@ -63,35 +63,38 @@ impl HttpClient {
         response: Response,
         max_bytes: usize,
     ) -> Result<(Vec<u8>, bool)> {
-        // NOTE: wreq 6.0.0-rc does not expose chunk(), bytes_stream(), or
-        // into_body(). The full body is read via bytes().await before
-        // truncation. Content-Length pre-check provides early warning for
-        // well-behaved servers but does NOT prevent OOM from malicious
-        // responses that omit or falsify Content-Length.
-        // TODO: migrate to streaming when wreq exposes bytes_stream() or
-        // when reqwest is used instead of wreq.
-        if let Some(len) = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<usize>().ok())
-            && len > max_bytes
-        {
+        // Stream the body chunk-by-chunk, stopping as soon as `max_bytes` is
+        // reached. This avoids buffering an oversized body in memory even when
+        // the server omits or falsifies `Content-Length` (true incremental
+        // back-pressure, not a post-hoc truncate). Returns the bytes read plus
+        // a `truncated` flag.
+        use futures::StreamExt;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| CoreError::NetworkError(e.to_string()))?;
+            let remaining = max_bytes.saturating_sub(buf.len());
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            if chunk.len() <= remaining {
+                buf.extend_from_slice(&chunk);
+            } else {
+                buf.extend_from_slice(&chunk[..remaining]);
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
             tracing::warn!(
-                content_length = len,
                 max_bytes,
-                "response body exceeds size limit (Content-Length pre-check)"
+                "response body truncated at size limit (streamed)"
             );
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
-        if bytes.len() > max_bytes {
-            Ok((bytes[..max_bytes].to_vec(), true))
-        } else {
-            Ok((bytes.to_vec(), false))
-        }
+        Ok((buf, truncated))
     }
 
     /// Build a new HTTP client from browser config.
