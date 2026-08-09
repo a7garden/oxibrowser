@@ -1,6 +1,5 @@
 //! CDP domains — implementations of CDP domain methods.
 //!
-
 //!
 //! The `dispatch` function is async and receives a `DispatchContext` that
 //! includes the browser `Session` for page interaction AND the `EventSender`
@@ -8,6 +7,7 @@
 
 pub mod browser;
 pub mod dom;
+pub mod emulation;
 pub mod fetch;
 pub mod input;
 pub mod network;
@@ -58,6 +58,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
     match domain {
         "Browser" => browser::handle(method_name, params),
         "DOM" => dom::handle(method_name, params, ctx).await,
+        "Emulation" => emulation::handle(method_name, params),
         "Fetch" => fetch::handle(method_name, params, ctx).await,
         "Network" => network::handle(method_name, params, ctx).await,
         "OXI" => oxi::handle(method_name, params, ctx).await,

@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 tokio-tungstenite = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

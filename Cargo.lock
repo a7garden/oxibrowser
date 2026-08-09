@@ -2788,6 +2788,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "oxibrowser-core",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
