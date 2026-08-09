@@ -400,14 +400,54 @@ async fn capture_screenshot(params: Option<Value>, ctx: &DispatchContext) -> Dom
 
 /// Page.printToPDF — prints the page to PDF.
 ///
-/// Currently returns an empty PDF. Full PDF generation requires the `printpdf` dependency.
-async fn print_to_pdf(_params: Option<Value>, _ctx: &DispatchContext) -> DomainResult {
-    // TODO: Add printpdf dependency for real PDF generation
-    // Tracking: https://github.com/oxibrowser/oxibrowser/issues/TODO
-    Ok(Some(json!({
-        "data": "",
-        "stream": ""
-    })))
+/// Captures the rendered page (same path as `captureScreenshot`) and embeds
+/// the PNG in a single-page PDF via `printpdf`. The PDF page matches the
+/// captured image's aspect ratio. Parameters (paperWidth/Height, landscape,
+/// etc.) are accepted but ignored — the output is always one full-page image.
+async fn print_to_pdf(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let viewport_width = params
+        .get("clip")
+        .and_then(|v| v.get("width"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1280.0) as u32;
+
+    let mut guard = ctx.session.write().await;
+    let png_bytes: Vec<u8> = guard
+        .capture_screenshot_png(viewport_width.max(64))
+        .await
+        .unwrap_or_else(|_| oxibrowser_core::blank_png(viewport_width.max(64), 800));
+    drop(guard);
+
+    let pdf_bytes = render_png_to_pdf(&png_bytes).unwrap_or_default();
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);
+    Ok(Some(json!({ "data": data, "stream": "" })))
+}
+
+/// Wrap a PNG in a single-page PDF whose page matches the image aspect ratio.
+fn render_png_to_pdf(png: &[u8]) -> Option<Vec<u8>> {
+    use printpdf::*;
+    let mut warnings = Vec::new();
+    let raw = RawImage::decode_from_bytes(png, &mut warnings).ok()?;
+    let (iw, ih) = (raw.width, raw.height);
+    let mut doc = PdfDocument::new("OxiBrowser");
+    let img_id = doc.add_image(&raw);
+    // Page sized to the image (96 dpi → 1 CSS px ≈ 0.2646 mm); image fills it.
+    let mm_per_px = 0.264_583_33_f32;
+    let page = PdfPage::new(
+        Mm(iw as f32 * mm_per_px),
+        Mm(ih as f32 * mm_per_px),
+        vec![Op::UseXobject {
+            id: img_id,
+            transform: XObjectTransform {
+                dpi: Some(96.0),
+                ..Default::default()
+            },
+        }],
+    );
+    doc.pages.push(page);
+    Some(doc.save(&PdfSaveOptions::default(), &mut warnings))
 }
 
 /// Page.handleJavaScriptDialog — accept or dismiss a pending
@@ -430,4 +470,22 @@ async fn handle_javascript_dialog(params: Option<Value>, ctx: &DispatchContext) 
         prompt_text,
     });
     Ok(Some(json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_png_to_pdf_produces_valid_pdf() {
+        // Use the blank_png helper to get a minimal valid PNG.
+        let png = oxibrowser_core::blank_png(64, 64);
+        let pdf = render_png_to_pdf(&png).expect("should produce a PDF");
+        assert!(pdf.len() > 100, "PDF should be non-trivial");
+        assert!(
+            pdf.starts_with(b"%PDF-"),
+            "PDF header missing, got: {:?}",
+            String::from_utf8_lossy(&pdf[..8.min(pdf.len())])
+        );
+    }
 }

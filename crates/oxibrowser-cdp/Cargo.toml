@@ -31,6 +31,8 @@ url = { workspace = true }
 oxibrowser-core = { version = "0.18.0", path = "../oxibrowser-core" }
 sha1 = { workspace = true }
 base64 = { workspace = true }
+printpdf = { version = "0.12", features = ["png"] }
+image = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
