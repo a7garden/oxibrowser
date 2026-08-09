@@ -1,7 +1,8 @@
 # Phase 4+5 Follow-ups Handoff — OxiBrowser → Headless-Chrome Parity
 
-> **Status:** Sub-session A (CoreEvent sink + event emitters) ✅ **complete**
-> (2026-08-09). Sub-session B (Phase 7 geometry + lifecycle) remains — see §4.
+> **Status:** Sub-session A (CoreEvent sink + emitters) ✅ complete.
+> Sub-session B — lifecycle callbacks + geometry methods ✅ complete; slot
+> composition 🔴 blocked on the unified live DOM (§4).
 >
 > **Phase 4+5 core:** ✅ complete — see `docs/superpowers/plans/2026-08-09-phase4-5-completion.md`.
 > **Branch:** `main`
@@ -231,15 +232,18 @@ Each ships with a focused test and the raw-CDP probe re-run as regression.
 
 ## 4. Sub-session B — Phase 7 (geometry + lifecycle)
 
+**Status (2026-08-09):** lifecycle callbacks + geometry methods ✅ shipped;
+slot composition 🔴 **blocked** on the unified live DOM (see below).
+
 These are gated on a **unified live DOM** (or at minimum a hook from the
 appendChild mutation path into JS). Out of scope for the CoreEvent sink work.
 
-| Item | Blocker | Anchor |
+| Item | Status | How |
 |---|---|---|
-| `connectedCallback`/`disconnectedCallback` on DOM insertion | appendChild is a per-element native closure (no shared prototype) — needs a single appendChild hook or the unified tree | `runtime.rs:~5566` (createElement append_child_fn), `create_element_object` appendChild (~`runtime.rs:7358` region) |
-| `attributeChangedCallback` for `observedAttributes` | setAttribute closures per element | `runtime.rs:~5405` (set_attr_fn) |
-| `getBoxModel` / `getContentQuads` / `getNodeForLocation` | need LayoutEngine geometry access from `domains/dom.rs` | reuse `OXI.getBoxModelScreenshot` pattern (`domains/oxi.rs:21/129`) |
-| slot rendering / real ShadowRoot composition | unified live DOM | `WEB_COMPONENTS_BOOTSTRAP` attachShadow (`runtime.rs:8999`) |
+| `connectedCallback`/`disconnectedCallback` on DOM insertion | ✅ done | Native `appendChild`/`remove` hooks on the render-doc element path call `__oxi_fire_connected`/`__oxi_fire_disconnected` (JS helpers in `WEB_COMPONENTS_BOOTSTRAP`); fires on the appended/removed node (+ best-effort subtree walk). Verified by `test_custom_element_lifecycle_callbacks`. |
+| `attributeChangedCallback` for `observedAttributes` | ✅ done | Render-doc `setAttribute` hook captures the old value and calls `__oxi_fire_attr_changed`, gated by `observedAttributes` inside the helper. |
+| `getBoxModel` / `getContentQuads` / `getNodeForLocation` | ✅ done | `domains/dom.rs` methods backed by `LayoutEngine::compute_rect(snapshot, node_id)`. Verified end-to-end via raw-CDP probe (`getBoxModel` 8-pt quad + dims; `getContentQuads`; `getNodeForLocation` returns a nodeId). |
+| slot rendering / real ShadowRoot composition | 🔴 blocked | `DomSnapshot` has no shadow/slot fields; `LayoutEngine`/`render_box_model_png` operate on the flat snapshot; `attachShadow` only stores a `__shadowRoot` JS object. Real slot distribution requires the unified live DOM with shadow-tree traversal in the render pipeline — a separate architectural initiative. |
 
 The DOM-methods survey (`history://DomMethodSurvey`) enumerated the full gap;
 the 9 JS-eval/Snapshot-feasible methods shipped, the 3 geometry ones are here.

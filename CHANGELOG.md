@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Log.entryAdded`** — console messages are mirrored into the Log domain (gated by `Log.enable`, which now toggles a `log_enabled` flag).
 - **JS-initiated `Network.*` lifecycle** — `fetch()` and `XMLHttpRequest` now emit `Network.requestWillBeSent` / `responseReceived` / `loadingFinished` (correlated via `oxi-{id}` request ids); WebSocket `send`/receive emit `Network.webSocketFrameSent` / `webSocketFrameReceived`.
 - **Event-driven dialogs** — `alert` / `confirm` / `prompt` are now native closures that push `CoreEvent::Dialog` and block on a shared `DialogGate`, resolved by `Page.handleJavaScriptDialog`. Emits `Page.javascriptDialogOpening`; default-dismisses on timeout / no observer (matching real-browser unhandled-dialog semantics).
+- **Custom-element lifecycle callbacks** — `connectedCallback` / `disconnectedCallback` fire on the render-doc `appendChild` / `remove` hooks; `attributeChangedCallback` fires on `setAttribute` (gated by `observedAttributes`). Driven by `__oxi_fire_connected` / `__oxi_fire_disconnected` / `__oxi_fire_attr_changed` helpers installed by the web-components bootstrap.
+- **DOM layout-geometry methods** — `DOM.getBoxModel`, `DOM.getContentQuads`, and `DOM.getNodeForLocation` are now implemented, backed by `LayoutEngine::compute_rect` (the existing estimated-rect layout).
 
 ### Changed
 
