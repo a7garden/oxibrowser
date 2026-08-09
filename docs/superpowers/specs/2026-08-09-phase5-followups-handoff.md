@@ -1,12 +1,11 @@
 # Phase 4+5 Follow-ups Handoff — OxiBrowser → Headless-Chrome Parity
 
-> **Status:** Handoff document for the remaining Phase 4/5 follow-ups after the
-> 2026-08-09 completion session.
+> **Status:** Sub-session A (CoreEvent sink + event emitters) ✅ **complete**
+> (2026-08-09). Sub-session B (Phase 7 geometry + lifecycle) remains — see §4.
+>
 > **Phase 4+5 core:** ✅ complete — see `docs/superpowers/plans/2026-08-09-phase4-5-completion.md`.
 > **Branch:** `main`
-> **Last commit:** `a562937` (feat: Phase 4+5 completion — accept probe green)
 > **Roadmap:** `docs/superpowers/specs/2026-08-07-chrome-parity-roadmap.md`
-> **Estimated sub-sessions:** 2 (CoreEvent sink + Phase 7 geometry)
 
 ---
 

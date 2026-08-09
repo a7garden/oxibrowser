@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [Unreleased]
+
+### Added
+
+- **CoreEvent sink (core → CDP)** — a neutral `CoreEvent` enum (`oxibrowser-core::js::CoreEvent`) flows JS-thread events (console, exceptions, fetch/XHR lifecycle, WebSocket frames, dialogs) to the CDP layer over a shared `mpsc` channel. `JsRuntime::set_event_sink` / `set_dialog_gate` install it; `Session` exposes both. Closes the Phase 5 follow-up that left `Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, JS-initiated `Network.*`, `Page.javascriptDialogOpening`, and `Log.entryAdded` un-emitted.
+- **`Runtime.consoleAPICalled`** — every `console.log/info/warn/error` now mirrors to the sink (in addition to the existing captured-output buffer).
+- **`Runtime.exceptionThrown`** — uncaught exceptions from `Runtime.evaluate` and navigation `<script>` tags push an exception event.
+- **`Log.entryAdded`** — console messages are mirrored into the Log domain (gated by `Log.enable`, which now toggles a `log_enabled` flag).
+- **JS-initiated `Network.*` lifecycle** — `fetch()` and `XMLHttpRequest` now emit `Network.requestWillBeSent` / `responseReceived` / `loadingFinished` (correlated via `oxi-{id}` request ids); WebSocket `send`/receive emit `Network.webSocketFrameSent` / `webSocketFrameReceived`.
+- **Event-driven dialogs** — `alert` / `confirm` / `prompt` are now native closures that push `CoreEvent::Dialog` and block on a shared `DialogGate`, resolved by `Page.handleJavaScriptDialog`. Emits `Page.javascriptDialogOpening`; default-dismisses on timeout / no observer (matching real-browser unhandled-dialog semantics).
+
+### Changed
+
+- **Concurrent CDP command dispatch** — `CdpSession::run` now spawns each command's dispatch as a task and routes responses back through a channel, so a long-running command (e.g. a dialog-blocked `Runtime.evaluate`) can no longer stall event forwarding or other commands. `Page.handleJavaScriptDialog` writes the shared dialog gate directly (no session lock) so it resolves a dialog even while a blocking evaluate holds the session write lock.
+- **Blocking JS-thread recvs moved to `spawn_blocking`** — `JsRuntime::evaluate*` and `set_document_with_scripts` receive their command responses via `tokio::task::spawn_blocking`, so a long block (e.g. `alert()`) never stalls the async runtime or starves the CoreEvent drainer.
+
 ## [0.17.0] - 2026-07-11
 
 ### Added
