@@ -136,6 +136,28 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The current page origin (`scheme://host[:port]`), updated on every
+    /// navigation. Read by the fetch native so cross-origin requests carry an
+    /// `Origin` header and a `Referer` (CORS / referrer policy).
+    static CURRENT_ORIGIN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Set the current page origin (called from the SetDocument/SetPageUrl
+/// handlers). `page_url` is the full document URL; the origin is derived.
+fn set_current_origin(page_url: &str) {
+    let origin = url::Url::parse(page_url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization())
+        .filter(|s| !s.is_empty() && !s.starts_with("null"));
+    CURRENT_ORIGIN.with(|c| *c.borrow_mut() = origin);
+}
+
+/// Read the current page origin for request-context headers (CORS/Referer).
+fn current_origin() -> Option<String> {
+    CURRENT_ORIGIN.with(|c| c.borrow().clone())
+}
+
 /// Mint a fresh fetch request id on the JS thread (never 0).
 fn next_fetch_id() -> u64 {
     NEXT_FETCH_ID.with(|c| {
@@ -407,8 +429,6 @@ enum JsResponse {
 
 // ---------------------------------------------------------------------------
 // Fetch message types
-// ---------------------------------------------------------------------------
-
 /// A fetch request from JS.
 pub struct FetchRequestMsg {
     /// Unique id minted on the JS thread; routes the response back to its
@@ -421,8 +441,10 @@ pub struct FetchRequestMsg {
     /// Request headers (name, value pairs).
     pub headers: Vec<(String, String)>,
     /// Request body as raw bytes (UTF-8 for string bodies; arbitrary bytes
-    /// for Blob/FormData multipart). `None` for bodyless requests.
     pub body: Option<Vec<u8>>,
+    /// The originating page's origin (`scheme://host[:port]`), used for CORS
+    /// `Origin`/`Referer` headers. `None` when no page is loaded.
+    pub origin: Option<String>,
 }
 
 /// HTTP response sent back to the JS thread via the shared response channel.
@@ -1633,6 +1655,7 @@ fn js_thread_loop(
                 let _ = response_tx.send(JsResponse::Done);
             }
             JsCommand::SetPageUrl { url, response_tx } => {
+                set_current_origin(&url);
                 // Re-register window.location with the new URL
                 let snap = dom_snapshot.read();
                 let dom_snapshot_ref = dom_snapshot.clone();
@@ -1721,6 +1744,10 @@ fn js_thread_loop(
                 nav_timeout_ms,
                 response_tx,
             } => {
+                // The base_url (document URL) drives the page origin for CORS/Referer.
+                if let Some(ref bu) = base_url {
+                    set_current_origin(bu);
+                }
                 let vp = Viewport {
                     width: viewport.0.max(64),
                     height: viewport.1.max(64),
@@ -3022,6 +3049,7 @@ fn create_context(
                 method,
                 headers,
                 body,
+                origin: current_origin(),
             };
 
             let tx = {
@@ -3215,6 +3243,7 @@ fn create_context(
                             method: method.clone(),
                             headers,
                             body,
+                            origin: current_origin(),
                         };
                         if tx.send(request).is_ok() {
                             // Non-blocking (Phase 3): register the XHR's shared

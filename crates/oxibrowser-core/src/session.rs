@@ -172,11 +172,12 @@ fn handle_fetch_requests(
                         };
 
                         let resp = http_client
-                            .request_with_auth(
+                            .request_with_context(
                                 &url,
                                 &request.method,
                                 &request.headers,
                                 request.body,
+                                request.origin.as_deref(),
                             )
                             .await;
                         match resp {

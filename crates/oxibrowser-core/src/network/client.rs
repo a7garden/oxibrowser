@@ -309,6 +309,117 @@ impl HttpClient {
         }
     }
 
+    /// Full request context: applies `Origin` + `Referer` headers (Referrer
+    /// policy `strict-origin-when-cross-origin`) and performs a CORS preflight
+    /// (`OPTIONS`) when the cross-origin request is not "simple", then runs the
+    /// actual request through the auth-retry path.
+    ///
+    /// `origin` is the page's origin (`scheme://host[:port]`); `None` means no
+    /// page is loaded and CORS/Referer are skipped.
+    pub async fn request_with_context(
+        &self,
+        url: &Url,
+        method: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+        origin: Option<&str>,
+    ) -> Result<Response> {
+        let page_url = origin.and_then(|o| Url::parse(o).ok());
+
+        // Build effective headers: caller's headers + Referer + (cross-origin) Origin.
+        let mut eff: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(k, _)| {
+                !k.eq_ignore_ascii_case("referer") && !k.eq_ignore_ascii_case("origin")
+            })
+            .cloned()
+            .collect();
+
+        let cross_origin = match &page_url {
+            Some(p) => !crate::network::cors::same_origin(p, url),
+            None => false,
+        };
+
+        if let Some(p) = &page_url {
+            if let Some(referer) = crate::network::cors::compute_referer(p, url) {
+                eff.push(("Referer".to_string(), referer));
+            }
+            if cross_origin {
+                eff.push(("Origin".to_string(), p.origin().ascii_serialization()));
+            }
+        }
+
+        // CORS preflight for non-simple cross-origin requests. The decision is
+        // based on the caller's own headers (Origin/Referer are browser-added
+        // and exempt from preflight accounting).
+        if cross_origin && crate::network::cors::requires_preflight(method, headers) {
+            self.run_preflight(url, method, headers, origin).await?;
+        }
+
+        self.request_with_auth(url, method, &eff, body).await
+    }
+
+    /// Send a CORS preflight `OPTIONS` and validate the response.
+    async fn run_preflight(
+        &self,
+        url: &Url,
+        method: &str,
+        request_headers: &[(String, String)],
+        origin: Option<&str>,
+    ) -> Result<()> {
+        // Preflight carries only Origin + Access-Control-Request-* headers.
+        let mut preflight_headers: Vec<(String, String)> = Vec::new();
+        if let Some(o) = origin {
+            preflight_headers.push(("Origin".to_string(), o.to_string()));
+        }
+        preflight_headers.push((
+            "Access-Control-Request-Method".to_string(),
+            method.to_ascii_uppercase(),
+        ));
+        // Collect the non-safelisted request headers being used.
+        let used: Vec<String> = request_headers
+            .iter()
+            .filter_map(|(k, _)| {
+                let lower = k.to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "accept" | "accept-language" | "content-language" | "content-type" | "range"
+                ) {
+                    None
+                } else {
+                    Some(k.clone())
+                }
+            })
+            .collect();
+        if !used.is_empty() {
+            preflight_headers.push((
+                "Access-Control-Request-Headers".to_string(),
+                used.join(", "),
+            ));
+        }
+
+        let resp = self
+            .request(url, "OPTIONS", &preflight_headers, None)
+            .await?;
+        let h = resp.headers();
+        let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok());
+        let result = crate::network::cors::validate_preflight(
+            method,
+            request_headers,
+            get("access-control-allow-origin"),
+            get("access-control-allow-methods"),
+            get("access-control-allow-headers"),
+            get("access-control-allow-credentials"),
+            false,
+        );
+        if result == crate::network::cors::PreflightResult::Denied {
+            return Err(CoreError::NetworkError(format!(
+                "CORS preflight failed for {method} {url}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Fetch `url`, retrying while a bot-management challenge is detected.
     ///
     /// Each attempt runs [`HttpClient::fetch`], reads the body, and runs
@@ -805,5 +916,108 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status().as_u16(), 401, "no credentials → return 401");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_with_context_adds_origin_and_referer_cross_origin() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Cross-origin GET requires Origin + Referer to be present.
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(header("origin", "https://example.com"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("{}/api", server.uri())).unwrap();
+        let resp = client
+            .request_with_context(&url, "GET", &[], None, Some("https://example.com/page"))
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_with_context_preflight_denied_blocks_request() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Preflight OPTIONS that does NOT grant CORS permission.
+        Mock::given(method("OPTIONS"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("{}/api", server.uri())).unwrap();
+        // Cross-origin PUT requires a preflight; the empty preflight response
+        // lacks Access-Control-Allow-* → the request must fail.
+        let result = client
+            .request_with_context(&url, "PUT", &[], None, Some("https://example.com"))
+            .await;
+        assert!(
+            result.is_err(),
+            "cross-origin PUT without a permissive preflight must be blocked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_with_context_preflight_allowed_proceeds() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Permissive preflight.
+        Mock::given(method("OPTIONS"))
+            .and(path("/api"))
+            .respond_with(
+                ResponseTemplate::new(204)
+                    .insert_header("access-control-allow-origin", "*")
+                    .insert_header("access-control-allow-methods", "PUT")
+                    .insert_header("access-control-allow-headers", "content-type"),
+            )
+            .mount(&server)
+            .await;
+        // Actual PUT.
+        Mock::given(method("PUT"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("created"))
+            .mount(&server)
+            .await;
+
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("{}/api", server.uri())).unwrap();
+        let resp = client
+            .request_with_context(
+                &url,
+                "PUT",
+                &[("content-type".to_string(), "application/json".to_string())],
+                None,
+                Some("https://example.com"),
+            )
+            .await
+            .expect("preflight should pass and PUT succeed");
+        assert_eq!(resp.status().as_u16(), 200);
     }
 }

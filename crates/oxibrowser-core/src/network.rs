@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client;
 pub mod cookie;
+pub mod cors;
 pub mod intercept;
 pub mod ip_filter;
 pub mod resource;
