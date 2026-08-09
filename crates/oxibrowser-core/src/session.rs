@@ -167,7 +167,9 @@ fn handle_fetch_requests(
                             }
                         };
 
-                        let resp = http_client.fetch(&url).await;
+                        let resp = http_client
+                            .request(&url, &request.method, &request.headers, request.body)
+                            .await;
                         match resp {
                             Ok(response) => {
                                 let status = response.status().as_u16();

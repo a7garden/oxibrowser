@@ -198,6 +198,60 @@ impl HttpClient {
         Ok(response)
     }
 
+    /// Perform an HTTP request with an arbitrary method, headers, and body.
+    ///
+    /// The method/headers/body-aware sibling of [`HttpClient::fetch`] (which is
+    /// GET-only). SSRF-checked, cookie-attached, and stores response cookies.
+    pub async fn request(
+        &self,
+        url: &Url,
+        method: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Response> {
+        use wreq::Method;
+        use wreq::header::{HeaderName, HeaderValue};
+
+        self.check_ssrf(url)?;
+
+        let cookies = self.cookie_jar.read().cookies_for_url(url);
+        tracing::debug!(url = %url, method = %method, "HTTP request started");
+
+        let method_upper = method.trim().to_ascii_uppercase();
+        let method_obj = Method::from_bytes(method_upper.as_bytes())
+            .map_err(|e| CoreError::NetworkError(format!("invalid method {method:?}: {e}")))?;
+        let mut req_builder = self.client.request(method_obj, url.as_str());
+
+        if !cookies.is_empty() {
+            req_builder = req_builder.header("Cookie", cookies);
+        }
+        for (k, v) in headers {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::try_from(k.as_str()),
+                HeaderValue::try_from(v.as_str()),
+            ) {
+                req_builder = req_builder.header(name, val);
+            }
+        }
+        if let Some(bytes) = body {
+            req_builder = req_builder.body(bytes);
+        }
+
+        let response = req_builder
+            .send()
+            .await
+            .map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        tracing::debug!(
+            url = %url,
+            method = %method,
+            status = response.status().as_u16(),
+            "HTTP response received"
+        );
+        self.store_response_cookies(url, &response);
+        Ok(response)
+    }
+
     /// Fetch `url`, retrying while a bot-management challenge is detected.
     ///
     /// Each attempt runs [`HttpClient::fetch`], reads the body, and runs
@@ -529,5 +583,93 @@ mod tests {
         // data: URLs have no host
         let url = Url::parse("data:text/plain,hello").unwrap();
         assert!(check_url_ssrf(&url, &filter));
+    }
+
+    /// Capture server: reads one raw HTTP request, stores (request-line, body)
+    /// into a shared cell, replies 200 OK. Used to assert the on-the-wire
+    /// method/headers/body of `HttpClient::request`.
+    async fn capture_one_request(
+        addr_out: std::sync::mpsc::Sender<std::net::SocketAddr>,
+        captured: Arc<parking_lot::Mutex<Option<(String, String)>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        addr_out.send(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 1024];
+        // Read until end-of-headers.
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let text = String::from_utf8_lossy(&buf).to_string();
+        let request_line = text.lines().next().unwrap_or("").to_string();
+        let header_end = text.find("\r\n\r\n").unwrap_or(text.len());
+        let content_length = text[..header_end]
+            .lines()
+            .find_map(|l| {
+                let l = l.to_ascii_lowercase();
+                l.strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let mut body = text.as_bytes()[header_end + 4..].to_vec();
+        while body.len() < content_length {
+            let n = stream.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        *captured.lock() = Some((request_line, String::from_utf8_lossy(&body).to_string()));
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_sends_method_and_body_on_the_wire() {
+        let captured: Arc<parking_lot::Mutex<Option<(String, String)>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<std::net::SocketAddr>();
+        let cap = captured.clone();
+        tokio::spawn(capture_one_request(addr_tx, cap));
+        let addr = addr_rx.recv().expect("server bound");
+
+        // SSRF filter blocks loopback by default; disable for the local server.
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("http://{addr}/post")).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client.request(
+                &url,
+                "POST",
+                &[("content-type".to_string(), "text/plain".to_string())],
+                Some(b"hello body".to_vec()),
+            ),
+        )
+        .await;
+        let result = result.expect("client.request timed out");
+        assert!(result.is_ok(), "request failed: {:?}", result.err());
+
+        // Give the capture task a moment to finish storing.
+        for _ in 0..50 {
+            if captured.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (line, body) = captured.lock().clone().expect("server captured no request");
+        assert!(line.starts_with("POST /post"), "expected POST, got: {line}");
+        assert_eq!(body, "hello body", "body not delivered on the wire");
     }
 }

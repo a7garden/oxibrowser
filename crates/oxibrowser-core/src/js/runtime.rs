@@ -408,8 +408,9 @@ pub struct FetchRequestMsg {
     pub method: String,
     /// Request headers (name, value pairs).
     pub headers: Vec<(String, String)>,
-    /// Request body (if any).
-    pub body: Option<String>,
+    /// Request body as raw bytes (UTF-8 for string bodies; arbitrary bytes
+    /// for Blob/FormData multipart). `None` for bodyless requests.
+    pub body: Option<Vec<u8>>,
 }
 
 /// HTTP response sent back to the JS thread via the shared response channel.
@@ -2263,7 +2264,7 @@ fn create_context(
                 }
             }
 
-            let mut body: Option<String> = None;
+            let mut body: Option<Vec<u8>> = None;
             let mut _timeout_ms: Option<u64> = None;
 
             if args.len() > 1
@@ -2284,7 +2285,7 @@ fn create_context(
                     && !b.is_null()
                     && let Some(s) = b.as_string()
                 {
-                    body = Some(s.to_std_string_escaped());
+                    body = Some(s.to_std_string_escaped().into_bytes());
                 }
                 // timeout
                 if let Ok(t) = opts.get(js_string!("timeout"), ctx)
@@ -2484,7 +2485,7 @@ fn create_context(
                     let body = args
                         .first()
                         .and_then(|v| v.as_string())
-                        .map(|s| s.to_std_string_escaped());
+                        .map(|s| s.to_std_string_escaped().into_bytes());
                     let method = send_method.read().clone();
                     let url = send_url.read().clone();
                     let _is_async = *send_async.read();
@@ -10249,6 +10250,72 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_ok());
+    }
+
+    /// JS `fetch(url, {method, body})` must extract method + body into the
+    /// byte-typed `FetchRequestMsg`. Combined with the wire-level
+    /// `HttpClient::request` test this proves JS fetch POST reaches the wire.
+    #[tokio::test]
+    async fn test_fetch_post_extracts_method_and_body() {
+        let mut rt = JsRuntime::new();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<FetchRequestMsg>();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<FetchResponseMsg>();
+        rt.set_fetch_channel(req_tx, resp_rx);
+
+        let captured = Arc::new(parking_lot::Mutex::new(None::<(String, Vec<u8>)>));
+        let cap = captured.clone();
+        let resp_tx2 = resp_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(req) = req_rx.recv() {
+                *cap.lock() = Some((req.method.clone(), req.body.clone().unwrap_or_default()));
+                let _ = resp_tx2.send(FetchResponseMsg {
+                    id: req.id,
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    url: req.url,
+                    headers: vec![],
+                    body: String::new(),
+                    error: None,
+                });
+            }
+        });
+
+        // evaluate() returns the Promise object, not its resolved value, so
+        // observe settlement through a global side effect (existing pattern).
+        let r = rt
+            .evaluate(
+                "fetch('http://x/', {method:'POST', body:'hello',\
+                 headers:{'content-type':'text/plain'}})\
+                 .then(r => { window.__status = r.status; })",
+            )
+            .await
+            .unwrap();
+        if r.value.is_none() && r.exception.is_some() {
+            panic!("fetch POST eval failed: {:?}", r.exception);
+        }
+
+        // The fetch request reached the dispatch channel with method + body.
+        for _ in 0..100 {
+            if captured.lock().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let got = captured
+            .lock()
+            .clone()
+            .expect("fetch POST never reached the dispatch channel");
+        assert_eq!(got.0, "POST", "method not extracted");
+        assert_eq!(got.1, b"hello".to_vec(), "body not extracted as bytes");
+
+        // And the promise settled to the 200 response during the pump.
+        let r2 = rt.evaluate("window.__status").await.unwrap();
+        assert_eq!(
+            r2.value.as_ref().and_then(|v| v.as_f64()),
+            Some(200.0),
+            "fetch POST promise did not settle to 200: {:?}",
+            r2.value
+        );
     }
 
     /// Background fetch handler for tests: spawn-per-request, each responding
