@@ -23,7 +23,7 @@
 //! This means JS state (variables, functions, closures) **persists across
 //! evaluate() calls** — exactly like a real browser.
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -334,6 +334,18 @@ enum JsCommand {
         jar: Arc<RwLock<CookieJar>>,
         response_tx: Sender<JsResponse>,
     },
+    /// Install the CoreEvent sink so JS-side events (console, exceptions,
+    /// fetch/ws lifecycle, dialogs) flow to the CDP layer / observer.
+    SetEventSink {
+        tx: std::sync::mpsc::Sender<CoreEvent>,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Install the shared dialog-resolution gate (for blocking
+    /// alert/confirm/prompt resolved by `Page.handleJavaScriptDialog`).
+    SetDialogGate {
+        gate: DialogGate,
+        response_tx: Sender<JsResponse>,
+    },
     /// Build (or replace) the `RenderDocument` on the JS thread from HTML.
     SetDocument {
         html: String,
@@ -429,6 +441,197 @@ pub struct FetchResponseMsg {
     pub body: String,
     /// Error message if request failed.
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// CoreEvent sink (core → CDP / observers)
+// ---------------------------------------------------------------------------
+
+/// A core-originated event destined for the CDP layer (or any observer).
+///
+/// Core cannot name CDP types, so this is a neutral enum the CDP drainer
+/// translates into CDP events. Pushed from the JS thread via [`push_event`];
+/// a no-op when no sink is attached (e.g. the CLI `fetch` path with no CDP).
+#[derive(Debug, Clone)]
+pub enum CoreEvent {
+    /// `console.log/info/warn/error` call.
+    Console {
+        level: ConsoleLevel,
+        /// Already-stringified arguments (joined with spaces by `console_fn`).
+        args: Vec<String>,
+        timestamp: f64,
+    },
+    /// Uncaught exception from `evaluate()` / navigation scripts.
+    Exception {
+        message: String,
+        stack: Option<String>,
+        timestamp: f64,
+    },
+    /// JS-initiated `fetch()` / `XMLHttpRequest` request dispatched.
+    FetchRequest {
+        request_id: String,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        post_data: Option<Vec<u8>>,
+        timestamp: f64,
+    },
+    /// `fetch` / XHR response received.
+    FetchResponse {
+        request_id: String,
+        url: String,
+        status: u16,
+        mime_type: String,
+        timestamp: f64,
+    },
+    /// `fetch` / XHR response body finished loading.
+    FetchLoadingFinished { request_id: String, timestamp: f64 },
+    /// WebSocket frame sent or received.
+    WsFrame {
+        direction: WsDirection,
+        request_id: String,
+        /// WebSocket opcode: `1` = text, `2` = binary.
+        opcode: u8,
+        /// Text payload for opcodes 1; base64 for opcode 2.
+        data: String,
+        timestamp: f64,
+    },
+    /// `alert` / `confirm` / `prompt` dialog requested by the page.
+    Dialog {
+        dialog_type: DialogType,
+        message: String,
+        default_value: Option<String>,
+    },
+}
+
+/// Console log severity, mirrored to CDP `Runtime.consoleAPICalled.type`
+/// and `Log.entryAdded.entry.level`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLevel {
+    Log,
+    Info,
+    Warn,
+    Error,
+}
+
+impl ConsoleLevel {
+    /// CDP `Runtime.consoleAPICalled` `type` value.
+    pub fn api_type(&self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Info => "info",
+            Self::Warn => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Direction of a WebSocket frame relative to the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsDirection {
+    Sent,
+    Received,
+}
+
+/// Kind of blocking dialog (`window.alert` / `confirm` / `prompt`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogType {
+    Alert,
+    Confirm,
+    Prompt,
+}
+
+impl DialogType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Alert => "alert",
+            Self::Confirm => "confirm",
+            Self::Prompt => "prompt",
+        }
+    }
+}
+
+/// Resolution written by the CDP layer (`Page.handleJavaScriptDialog`) and
+/// polled by the JS thread's `alert`/`confirm`/`prompt` closures.
+#[derive(Debug, Clone)]
+pub struct DialogResult {
+    /// Whether the user accepted (`true`) or dismissed (`false`).
+    pub accept: bool,
+    /// Text for an accepted `prompt` (`None` otherwise).
+    pub prompt_text: Option<String>,
+}
+
+/// Shared cell for pending dialog resolution. Cheap to clone (`Arc`); the
+/// JS thread polls its thread-local clone while the CDP layer writes via the
+/// [`Session`](crate::session::Session)'s clone.
+pub type DialogGate = Arc<Mutex<Option<DialogResult>>>;
+
+thread_local! {
+    /// CoreEvent sink sender, installed by `SetEventSink`. `None` when no
+    /// observer (e.g. CDP) is attached — pushes are then no-ops.
+    static EVENT_TX: RefCell<Option<Sender<CoreEvent>>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// Pending dialog resolution gate, installed by `SetDialogGate`.
+    static DIALOG_GATE: RefCell<Option<DialogGate>> = const { RefCell::new(None) };
+}
+
+fn push_event(ev: CoreEvent) {
+    EVENT_TX.with(|cell| {
+        let borrowed = cell.borrow();
+        if let Some(tx) = borrowed.as_ref() {
+            let _ = tx.send(ev);
+        }
+    });
+}
+
+/// Whether a CoreEvent sink (observer) is currently attached.
+fn event_sink_attached() -> bool {
+    EVENT_TX.with(|cell| cell.borrow().is_some())
+}
+
+/// Current wall-clock timestamp in milliseconds since the Unix epoch.
+fn now_ms() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0
+}
+
+/// Block (poll) the JS thread until the pending dialog is resolved or the
+/// timeout elapses. Returns `default` on timeout. Never blocks on a channel
+/// `recv()` — the CDP async layer writes the resolution via the [`DialogGate`].
+fn wait_dialog_resolution(default: DialogResult, timeout: Duration) -> DialogResult {
+    let start = Instant::now();
+    loop {
+        let resolved =
+            DIALOG_GATE.with(|g| g.borrow().as_ref().and_then(|gate| gate.lock().take()));
+        if let Some(r) = resolved {
+            return r;
+        }
+        if start.elapsed() >= timeout {
+            return default;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Format a fetch request id for CDP correlation (`"oxi-{id}"`). The same id
+/// is reused for the matching response so clients can correlate the pair.
+fn cdp_request_id(id: u64) -> String {
+    format!("oxi-{id}")
+}
+
+/// Extract the mime type (content-type, sans parameters) from response headers.
+fn content_type_mime(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.split(';').next().unwrap_or(v).trim().to_string())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +820,35 @@ impl JsRuntime {
         let _ = ack_rx.recv();
     }
 
+    /// Install the CoreEvent sink so console / exception / fetch / WebSocket /
+    /// dialog events flow to an observer (typically the CDP layer). No-op
+    /// pushes until this is called.
+    pub fn set_event_sink(&mut self, tx: std::sync::mpsc::Sender<CoreEvent>) {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetEventSink { tx, response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetEventSink: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
+    }
+
+    /// Install the shared dialog-resolution gate. Must be called for blocking
+    /// `alert`/`confirm`/`prompt` to be resolvable by `Page.handleJavaScriptDialog`.
+    pub fn set_dialog_gate(&mut self, gate: DialogGate) {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::SetDialogGate { gate, response_tx })
+        {
+            tracing::error!(error = %e, "failed to send SetDialogGate: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
+    }
+
     /// Set the channel for localStorage sync.
     pub fn set_local_storage_channel(&mut self, tx: std::sync::mpsc::Sender<LocalStorageMsg>) {
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
@@ -680,8 +912,9 @@ impl JsRuntime {
                 response_tx,
             })
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
-        let resp = response_rx
-            .recv()
+        let resp = tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|_| CoreError::JsError("JS eval recv task panicked".into()))?
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
         match resp {
             JsResponse::EvalResult {
@@ -838,8 +1071,9 @@ impl JsRuntime {
                 response_tx,
             })
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
-        let resp = response_rx
-            .recv()
+        let resp = tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|_| CoreError::JsError("JS document recv task panicked".into()))?
             .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
         match resp {
             JsResponse::Done => Ok(()),
@@ -1070,6 +1304,12 @@ fn js_thread_loop(
                     }
                     Err(err) => {
                         let msg = format_js_error(&err, &mut ctx);
+                        // Mirror to the CoreEvent sink (CDP Runtime.exceptionThrown).
+                        push_event(CoreEvent::Exception {
+                            message: msg.clone(),
+                            stack: None,
+                            timestamp: now_ms(),
+                        });
                         // Check if it was a runtime limit error (loop/recursion/stack)
                         let is_runtime_limit = msg.contains("Maximum loop iteration limit")
                             || msg.contains("exceeded the maximum call stack size")
@@ -1192,6 +1432,14 @@ fn js_thread_loop(
             }
             JsCommand::SetCookieJar { jar, response_tx } => {
                 *cookie_jar_arc.write() = Some(jar);
+                let _ = response_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetEventSink { tx, response_tx } => {
+                EVENT_TX.with(|cell| *cell.borrow_mut() = Some(tx));
+                let _ = response_tx.send(JsResponse::Done);
+            }
+            JsCommand::SetDialogGate { gate, response_tx } => {
+                DIALOG_GATE.with(|cell| *cell.borrow_mut() = Some(gate));
                 let _ = response_tx.send(JsResponse::Done);
             }
             JsCommand::SetDocument {
@@ -1457,8 +1705,12 @@ fn run_navigation_scripts(
         // evals, and a prior script's runaway would otherwise starve siblings.
         apply_limits(ctx);
         if let Err(err) = ctx.eval(Source::from_bytes(script.source.as_str())) {
-            // A thrown script does not abort siblings — matches Chrome.
             let msg = format_js_error(&err, ctx);
+            push_event(CoreEvent::Exception {
+                message: msg.clone(),
+                stack: None,
+                timestamp: now_ms(),
+            });
             tracing::warn!(error = %msg, src = ?script.src_url, "page script threw; continuing");
         }
         // Drain microtasks + already-due timers queued by this script.
@@ -1767,6 +2019,22 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
     });
 
     for resp in responses {
+        // Emit Network.responseReceived + loadingFinished before `resp` is
+        // moved into settle_fetch/settle_xhr.
+        if event_sink_attached() {
+            let rid = cdp_request_id(resp.id);
+            push_event(CoreEvent::FetchResponse {
+                request_id: rid.clone(),
+                url: resp.url.clone(),
+                status: resp.status,
+                mime_type: content_type_mime(&resp.headers),
+                timestamp: now_ms(),
+            });
+            push_event(CoreEvent::FetchLoadingFinished {
+                request_id: rid,
+                timestamp: now_ms(),
+            });
+        }
         let entry = PENDING_FETCH.with(|m| m.borrow_mut().remove(&resp.id));
         match entry {
             Some(PendingFetch::Fetch { resolvers, .. }) => settle_fetch(resolvers, resp, ctx),
@@ -1911,6 +2179,19 @@ fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
     let Some(obj) = obj else {
         return;
     };
+    if event_sink_attached() {
+        let (opcode, payload) = match &data {
+            WsData::Text(t) => (1u8, t.clone()),
+            WsData::Binary(b) => (2u8, base64::engine::general_purpose::STANDARD.encode(b)),
+        };
+        push_event(CoreEvent::WsFrame {
+            direction: WsDirection::Received,
+            request_id: format!("oxi-ws-{id}"),
+            opcode,
+            data: payload,
+            timestamp: now_ms(),
+        });
+    }
     let data_val = match data {
         WsData::Text(t) => JsValue::from(JsString::from(t.as_str())),
         WsData::Binary(b) => {
@@ -2191,25 +2472,30 @@ fn create_context(
     // --- Console functions ---
 
     macro_rules! console_fn {
-        ($out:expr) => {
+        ($out:expr, $level:expr) => {
             unsafe {
                 NativeFunction::from_closure(
                     move |_this: &JsValue, args: &[JsValue], ctx: &mut Context| {
-                        let mut line = String::new();
-                        for (i, arg) in args.iter().enumerate() {
-                            if i > 0 {
-                                line.push(' ');
-                            }
+                        let mut strs: Vec<String> = Vec::with_capacity(args.len());
+                        for arg in args.iter() {
                             let s = arg
                                 .to_string(ctx)
                                 .map(|s| s.to_std_string_escaped())
                                 .unwrap_or_else(|_| "undefined".to_string());
-                            line.push_str(&s);
+                            strs.push(s);
                         }
+                        let line = strs.join(" ");
                         {
                             let mut guard = $out.write();
                             guard.push(line);
                         }
+                        // Mirror to the CoreEvent sink (CDP Runtime.consoleAPICalled /
+                        // Log.entryAdded). No-op when no observer is attached.
+                        push_event(CoreEvent::Console {
+                            level: $level,
+                            args: strs,
+                            timestamp: now_ms(),
+                        });
                         Ok(JsValue::undefined())
                     },
                 )
@@ -2222,7 +2508,7 @@ fn create_context(
     let out_error = output.clone();
     let out_info = output.clone();
 
-    let log_fn = console_fn!(out_log);
+    let log_fn = console_fn!(out_log, ConsoleLevel::Log);
 
     // Register standalone `log(...)` function
     let _ = context.register_global_callable(js_string!("log"), 1, log_fn.clone());
@@ -2230,9 +2516,21 @@ fn create_context(
     // Build console object
     let console = boa_engine::object::ObjectInitializer::new(&mut context)
         .function(log_fn, js_string!("log"), 1)
-        .function(console_fn!(out_warn), js_string!("warn"), 1)
-        .function(console_fn!(out_error), js_string!("error"), 1)
-        .function(console_fn!(out_info), js_string!("info"), 1)
+        .function(
+            console_fn!(out_warn, ConsoleLevel::Warn),
+            js_string!("warn"),
+            1,
+        )
+        .function(
+            console_fn!(out_error, ConsoleLevel::Error),
+            js_string!("error"),
+            1,
+        )
+        .function(
+            console_fn!(out_info, ConsoleLevel::Info),
+            js_string!("info"),
+            1,
+        )
         .build();
 
     let _ = context.register_global_property(js_string!("console"), console, Attribute::all());
@@ -2410,6 +2708,19 @@ fn create_context(
             // thread never blocks on the network.
             let (promise, resolvers) = JsPromise::new_pending(ctx);
             let id = next_fetch_id();
+            // Emit Network.requestWillBeSent to the CoreEvent sink. Gated to
+            // avoid cloning the (potentially large) body when no observer is
+            // attached (e.g. the CLI `fetch` path).
+            if event_sink_attached() {
+                push_event(CoreEvent::FetchRequest {
+                    request_id: cdp_request_id(id),
+                    url: url.clone(),
+                    method: method.clone(),
+                    headers: headers.clone(),
+                    post_data: body.clone(),
+                    timestamp: now_ms(),
+                });
+            }
 
             let request = FetchRequestMsg {
                 id,
@@ -2594,6 +2905,16 @@ fn create_context(
 
                     if let Some(tx) = tx {
                         let id = next_fetch_id();
+                        if event_sink_attached() {
+                            push_event(CoreEvent::FetchRequest {
+                                request_id: cdp_request_id(id),
+                                url: url.clone(),
+                                method: method.clone(),
+                                headers: headers.clone(),
+                                post_data: body.clone(),
+                                timestamp: now_ms(),
+                            });
+                        }
                         let request = FetchRequestMsg {
                             id,
                             url: url.clone(),
@@ -2802,6 +3123,21 @@ fn create_context(
                     },
                     None => return Ok(JsValue::undefined()),
                 };
+                if event_sink_attached() {
+                    let (opcode, payload) = match &data {
+                        WsData::Text(t) => (1u8, t.clone()),
+                        WsData::Binary(b) => {
+                            (2u8, base64::engine::general_purpose::STANDARD.encode(b))
+                        }
+                    };
+                    push_event(CoreEvent::WsFrame {
+                        direction: WsDirection::Sent,
+                        request_id: format!("oxi-ws-{send_id}"),
+                        opcode,
+                        data: payload,
+                        timestamp: now_ms(),
+                    });
+                }
                 let _ = WS_REQ_TX.with(|c| {
                     c.borrow()
                         .as_ref()
@@ -8840,12 +9176,78 @@ fn register_window_globals(
     if let Err(e) = ctx.eval(Source::from_bytes(CANVAS_BOOTSTRAP)) {
         tracing::warn!(error = %e, "canvas bootstrap failed");
     }
+    // Native alert/confirm/prompt backing: pushes a CoreEvent::Dialog to the
+    // sink and blocks (polling the shared DialogGate) until the CDP client
+    // resolves it via Page.handleJavaScriptDialog, or the 30s timeout elapses.
+    // When no sink is attached (CLI path), it default-dismisses immediately,
+    // preserving the pre-event no-op semantics.
+    let dialog_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, _ctx| {
+            let dtype = args
+                .first()
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "alert".to_string());
+            let message = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let default_val = args
+                .get(2)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped());
+            let dialog_type = match dtype.as_str() {
+                "confirm" => DialogType::Confirm,
+                "prompt" => DialogType::Prompt,
+                _ => DialogType::Alert,
+            };
+            let has_sink = event_sink_attached();
+            push_event(CoreEvent::Dialog {
+                dialog_type,
+                message: message.clone(),
+                default_value: if dialog_type == DialogType::Prompt {
+                    default_val.clone()
+                } else {
+                    None
+                },
+            });
+            // Default resolution when dismissed / no observer: real browsers
+            // dismiss an unhandled dialog (alert→undefined, confirm→false,
+            // prompt→null). The CDP client overrides this via
+            // Page.handleJavaScriptDialog before the 30s timeout.
+            let default = DialogResult {
+                accept: false,
+                prompt_text: default_val.clone(),
+            };
+            let result = if has_sink {
+                wait_dialog_resolution(default, Duration::from_secs(30))
+            } else {
+                default
+            };
+            Ok(match dialog_type {
+                DialogType::Alert => JsValue::undefined(),
+                DialogType::Confirm => JsValue::from(result.accept),
+                DialogType::Prompt => {
+                    if result.accept {
+                        match result.prompt_text {
+                            Some(t) => JsValue::from(JsString::from(t.as_str())),
+                            None => JsValue::from(JsString::from("")),
+                        }
+                    } else {
+                        JsValue::null()
+                    }
+                }
+            })
+        })
+    };
+    let _ = ctx.register_global_callable(js_string!("__oxi_dialog"), 3, dialog_fn);
     const DIALOG_BOOTSTRAP: &str = r#"
 (function () {
   function install(g) {
-    if (typeof g.alert === 'undefined') g.alert = function () {};
-    if (typeof g.confirm === 'undefined') g.confirm = function () { return false; };
-    if (typeof g.prompt === 'undefined') g.prompt = function () { return null; };
+    g.alert = function (m) { __oxi_dialog('alert', m, null); };
+    g.confirm = function (m) { return __oxi_dialog('confirm', m, null); };
+    g.prompt = function (m, d) { return __oxi_dialog('prompt', m, d != null ? d : null); };
     if (typeof g.print === 'undefined') g.print = function () {};
   }
   install(globalThis);
@@ -9719,6 +10121,42 @@ mod tests {
         let result = rt.evaluate("console.log('Hello, world!')").await.unwrap();
         assert!(result.is_ok());
         assert_eq!(result.console_output, vec!["Hello, world!"]);
+    }
+
+    #[tokio::test]
+    async fn test_console_pushes_core_event() {
+        // console.log should mirror to the CoreEvent sink when one is attached.
+        let mut rt = JsRuntime::new();
+        let (tx, rx) = std::sync::mpsc::channel::<CoreEvent>();
+        rt.set_event_sink(tx);
+        let result = rt.evaluate("console.warn('watch', 42)").await.unwrap();
+        assert!(result.is_ok());
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expected a CoreEvent::Console");
+        match ev {
+            CoreEvent::Console { level, args, .. } => {
+                assert_eq!(level, ConsoleLevel::Warn);
+                assert_eq!(args, vec!["watch".to_string(), "42".to_string()]);
+            }
+            other => panic!("expected Console, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exception_pushes_core_event() {
+        let mut rt = JsRuntime::new();
+        let (tx, rx) = std::sync::mpsc::channel::<CoreEvent>();
+        rt.set_event_sink(tx);
+        // Throwing surfaces as an exception result and a CoreEvent::Exception.
+        let _ = rt.evaluate("throw new Error('boom')").await;
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expected a CoreEvent::Exception");
+        assert!(
+            matches!(ev, CoreEvent::Exception { ref message, .. } if message.contains("boom")),
+            "expected Exception containing 'boom', got {ev:?}"
+        );
     }
 
     #[tokio::test]

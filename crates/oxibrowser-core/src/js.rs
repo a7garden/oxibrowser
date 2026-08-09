@@ -35,4 +35,7 @@ pub use form::{js_check, js_clear, js_fill, js_get_value, js_select_option, js_u
 pub use job_queue::TokioJobQueue;
 
 // Runtime (boa context)
-pub use runtime::{JsEvalResult, JsRuntime, JsRuntimeConfig, NodeInfo};
+pub use runtime::{
+    ConsoleLevel, CoreEvent, DialogGate, DialogResult, DialogType, JsEvalResult, JsRuntime,
+    JsRuntimeConfig, NodeInfo, WsDirection,
+};

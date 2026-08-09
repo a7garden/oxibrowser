@@ -94,6 +94,10 @@ pub struct Session {
     /// thread can share the same counter without holding `&Session` — matches
     /// the existing pattern for `local_storage` and `response_bodies`.
     in_flight: Arc<AtomicU64>,
+    /// Shared dialog-resolution gate for blocking `alert`/`confirm`/`prompt`.
+    /// Written by the CDP layer (`Page.handleJavaScriptDialog`), polled by the
+    /// JS thread's dialog closures.
+    dialog_gate: crate::js::DialogGate,
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +375,10 @@ impl Session {
         let mut js_runtime = JsRuntime::with_config(js_config);
         js_runtime.set_fetch_channel(fetch_tx, fetch_resp_rx);
         js_runtime.set_local_storage_channel(ls_tx);
+        // Dialog gate: shared cell for blocking alert/confirm/prompt, resolved
+        // by the CDP layer via Page.handleJavaScriptDialog.
+        let dialog_gate: crate::js::DialogGate = Arc::new(parking_lot::Mutex::new(None));
+        js_runtime.set_dialog_gate(dialog_gate.clone());
         // WebSocket channels: request sender (JS→bridge) + shared event
         // receiver (bridge→JS, id-routed). Phase 4 WebSocket.
         let (ws_req_tx, ws_req_rx) = std::sync::mpsc::channel::<WsReqMsg>();
@@ -426,6 +434,7 @@ impl Session {
             local_storage_task,
             ws_task,
             closed: AtomicBool::new(false),
+            dialog_gate,
             in_flight,
         })
     }
@@ -811,6 +820,29 @@ impl Session {
         }
 
         Ok(result)
+    }
+
+    /// Install the CoreEvent sink so console / exception / fetch / WebSocket /
+    /// dialog events flow to an observer (typically the CDP layer). Called by
+    /// the CDP session once it has created its event drainer.
+    pub fn set_event_sink(&mut self, tx: std::sync::mpsc::Sender<crate::js::CoreEvent>) {
+        self.js_runtime.set_event_sink(tx);
+    }
+
+    /// Resolve a pending `alert`/`confirm`/`prompt` dialog. Called by the CDP
+    /// `Page.handleJavaScriptDialog` handler; wakes the blocked JS thread.
+    pub fn resolve_dialog(&self, accept: bool, prompt_text: Option<String>) {
+        *self.dialog_gate.lock() = Some(crate::js::DialogResult {
+            accept,
+            prompt_text,
+        });
+    }
+
+    /// Clone of the shared dialog-resolution gate. Lets the CDP layer resolve a
+    /// pending dialog WITHOUT acquiring the session lock (which a blocking
+    /// `alert()` holds via `evaluate_js`).
+    pub fn dialog_gate(&self) -> crate::js::DialogGate {
+        self.dialog_gate.clone()
     }
 
     /// Capture a full-page PNG screenshot of the live (post-JS) document.
