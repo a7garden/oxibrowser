@@ -133,6 +133,15 @@ impl HttpClient {
             builder = builder.tls_cert_verification(false);
         }
 
+        if let Some(ref proxy_url) = config.proxy {
+            match wreq::Proxy::all(proxy_url.as_str()) {
+                Ok(proxy) => builder = builder.proxy(proxy),
+                Err(e) => {
+                    tracing::warn!(proxy = %proxy_url, error = %e, "invalid proxy URL; ignoring");
+                }
+            }
+        }
+
         let client = builder
             .build()
             .map_err(|e| CoreError::NetworkError(e.to_string()))?;

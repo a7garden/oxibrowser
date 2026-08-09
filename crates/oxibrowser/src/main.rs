@@ -151,6 +151,10 @@ enum Commands {
         /// Use for local development only.
         #[arg(long)]
         allow_private_ips: bool,
+        /// HTTP/HTTPS/SOCKS proxy for all requests (e.g. http://host:port,
+        /// socks5://host:port, socks5h://host:port).
+        #[arg(long)]
+        proxy: Option<String>,
         /// Authentication token for WebSocket connections.
         /// Required when binding to non-loopback addresses (0.0.0.0).
         /// Clients connect with ws://host:port/ws?token=<TOKEN>.
@@ -184,7 +188,6 @@ enum Commands {
         /// Search source: web, github, github-issues.
         #[arg(long, default_value = "web", value_parser = clap::builder::PossibleValuesParser::new(["web", "github", "github-issues"]))]
         source: String,
-        /// Search engine(s) for web source: ddg, wiki, bing (comma-separated).
         #[arg(long, default_value = "ddg")]
         engine: String,
         /// Repository for github-issues (owner/repo).
@@ -313,6 +316,7 @@ async fn main() {
             port,
             cookie_file,
             allow_private_ips,
+            proxy,
             auth_token,
         } => {
             run_serve(
@@ -320,6 +324,7 @@ async fn main() {
                 port,
                 cookie_file.as_deref(),
                 allow_private_ips,
+                proxy,
                 auth_token,
             )
             .await
@@ -1184,6 +1189,7 @@ async fn run_serve(
     port: u16,
     cookie_file: Option<&str>,
     allow_private_ips: bool,
+    proxy: Option<String>,
     auth_token: Option<String>,
 ) -> i32 {
     let addr: SocketAddr = match format!("{host}:{port}").parse() {
@@ -1209,6 +1215,9 @@ async fn run_serve(
     if allow_private_ips {
         config.enable_ssrf_filter = false;
         eprintln!("⚠ SSRF filter disabled: private/internal IP ranges accessible.");
+    }
+    if let Some(p) = proxy {
+        config.proxy = Some(p);
     }
 
     let browser = match oxibrowser_core::Browser::new(config).await {

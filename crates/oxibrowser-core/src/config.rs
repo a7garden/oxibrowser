@@ -150,6 +150,11 @@ pub struct BrowserConfig {
     #[serde(default)]
     pub accept_invalid_certs: bool,
 
+    /// HTTP/HTTPS/SOCKS proxy URL (e.g. `http://host:port`, `socks5://host:port`,
+    /// `socks5h://host:port` for remote DNS). `None` = direct connection.
+    #[serde(default)]
+    pub proxy: Option<String>,
+
     /// Enable SSRF protection (IP filter for private/internal IPs).
     /// Defaults to `true`. Set to `false` for testing or when CDP clients
     /// need to navigate to local services.
@@ -228,6 +233,7 @@ impl Default for BrowserConfig {
             enable_rendering: false,
             connection_pool_size: default_connection_pool_size(),
             accept_invalid_certs: false,
+            proxy: None,
             enable_ssrf_filter: default_true(),
             js_timeout_ms: default_js_timeout_ms(),
             js_max_recursion: default_js_max_recursion(),
@@ -332,6 +338,12 @@ impl BrowserConfigBuilder {
     /// Enable or disable the SSRF filter.
     pub fn ssrf_filter(mut self, enabled: bool) -> Self {
         self.inner.enable_ssrf_filter = enabled;
+        self
+    }
+
+    /// Set an HTTP/HTTPS/SOCKS proxy URL.
+    pub fn proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.inner.proxy = Some(proxy.into());
         self
     }
 
@@ -521,5 +533,22 @@ mod tests {
         // Defaults preserved on untouched fields.
         assert_eq!(cfg.viewport_width, default_viewport_width());
         assert_eq!(cfg.default_timeout, default_timeout_secs());
+    }
+
+    #[test]
+    fn test_proxy_config() {
+        // Default: no proxy.
+        assert!(BrowserConfig::default().proxy.is_none());
+
+        // Builder sets the proxy URL.
+        let cfg = BrowserConfig::builder()
+            .proxy("socks5h://127.0.0.1:1080")
+            .build();
+        assert_eq!(cfg.proxy.as_deref(), Some("socks5h://127.0.0.1:1080"));
+
+        // Serde round-trip preserves proxy.
+        let json = serde_json::to_string(&cfg).unwrap();
+        let loaded: BrowserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.proxy, cfg.proxy);
     }
 }
