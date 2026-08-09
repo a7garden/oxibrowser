@@ -1,5 +1,14 @@
 # Remaining Work — ShadowRoot / Slot Composition (DomSnapshot-level)
 
+> **STATUS: ✅ IMPLEMENTED (2026-08-09, commit `c031edd`).** The DomSnapshot-
+> level composition described below — `SHADOW_ROOTS` registry + native
+> `__oxi_attach_shadow` + `compose_shadow_trees` slot-distribution pass — is
+> shipped and verified (`test_shadow_dom_slot_composition`,
+> `test_shadow_dom_named_slot_composition`). This document is retained as the
+> design rationale. The **only** still-open piece is screenshot rasterization
+> of shadow content (`capture_png`), which is gated on the external Blitz
+> render engine (§1).
+
 > **Parent:** `docs/superpowers/specs/2026-08-09-phase5-followups-handoff.md` §4 item 4.
 > **Status of the rest of that handoff:** ✅ Sub-session A (CoreEvent sink + 7
 > emitters) and Sub-session B (lifecycle callbacks + 3 geometry methods) are

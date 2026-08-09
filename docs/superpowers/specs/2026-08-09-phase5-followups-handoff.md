@@ -1,10 +1,9 @@
 # Phase 4+5 Follow-ups Handoff — OxiBrowser → Headless-Chrome Parity
 
-> **Status:** Sub-session A (CoreEvent sink + emitters) ✅ complete.
-> Sub-session B — lifecycle callbacks + geometry methods ✅ complete; slot
-> composition 🟡 scoped remainder (DomSnapshot-level composition implementable
-> locally; only screenshot rasterization is Blitz-gated) — see
-> `2026-08-09-slot-composition-remaining-work.md`.
+> **Status:** ✅ Sub-session A (CoreEvent sink + emitters), Sub-session B
+> (lifecycle callbacks + geometry methods + ShadowRoot slot composition) all
+> complete. The only remainder is screenshot rasterization of shadow content
+> (`capture_png`), which is gated on the external Blitz render engine (§4).
 >
 > **Phase 4+5 core:** ✅ complete — see `docs/superpowers/plans/2026-08-09-phase4-5-completion.md`.
 > **Branch:** `main`
@@ -233,21 +232,18 @@ Each ships with a focused test and the raw-CDP probe re-run as regression.
 ---
 
 ## 4. Sub-session B — Phase 7 (geometry + lifecycle)
+**Status (2026-08-09):** ✅ all four items shipped — lifecycle callbacks,
+geometry methods, and ShadowRoot slot composition (the flattened-tree compose
+pass makes shadow/slot content visible to every DomSnapshot-backed read). The
+sole remainder is screenshot rasterization of shadow content via `capture_png`,
 
-**Status (2026-08-09):** lifecycle callbacks + geometry methods ✅ shipped;
-slot composition 🔴 **blocked on the external Blitz render engine** (see the
-table row for the audited root cause).
-
-The unified live DOM already exists (`RenderDocument` on the JS thread); the
-geometry + lifecycle items landed via hooks into it. Slot composition alone is
-blocked by Blitz (see below). Out of scope for the CoreEvent sink work.
 
 | Item | Status | How |
 |---|---|---|
 | `connectedCallback`/`disconnectedCallback` on DOM insertion | ✅ done | Native `appendChild`/`remove` hooks on the render-doc element path call `__oxi_fire_connected`/`__oxi_fire_disconnected` (JS helpers in `WEB_COMPONENTS_BOOTSTRAP`); fires on the appended/removed node (+ best-effort subtree walk). Verified by `test_custom_element_lifecycle_callbacks`. |
 | `attributeChangedCallback` for `observedAttributes` | ✅ done | Render-doc `setAttribute` hook captures the old value and calls `__oxi_fire_attr_changed`, gated by `observedAttributes` inside the helper. |
 | `getBoxModel` / `getContentQuads` / `getNodeForLocation` | ✅ done | `domains/dom.rs` methods backed by `LayoutEngine::compute_rect(snapshot, node_id)`. Verified end-to-end via raw-CDP probe (`getBoxModel` 8-pt quad + dims; `getContentQuads`; `getNodeForLocation` returns a nodeId). |
-| slot rendering / real ShadowRoot composition | 🟡 scoped remainder | **Precise scope (audited 2026-08-09):** the unified live DOM *does* exist (`RenderDocument`, runtime.rs:1029) — not the blocker. `DomSnapshot::from_render_document` (dom_snapshot.rs:217) is **fully local** code; all DomSnapshot-backed reads (CDP `DOM.*`, `getBoxModel`/`getContentQuads`/`getNodeForLocation`, `OXI.*`, `extract`, accessibility, `LayoutEngine`) operate on that local snapshot. So **DomSnapshot-level shadow composition (side shadow-tree registry + slot-distribution compose pass) is implementable in local code with no Blitz change** — see `docs/superpowers/specs/2026-08-09-slot-composition-remaining-work.md`. The *only* genuinely Blitz-gated piece is **screenshot rasterization** (`capture_png`) — Blitz `BaseDocument` (external `blitz-dom 0.3.0-beta.1`, flat tree, no shadow concept). A prior note overstated the whole item as "fork Blitz"; corrected. |
+| slot rendering / real ShadowRoot composition | ✅ done (DomSnapshot-level) | Real Shadow DOM composition for every DomSnapshot-backed read (CDP `DOM.*`, `getBoxModel`/`getContentQuads`/`getNodeForLocation`, `OXI.*`, `extract`, accessibility, `LayoutEngine`). A `SHADOW_ROOTS` registry + native `__oxi_attach_shadow` (runtime.rs) records shadow children; `compose_shadow_trees` (dom_snapshot.rs) is a post-pass in `from_render_document` that merges each host's shadow subtree and distributes light-DOM children into `<slot>` positions by name (default + named; non-matching dropped; slot fallback) — the standard flattened tree, no Blitz change. Verified by `test_shadow_dom_slot_composition` + `test_shadow_dom_named_slot_composition`. **Only screenshot rasterization (`capture_png`) is still Blitz-gated** — `blitz_dom::BaseDocument` (external `blitz-dom 0.3.0-beta.1`) has no shadow model; that one path is a documented follow-up, not part of this deliverable's read/composition surface. |
 
 The DOM-methods survey (`history://DomMethodSurvey`) enumerated the full gap;
 the 9 JS-eval/Snapshot-feasible methods shipped, the 3 geometry ones are here.
