@@ -15,7 +15,7 @@ pub fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> Dom
     match method {
         "setDiscoverTargets" => set_discover_targets(params, ctx),
         "setAutoAttach" => set_auto_attach(params, ctx),
-        "attachToTarget" => attach_to_target(params),
+        "attachToTarget" => attach_to_target(params, ctx),
         "detachFromTarget" => Ok(Some(json!({}))),
         "createTarget" => create_target(params),
         "closeTarget" => Ok(Some(json!({ "success": true }))),
@@ -77,6 +77,7 @@ fn set_auto_attach(params: Option<Value>, ctx: &DispatchContext) -> DomainResult
 
     if auto_attach {
         let session_id = format!("session-{}", uuid::Uuid::new_v4().as_simple());
+        let attached_session_id = session_id.clone();
 
         // Emit attachedToTarget for the default target
         ctx.events.send_event(
@@ -95,22 +96,24 @@ fn set_auto_attach(params: Option<Value>, ctx: &DispatchContext) -> DomainResult
                 "waitingForDebugger": false
             }),
         );
+        // Stamp subsequent target events with this sessionId (flat protocol).
+        ctx.events.set_session_id(attached_session_id);
     }
 
     Ok(Some(json!({})))
 }
 
 /// Target.attachToTarget — attaches to a target.
-fn attach_to_target(params: Option<Value>) -> DomainResult {
+fn attach_to_target(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let params = params.unwrap_or_default();
     let _target_id = params
         .get("targetId")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-
-    Ok(Some(json!({
-        "sessionId": format!("session-{}", uuid::Uuid::new_v4().as_simple())
-    })))
+    let session_id = format!("session-{}", uuid::Uuid::new_v4().as_simple());
+    // Subsequent commands arrive with this sessionId; stamp events with it.
+    ctx.events.set_session_id(session_id.clone());
+    Ok(Some(json!({ "sessionId": session_id })))
 }
 
 /// Target.createTarget — creates a new page target.

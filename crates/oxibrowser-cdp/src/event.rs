@@ -23,6 +23,9 @@ pub struct EventSender {
     fetch_enabled: Arc<AtomicBool>,
     /// Fetch interception patterns (set via Fetch.enable).
     fetch_patterns: Arc<RwLock<Vec<FetchPattern>>>,
+    /// Session ID stamped onto every CDP event once a target is attached
+    /// (flat / auto-attach protocol). `None` for root-level events.
+    attached_session_id: Arc<RwLock<Option<String>>>,
 }
 
 /// Receiver half of the event broadcaster.
@@ -40,6 +43,7 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
         network_enabled: Arc::new(AtomicBool::new(false)),
         fetch_enabled: Arc::new(AtomicBool::new(false)),
         fetch_patterns: Arc::new(RwLock::new(Vec::new())),
+        attached_session_id: Arc::new(RwLock::new(None)),
     };
     let receiver = EventReceiver { rx };
     (sender, receiver)
@@ -56,7 +60,29 @@ impl EventSender {
     /// Send a typed event with a method name and JSON params.
     pub fn send_event(&self, method: &str, params: Value) {
         debug!(method = %method, "queuing CDP event");
-        self.send(CdpEvent::new(method, params));
+        let mut event = CdpEvent::new(method, params);
+        if let Ok(guard) = self.attached_session_id.read()
+            && let Some(sid) = guard.as_ref()
+        {
+            event.session_id = Some(sid.clone());
+        }
+        self.send(event);
+    }
+
+    /// Set the session ID stamped onto subsequent events (called when a target
+    /// is attached via `Target.setAutoAttach` / `Target.attachToTarget`).
+    pub fn set_session_id(&self, session_id: String) {
+        if let Ok(mut guard) = self.attached_session_id.write() {
+            *guard = Some(session_id);
+        }
+    }
+
+    /// The currently-attached session ID, if any.
+    pub fn session_id(&self) -> Option<String> {
+        self.attached_session_id
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Send a Page domain event (only if Page domain is enabled).
@@ -231,6 +257,7 @@ mod tests {
             network_enabled: Arc::new(AtomicBool::new(false)),
             fetch_enabled: Arc::new(AtomicBool::new(false)),
             fetch_patterns: Arc::new(RwLock::new(Vec::new())),
+            attached_session_id: Arc::new(RwLock::new(None)),
         };
 
         assert!(!sender.is_page_enabled());
@@ -243,5 +270,25 @@ mod tests {
 
         sender.set_fetch_patterns(vec![FetchPattern::default()]);
         assert!(!sender.get_fetch_patterns().is_empty());
+    }
+
+    #[test]
+    fn test_send_event_stamps_session_id() {
+        let (sender, mut receiver) = event_channel();
+        // Before any attach: events carry no sessionId (root-level).
+        sender.send_event("Page.loadEventFired", json!({}));
+        let pre = receiver.drain();
+        assert_eq!(pre.len(), 1);
+        assert!(
+            pre[0].session_id.is_none(),
+            "root events must not carry a sessionId"
+        );
+
+        // After attach stamps the sessionId, all subsequent events carry it.
+        sender.set_session_id("session-abc".to_string());
+        sender.send_event("Page.frameNavigated", json!({}));
+        let post = receiver.drain();
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].session_id.as_deref(), Some("session-abc"));
     }
 }
