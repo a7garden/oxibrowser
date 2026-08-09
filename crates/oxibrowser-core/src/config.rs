@@ -155,6 +155,15 @@ pub struct BrowserConfig {
     #[serde(default)]
     pub proxy: Option<String>,
 
+    /// Credentials sent automatically on a `401` challenge with
+    /// `WWW-Authenticate: Basic` or `Digest`. Applied to all requests when set
+    /// (per-origin credential scoping is out of scope for headless automation).
+    #[serde(default)]
+    pub http_username: Option<String>,
+    /// Password paired with [`BrowserConfig::http_username`].
+    #[serde(default)]
+    pub http_password: Option<String>,
+
     /// Enable SSRF protection (IP filter for private/internal IPs).
     /// Defaults to `true`. Set to `false` for testing or when CDP clients
     /// need to navigate to local services.
@@ -226,6 +235,9 @@ impl Default for BrowserConfig {
         Self {
             user_agent: default_user_agent(),
             default_timeout: default_timeout_secs(),
+            proxy: None,
+            http_username: None,
+            http_password: None,
             obey_robots: default_true(),
             max_sessions: default_max_sessions(),
             viewport_width: default_viewport_width(),
@@ -233,7 +245,6 @@ impl Default for BrowserConfig {
             enable_rendering: false,
             connection_pool_size: default_connection_pool_size(),
             accept_invalid_certs: false,
-            proxy: None,
             enable_ssrf_filter: default_true(),
             js_timeout_ms: default_js_timeout_ms(),
             js_max_recursion: default_js_max_recursion(),
@@ -338,6 +349,13 @@ impl BrowserConfigBuilder {
     /// Enable or disable the SSRF filter.
     pub fn ssrf_filter(mut self, enabled: bool) -> Self {
         self.inner.enable_ssrf_filter = enabled;
+        self
+    }
+
+    /// Set HTTP authentication credentials (basic/digest) applied on 401 challenges.
+    pub fn http_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.inner.http_username = Some(username.into());
+        self.inner.http_password = Some(password.into());
         self
     }
 

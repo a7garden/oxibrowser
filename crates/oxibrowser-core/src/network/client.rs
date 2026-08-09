@@ -261,6 +261,54 @@ impl HttpClient {
         Ok(response)
     }
 
+    /// `HttpClient::request` with automatic HTTP-authentication retry.
+    ///
+    /// If the server replies `401` with a `WWW-Authenticate: Basic` or
+    /// `Digest` challenge and credentials are configured
+    /// ([`BrowserConfig::http_username`]), the request is retried once with the
+    /// computed `Authorization` header. Otherwise the original response is
+    /// returned unchanged.
+    pub async fn request_with_auth(
+        &self,
+        url: &Url,
+        method: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Response> {
+        let response = self.request(url, method, headers, body.clone()).await?;
+        if response.status().as_u16() != 401 {
+            return Ok(response);
+        }
+
+        let challenge = response
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let (user, pass) = match (&self.config.http_username, &self.config.http_password) {
+            (Some(u), p) => (u.clone(), p.clone().unwrap_or_default()),
+            (None, _) => return Ok(response),
+        };
+
+        let auth_header = challenge.and_then(|c| {
+            crate::network::auth::build_authorization(&c, method, url.path(), &user, &pass)
+        });
+
+        match auth_header {
+            Some(auth) => {
+                let mut headers2: Vec<(String, String)> = headers
+                    .iter()
+                    .filter(|(k, _)| !k.eq_ignore_ascii_case("authorization"))
+                    .cloned()
+                    .collect();
+                headers2.push(("Authorization".to_string(), auth));
+                self.request(url, method, &headers2, body).await
+            }
+            None => Ok(response),
+        }
+    }
+
     /// Fetch `url`, retrying while a bot-management challenge is detected.
     ///
     /// Each attempt runs [`HttpClient::fetch`], reads the body, and runs
@@ -680,5 +728,82 @@ mod tests {
         let (line, body) = captured.lock().clone().expect("server captured no request");
         assert!(line.starts_with("POST /post"), "expected POST, got: {line}");
         assert_eq!(body, "hello body", "body not delivered on the wire");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_with_auth_retries_basic_401() {
+        use base64::Engine;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(b"u:p")
+        );
+        // Authenticated request → 200 (mounted first so it wins on match).
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(header("authorization", &expected))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+        // Unauthenticated request → 401 challenge.
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("www-authenticate", "Basic realm=\"secure\""),
+            )
+            .mount(&server)
+            .await;
+
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            http_username: Some("u".to_string()),
+            http_password: Some("p".to_string()),
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("{}/", server.uri())).unwrap();
+        let resp = client
+            .request_with_auth(&url, "GET", &[], None)
+            .await
+            .expect("request should succeed");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "should retry with auth and get 200"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_with_auth_no_credentials_returns_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("www-authenticate", "Basic realm=\"secure\""),
+            )
+            .mount(&server)
+            .await;
+
+        let config = BrowserConfig {
+            enable_ssrf_filter: false,
+            ..BrowserConfig::headless()
+        };
+        let jar = Arc::new(RwLock::new(CookieJar::new()));
+        let client = HttpClient::new(&config, jar).unwrap();
+        let url = Url::parse(&format!("{}/", server.uri())).unwrap();
+        let resp = client
+            .request_with_auth(&url, "GET", &[], None)
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status().as_u16(), 401, "no credentials → return 401");
     }
 }

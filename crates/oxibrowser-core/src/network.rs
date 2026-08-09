@@ -1,5 +1,6 @@
 //! Network layer — HTTP client, cookie jar, resource loading, IP filtering, robots.txt.
 
+pub mod auth;
 pub mod client;
 pub mod cookie;
 pub mod intercept;
