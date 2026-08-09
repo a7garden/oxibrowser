@@ -97,6 +97,33 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
                 }),
             );
         }
+        CoreEvent::Download {
+            guid,
+            url,
+            filename,
+            save_path,
+            total_bytes,
+        } => {
+            events.send_page_event(
+                "Page.downloadWillBegin",
+                json!({
+                    "frameId": "",
+                    "guid": guid,
+                    "url": url,
+                    "suggestedFilename": filename,
+                }),
+            );
+            events.send_page_event(
+                "Page.downloadProgress",
+                json!({
+                    "guid": guid,
+                    "totalBytes": total_bytes,
+                    "receivedBytes": total_bytes,
+                    "state": "completed",
+                    "filePath": save_path,
+                }),
+            );
+        }
     }
 }
 

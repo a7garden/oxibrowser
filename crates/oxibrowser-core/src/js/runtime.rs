@@ -597,6 +597,20 @@ pub enum CoreEvent {
         message: String,
         default_value: Option<String>,
     },
+    /// A file download was triggered (navigation to a `Content-Disposition:
+    /// attachment` response). Emitted from the navigate path.
+    Download {
+        /// Stable download id (CDP `GUID`).
+        guid: String,
+        /// Source URL.
+        url: String,
+        /// Suggested filename (from Content-Disposition or URL basename).
+        filename: String,
+        /// Absolute path the file was saved to.
+        save_path: String,
+        /// Total bytes received.
+        total_bytes: usize,
+    },
 }
 
 /// Console log severity, mirrored to CDP `Runtime.consoleAPICalled.type`

@@ -98,6 +98,19 @@ pub struct Session {
     /// Written by the CDP layer (`Page.handleJavaScriptDialog`), polled by the
     /// JS thread's dialog closures.
     dialog_gate: crate::js::DialogGate,
+    /// Optional CoreEvent sender (clone of the one given to the JS runtime)
+    /// so the navigate path can emit download events from the async thread.
+    event_tx: Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>,
+}
+
+/// Configurable download directory for `Content-Disposition: attachment`
+/// responses. Set via [`set_download_behavior`] (CDP `Page.setDownloadBehavior`).
+static DOWNLOAD_DIR: std::sync::LazyLock<parking_lot::RwLock<Option<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(None));
+
+/// Set the download directory (`None` = downloads disabled / discarded).
+pub fn set_download_behavior(path: Option<std::path::PathBuf>) {
+    *DOWNLOAD_DIR.write() = path;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +454,7 @@ impl Session {
             ws_task,
             closed: AtomicBool::new(false),
             dialog_gate,
+            event_tx: None,
             in_flight,
         })
     }
@@ -489,10 +503,30 @@ impl Session {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("text/html")
             .to_string();
+        let content_disposition = response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let max = self.config.max_response_body_bytes;
         let (bytes, truncated) = HttpClient::read_body_limited(response, max).await?;
         if truncated {
             tracing::warn!(final_url = %final_url, max_bytes = max, "navigate body truncated");
+        }
+
+        // Download handling: a `Content-Disposition: attachment` response (or
+        // a non-HTML content type with a download dir configured) is saved to
+        // the download directory instead of being rendered.
+        if content_disposition
+            .to_ascii_lowercase()
+            .contains("attachment")
+        {
+            if let Err(e) = self.handle_download(&final_url, &content_disposition, &bytes) {
+                tracing::warn!(error = %e, "download handling failed; falling back to render");
+            } else {
+                return Ok(());
+            }
         }
 
         let html = crate::encoding::decode_html(&bytes, Some(&ct_header));
@@ -525,6 +559,48 @@ impl Session {
         // Inject DOM snapshot into JS runtime
         self.inject_dom_snapshot().await;
 
+        Ok(())
+    }
+
+    /// Save a downloaded attachment to the configured download directory and
+    /// emit a [`CoreEvent::Download`]. Returns `Err` if no download directory
+    /// is configured (so the caller falls back to rendering the body).
+    fn handle_download(&self, url: &Url, disposition: &str, bytes: &[u8]) -> Result<()> {
+        let dir = DOWNLOAD_DIR
+            .read()
+            .clone()
+            .ok_or_else(|| CoreError::NetworkError("no download directory configured".into()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| CoreError::NetworkError(e.to_string()))?;
+
+        let filename = filename_from_disposition(disposition)
+            .or_else(|| {
+                url.path_segments()
+                    .and_then(|mut s| s.next_back())
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "download.bin".to_string());
+        // Sanitize: keep only the basename (no path traversal).
+        let safe = std::path::Path::new(&filename)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "download.bin".to_string());
+        let save_path = dir.join(&safe);
+
+        std::fs::write(&save_path, bytes)
+            .map_err(|e| CoreError::NetworkError(format!("failed to write download: {e}")))?;
+
+        let guid = format!("dl-{}", uuid::Uuid::new_v4().as_simple());
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(crate::js::CoreEvent::Download {
+                guid: guid.clone(),
+                url: url.to_string(),
+                filename: safe.clone(),
+                save_path: save_path.to_string_lossy().into_owned(),
+                total_bytes: bytes.len(),
+            });
+        }
+        tracing::info!(url = %url, filename = %safe, bytes = bytes.len(), "download saved");
         Ok(())
     }
 
@@ -832,6 +908,7 @@ impl Session {
     /// dialog events flow to an observer (typically the CDP layer). Called by
     /// the CDP session once it has created its event drainer.
     pub fn set_event_sink(&mut self, tx: std::sync::mpsc::Sender<crate::js::CoreEvent>) {
+        self.event_tx = Some(tx.clone());
         self.js_runtime.set_event_sink(tx);
     }
 
@@ -1185,6 +1262,23 @@ impl Session {
     }
 }
 
+/// Extract the `filename` from a `Content-Disposition` header value.
+/// Handles both `filename="name"` and `filename=name` (case-insensitive).
+fn filename_from_disposition(disposition: &str) -> Option<String> {
+    let lower = disposition.to_ascii_lowercase();
+    let idx = lower.find("filename=")?;
+    let rest = &disposition[idx + "filename=".len()..];
+    let rest = rest.trim_start();
+    if let Some(stripped) = rest.strip_prefix('"') {
+        // Quoted: take until closing quote.
+        stripped.split('"').next().map(|s| s.to_string())
+    } else {
+        // Unquoted: take until ';' or end.
+        rest.split(';').next().map(|s| s.trim().to_string())
+    }
+    .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,5 +1342,52 @@ mod tests {
             .await
             .expect("evaluate");
         assert_eq!(r.value, Some(serde_json::json!("complete")));
+    }
+
+    #[test]
+    fn test_filename_from_disposition() {
+        assert_eq!(
+            filename_from_disposition("attachment; filename=\"report.pdf\""),
+            Some("report.pdf".into())
+        );
+        assert_eq!(
+            filename_from_disposition("attachment; filename=data.csv"),
+            Some("data.csv".into())
+        );
+        assert_eq!(filename_from_disposition("inline"), None);
+    }
+
+    #[tokio::test]
+    async fn test_navigate_to_attachment_downloads_file() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-disposition", "attachment; filename=\"hello.txt\"")
+                    .set_body_string("downloaded-body"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join(format!("oxi-dl-{}", uuid::Uuid::new_v4()));
+        set_download_behavior(Some(dir.clone()));
+
+        let mut session = make_session().await;
+        let url = format!("{}/file", server.uri());
+        session.navigate(&url).await.expect("navigate");
+
+        let saved = dir.join("hello.txt");
+        assert!(saved.exists(), "download file should exist at {saved:?}");
+        assert_eq!(
+            std::fs::read_to_string(&saved).unwrap(),
+            "downloaded-body",
+            "saved content should match the response body"
+        );
+        set_download_behavior(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

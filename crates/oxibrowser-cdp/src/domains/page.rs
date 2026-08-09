@@ -35,6 +35,7 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
         "getFrameMetrics" => get_frame_metrics(),
         "captureScreenshot" => capture_screenshot(params, ctx).await,
         "printToPDF" => print_to_pdf(params, ctx).await,
+        "setDownloadBehavior" => set_download_behavior(params),
         "getLifecycleEvents" => Ok(Some(json!({ "events": [] }))),
         "setLifecycleEventsEnabled" => set_lifecycle_events_enabled(params, ctx),
         // Dialog handling: alert/confirm/prompt default to non-blocking
@@ -448,6 +449,23 @@ fn render_png_to_pdf(png: &[u8]) -> Option<Vec<u8>> {
     );
     doc.pages.push(page);
     Some(doc.save(&PdfSaveOptions::default(), &mut warnings))
+}
+
+/// `Page.setDownloadBehavior` — configure the directory downloads are saved to.
+fn set_download_behavior(params: Option<Value>) -> DomainResult {
+    let params = params.unwrap_or_default();
+    let path = params.get("downloadPath").and_then(|v| v.as_str());
+    let behavior = params
+        .get("behavior")
+        .and_then(|v| v.as_str())
+        .unwrap_or("allow");
+    let dir = if behavior == "deny" {
+        None
+    } else {
+        path.map(std::path::PathBuf::from)
+    };
+    oxibrowser_core::session::set_download_behavior(dir);
+    Ok(Some(json!({})))
 }
 
 /// Page.handleJavaScriptDialog — accept or dismiss a pending
