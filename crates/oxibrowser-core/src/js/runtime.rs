@@ -4733,10 +4733,17 @@ fn create_render_element_object(
                 .as_object()
                 .and_then(|o| o.get(js_string!("__nodeId"), ctx).ok())
                 .and_then(|v| v.as_number().map(|n| n as usize));
-            if let (Some(cid), Some(doc)) = (child_id, rd_ac.borrow_mut().as_mut()) {
+            let appended = if let (Some(cid), Some(doc)) = (child_id, rd_ac.borrow_mut().as_mut()) {
                 doc.append_child(node_id, cid);
                 notify_mutation_observers(ctx, "childList", node_id as u32);
-                // Fire connectedCallback for the appended (now-connected) node.
+                true
+            } else {
+                false
+            };
+            // Fire connectedCallback OUTSIDE the render-doc borrow, so a
+            // callback that touches the DOM (setAttribute/appendChild) can
+            // re-borrow the RefCell without panicking.
+            if appended {
                 call_global_helper(ctx, "__oxi_fire_connected", std::slice::from_ref(&child));
             }
             Ok(child)
@@ -4746,9 +4753,16 @@ fn create_render_element_object(
     let rd_rem = render_doc.clone();
     let remove_fn = unsafe {
         NativeFunction::from_closure(move |this: &JsValue, _args, ctx| {
-            if let Some(doc) = rd_rem.borrow_mut().as_mut() {
-                doc.remove_node(node_id);
-                // Fire disconnectedCallback for the removed (now-disconnected) node.
+            let removed = rd_rem
+                .borrow_mut()
+                .as_mut()
+                .map(|doc| {
+                    doc.remove_node(node_id);
+                })
+                .is_some();
+            // Fire disconnectedCallback OUTSIDE the render-doc borrow (see
+            // connectedCallback above).
+            if removed {
                 call_global_helper(ctx, "__oxi_fire_disconnected", std::slice::from_ref(this));
             }
             Ok(JsValue::undefined())
@@ -11343,20 +11357,27 @@ mod tests {
             .evaluate(
                 "var log = [];\
                  class XLc extends HTMLElement {\
-                   connectedCallback() { log.push('connected'); }\
+                   connectedCallback() {\
+                    log.push('connected');\
+                    this.setAttribute('data-cb', 'on');\
+                    this.appendChild(document.createElement('span'));\
+                   }\
                    disconnectedCallback() { log.push('disconnected'); }\
-                   static get observedAttributes() { return ['data-x']; }\
+                   static get observedAttributes() { return ['data-x', 'data-cb']; }\
                    attributeChangedCallback(n, o, v) { log.push('attr:' + n + '=' + v); }\
                  }\
                  customElements.define('x-lc', XLc);\
                  var el = document.createElement('x-lc');\
-                 document.body.appendChild(el);\
+                document.body.appendChild(el);\
                  el.setAttribute('data-x', '1');\
                  el.remove();\
                  JSON.stringify(log)",
             )
             .await
             .unwrap();
+        if r.exception.is_some() {
+            panic!("lifecycle eval threw: {:?}", r.exception);
+        }
         let s = r
             .value
             .as_ref()
