@@ -14,8 +14,9 @@
 
 ## 1. 현재 위치 (한 줄)
 
-**Phase 1–5 + 4/5 follow-ups 완료. Phase 7 일부 완료. 남은 큰 덩어리 = Phase 6(네트워크
-정확성), 그 다음 Phase 7 잔여 → Phase 8 → Phase 9.**
+**Phase 1–5 + 4/5 follow-ups 완료. Phase 6 전부 완료, Phase 7 일부(폰트 차단), Phase 8 일부
+(자식 프레임 population 완료, 분리 컨텍스트/cross-frame 잔여), Phase 9 전부 완료. 남은 유일
+블로커 = 폰트(Blitz private API, §3.2).**
 
 핵심 피드백 루프(parse → `<script>` 실행 → 이벤트 루프 → 비동기 fetch → 라이브
 RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Playwright/Puppeteer
@@ -31,7 +32,7 @@ RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Play
 | 4+5 follow-ups | 섀도 스크린샷 래스터화, 콘솔 타입화 RemoteObject, 드레이너 종료, 섀도 DOM slot API·closed-mode·innerHTML·declarative | ✅ (이번 분기) |
 | 6 | 네트워크 정확성(CORS/preflight, 쿠키 만료/PSL/CHIPS, proxy, auth, Referer, streaming) | ✅ (2026-08-09) |
 | 7 | 렌더/상호작용 정확도(hit-testing, printToPDF) | 🟡 (폰트 §3.2 Blitz private API로 차단) |
-| 8 | iframe/다중 프레임 | ❌ 미착수 |
+| 8 | iframe/다중 프레임 | 🟡 (자식 프레임 population 완료; 분리 컨텍스트/cross-frame 잔여) |
 | 9 | Playwright 롱테일(멀티탭, downloads, geolocation/timezone, interception, tracing) | ✅ (2026-08-09) |
 
 ---
