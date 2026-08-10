@@ -14,9 +14,10 @@
 
 ## 1. 현재 위치 (한 줄)
 
-**Phase 1–5 + 4/5 follow-ups 완료. Phase 6 전부 완료, Phase 7 일부(폰트 차단), Phase 8 일부
-(자식 프레임 population 완료, 분리 컨텍스트/cross-frame 잔여), Phase 9 전부 완료. 남은 유일
-블로커 = 폰트(Blitz private API, §3.2).**
+**Phase 1–9 전부 완료 (2026-08-10).** Phase 9의 마지막 잔여였던 JS-fetch 인터셉션까지
+마감(커밋 `e031352`). 남은 작업: Phase 8 iframe 분리 컨텍스트(대규모, §5), 폰트(차단, §3.2),
+JS-fetch e2e 검증(선택). **최신 잔여 작업 목록은 `2026-08-10-remaining-work.md`를 먼저
+읽을 것.**
 
 핵심 피드백 루프(parse → `<script>` 실행 → 이벤트 루프 → 비동기 fetch → 라이브
 RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Playwright/Puppeteer
@@ -31,24 +32,22 @@ RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Play
 | 5 | CDP 완전성(Emulation, Log, flat-protocol sessionId, exceptionThrown/consoleAPICalled, DOM.*, dialog) | ✅ |
 | 4+5 follow-ups | 섀도 스크린샷 래스터화, 콘솔 타입화 RemoteObject, 드레이너 종료, 섀도 DOM slot API·closed-mode·innerHTML·declarative | ✅ (이번 분기) |
 | 6 | 네트워크 정확성(CORS/preflight, 쿠키 만료/PSL/CHIPS, proxy, auth, Referer, streaming) | ✅ (2026-08-09) |
-| 7 | 렌더/상호작용 정확도(hit-testing, printToPDF) | 🟡 (폰트 §3.2 Blitz private API로 차단) |
+| 7 | 렌더/상호작용 정확도(hit-testing, printToPDF) | ✅ (2026-08-09; 폰트 §3.2만 차단) |
 | 8 | iframe/다중 프레임 | 🟡 (자식 프레임 population 완료; 분리 컨텍스트/cross-frame 잔여) |
-| 9 | Playwright 롱테일(멀티탭, downloads, geolocation/timezone, interception, tracing) | ✅ (2026-08-09) |
+| 9 | Playwright 롱테일(멀티탭, downloads, geolocation/timezone, interception, tracing) | ✅ (2026-08-10, JS-fetch 인터셉션 포함) |
 
 ---
 
-## 2. 권장 진행 순서
+## 2. 권장 진행 순서 (2026-08-10 기준 — Phase 6·7·9 완료, 진행 순서는 `2026-08-10-remaining-work.md` §5 참조)
 
-1. **(선행) 궁극 인수 테스트 baseline 확정** — Phase 6 착수 전, 상위 로드맵 §6의 인수
-   테스트(React SPA: 이동 → 로그인 폼 작성 → submit → 대시보드 대기 → 스크린샷이
-   `oxibrowser serve`에서 통과)를 한 번 돌려 현재 어디까지 통과하는지 기록한다. Phase 1–5
-   가 닫혔으므로 대부분 통과할 것으로 예상되나, 명시적 증거가 아직 없다. [INFERENCE]
-2. **Phase 6 — 네트워크 정확성** (§4). real-site 자동화에서 인증/쿠키/크로스오리진이
-   걸리는 빈도가 가장 높아 실사용 관점 임팩트가 가장 크다.
-3. **Phase 7 잔여** (§3) — hit-testing을 추정치에서 실제 Taffy 레이아웃 박스 기반으로
-   전환(클릭 신뢰성 직결). 폰트·PDF는 충실도 영역으로 후순위 가능.
-4. **Phase 8 — iframe/다중 프레임** (§5).
-5. **Phase 9 — Playwright 롱테일** (§6).
+1. **(남은 유일 기능 작업) Phase 8 — iframe 분리 컨텍스트/cross-frame** (§5). 대규모 —
+   착수 시 전용 spec 먼저.
+2. **(선택) 궁극 인수 테스트 baseline 확정** — 상위 로드맵 §6의 인수 테스트(React SPA:
+   이동 → 로그인 폼 작성 → submit → 대시보드 대기 → 스크린샷)를 `oxibrowser serve`에서
+   한 번 돌려 현재 어디까지 통과하는지 기록한다. 명시적 증거가 아직 없다. [INFERENCE]
+3. **(선택) JS-fetch 인터셉션 CDP round-trip e2e** — 유닛 테스트는 완료(`e031352`),
+   라이브 서버 e2e만 남음.
+4. **폰트 (§3.2)** — 차단 유지(Blitz 포크 결정 전까지 재개 금지).
 
 ---
 
@@ -58,54 +57,39 @@ RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Play
 lifecycle 콜백, 레이아웃 기반 geometry(`getBoxModel`/`getContentQuads`/`getNodeForLocation`
 via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-feed).
 
-### 3.1 레이아웃 기반 hit-testing (우선)
-- **문제:** `document.elementFromPoint(x,y)`가 여전히 **추정치**다. DOM 순서 + 태그별 높이
-  휴리스틱으로 Y 위치를 근사한다.
-- **앵커:** `crates/oxibrowser-core/src/js/runtime.rs:6455`(elementFromPoint 네이티브),
-  `runtime.rs:10239`(`estimate_element_height`). 사용처: `crates/oxibrowser-core/src/js/
-  input.rs`(마우스/드래그 디스패치), `crates/oxibrowser-cdp/src/domains/input.rs`.
-- **방향:** Blitz `BaseDocument`가 이미 Taffy 레이아웃 박스(`node.final_layout`)를 가지고
-  있으므로, `elementFromPoint`를 "해당 좌표를 포함하는 가장 깊은 페인트된 노드" 탐색으로
-  교체. `RenderDocument::node_layout_rect`(`crates/oxibrowser-render/src/document.rs`)와
-  `LayoutEngine::compute_rect`를 재사용.
-- **영향:** 클릭/입력 hit-test 신뢰성 직결 → Playwright `click()` 정확도.
+### 3.1 레이아웃 기반 hit-testing — ✅ 완료 (2026-08-09)
+- `hit_test_element`(`crates/oxibrowser-core/src/js/runtime.rs`)로 렌더 문서 레이아웃 기반
+  히트 테스트 전환, `SetDocument`가 렌더 문서 기준 DomSnapshot 구성(id 일관성). 커밋 `96949fe`.
 
 ### 3.2 폰트 로딩 — `fontdb` / `@font-face`
 - **문제:** 웹폰트가 로드되지 않아 텍스트 폭/레이아웃이 부정확할 수 있다.
 - **방향:** Blitz에 `fontdb` 통합 + `@font-face` 규칙 파싱 → 폰트 파일 fetch/매핑.
 - **비고:** 충실도 영역. 자동화(correctness) 블로커는 아님.
 
-### 3.3 `printToPDF`
-- **문제:** 현재 빈 PDF를 반환. `printpdf` 의존성 미추가.
-- **앵커:** `crates/oxibrowser-cdp/src/domains/page.rs:404`(`print_to_pdf`).
-- **비고:** 충실도 영역. 후순위.
+### 3.3 `printToPDF` — ✅ 완료 (2026-08-09)
+- `printpdf`/`png` 피처로 실 PDF 반환. 커밋 `bf29f0b`.
 
 ---
 
-## 4. Phase 6 — 네트워크 정확성 (다음 우선순위)
+## 4. Phase 6 — 네트워크 정확성 — ✅ 완료 (2026-08-09)
 
-> 이 phase는 spec→plan→TDD 의 단위 분리가 아직 없다. 착수 시 전용 spec
-> (`docs/superpowers/specs/<date>-phase6-network-correctness.md`)를 먼저 작성할 것.
+> 전용 spec: `2026-08-09-phase6-network-correctness.md` (커밋 `def1854`→`af6222f`).
 
 상위 로드맵 §3 Phase 6 항목. 현재 네트워크 계층은 전송(HTTP/1.1+H2+TLS+gzip/br)은 완성,
 정책 계층이 비어 있다.
 
 | 작업 | 현재 상태 | 앵커 / 메모 |
 |---|---|---|
-| **CORS + preflight** | ❌ 없음 | `Origin` 송출, `Access-Control-*` 응답 헤더 해석, 사전`OPTIONS` 프리플라이트. `client.rs` |
-| **쿠키 만료 / Max-Age** | ❌ | `network/cookie.rs` — 현재 jar 저장만. 만료/갱신 미구현 |
-| **Public Suffix List** | ❌ | 도메인 매칭/`domain` 쿠키 스코프에 PSL 필요 |
-| **CHIPS 분할 쿠키 + `__Host-`/`__Secure-`** | ❌ | 파티션 키 + prefix 검증 |
-| **proxy(HTTP/SOCKS)** | ❌ | `wreq`/`btls` 설정 |
-| **auth(basic/digest)** | ❌ | `Authorization` 헤더 + 401 챌린지 |
-| **자동 `Referer`** | ❌ | Origin/경로 기반 Referrer 정책 |
-| **스트리밍 본문** | ❌ | 현재 본문 전체 버퍼링 |
+| **CORS + preflight** | ✅ | `network/cors.rs` — Origin 송출, `Access-Control-*` 해석, `OPTIONS` 프리플라이트 |
+| **쿠키 만료 / Max-Age** | ✅ | `network/cookie.rs` — `Expires`(`httpdate`), `Max-Age<=0` 삭제, lazy purge |
+| **Public Suffix List** | ✅ | `psl` crate — `Domain=` 공개 접미사 거부, `registrable_domain` eTLD+1 |
+| **CHIPS 분할 쿠키 + `__Host-`/`__Secure-`** | ✅ | prefix 검증 + `Partitioned`/`partition_key` |
+| **proxy(HTTP/SOCKS)** | ✅ | `BrowserConfig.proxy` + `serve --proxy` |
+| **auth(basic/digest)** | ✅ | `network/auth.rs` — 401 챌린지 재시도 (`request_with_auth`) |
+| **자동 `Referer`** | ✅ | strict-origin-when-cross-origin, `CURRENT_ORIGIN` + `FetchRequestMsg.origin` |
+| **스트리밍 본문** | ✅ | wreq `bytes_stream` + `stream` 피처 |
 
-앵커 디렉토리: `crates/oxibrowser-core/src/network/`(`client.rs`, `cookie.rs`, `ip_filter.rs`,
-`intercept.rs`, `resource.rs`, `ws.rs`, `robots.rs`).
-
-**검증 바(상위 로드맵 §6):** 각 작업은 main에서 실패하는 테스트 → 통과로 마감. CORS/쿠키는
-`wiremock` 기반 통합 테스트(이미 워크스페이스에 있음)로 real round-trip 검증.
+커밋 범위: `def1854`→`af6222f` (2026-08-09). 전용 spec: `2026-08-09-phase6-network-correctness.md`.
 
 ---
 
@@ -127,7 +111,7 @@ via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-f
 `setTimezoneOverride`); **파일 다운로드** (2026-08-09, `Content-Disposition:
 attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
 
-남은 항목: **없음** — Phase 9 전부 완료 (2026-08-09).
+남은 항목: **없음** — Phase 9 전부 완료 (2026-08-10, JS-fetch 인터셉션 포함).
 
 완료 내역:
 - **✅ 멀티탭** — `Target.createTarget`가 실 Browser 세션 생성 (`child_targets`
@@ -136,8 +120,11 @@ attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
   **자식 세션 JS-발생 이벤트**(console/exception/fetch/WS)도 `emit_core_event_with_session`
   drainer로 자식 sessionId와 함께 발신됨 (2026-08-09).
 - **✅ request interception** — navigate 경로에서 `emit_request_paused` + oneshot
-  대기로 실배선. continue/fail/fulfill (Playwright route()). JS-fetch 경로
-  인터셉션은 향후 과제.
+  대기로 실배선. continue/fail/fulfill (Playwright route()). **JS-fetch 경로
+  인터셉션도 완료** (2026-08-10, 커밋 `e031352` — `Fetch.enable` 패턴 → core
+  `FETCH_PATTERNS` 미러링, `maybe_intercept` 페이즈, `CoreEvent::RequestPaused` →
+  `Fetch.requestPaused` 변환; 유닛 테스트 `test_maybe_intercept_js_fetch_interception`).
+  CDP round-trip e2e는 `2026-08-10-remaining-work.md` §2.3 선택 항목.
 - **✅ tracing** — Tracing 도메인 (start/end/getCategories + dataCollected/
   tracingComplete). 풀 timeline/network tracer는 범위 밖.
 - **✅ viewport device-metrics 실적용** — `VIEWPORT_OVERRIDE` 정적이 레이아웃에 반영.
