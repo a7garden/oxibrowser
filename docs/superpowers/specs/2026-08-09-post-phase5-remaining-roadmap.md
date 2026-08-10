@@ -32,7 +32,7 @@ RenderDocument → Blitz 렌더 → screenshot/CDP)는 이미 닫혀 있고 Play
 | 6 | 네트워크 정확성(CORS/preflight, 쿠키 만료/PSL/CHIPS, proxy, auth, Referer, streaming) | ✅ (2026-08-09) |
 | 7 | 렌더/상호작용 정확도(hit-testing, printToPDF) | 🟡 (폰트 §3.2 Blitz private API로 차단) |
 | 8 | iframe/다중 프레임 | ❌ 미착수 |
-| 9 | Playwright 롱테일(geolocation/timezone, downloads, 멀티탭, tracing) | 🟡 부분(geolocation/timezone + downloads 완료) |
+| 9 | Playwright 롱테일(멀티탭, downloads, geolocation/timezone, interception, tracing) | ✅ (2026-08-09) |
 
 ---
 
@@ -126,23 +126,19 @@ via `LayoutEngine`), Shadow DOM composition + 섀도 스크린샷(compose-then-f
 `setTimezoneOverride`); **파일 다운로드** (2026-08-09, `Content-Disposition:
 attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
 
-남은 항목:
-- **멀티탭 (큰 규모)** — `Target.createTarget`가 stub(가짜 targetId). 진짜 구현에 필요:
-  (1) `CdpSession`이 `targetId/sessionId → Arc<RwLock<Session>>` 맵 보유 (Browser의
-  `sessions: Vec` 재사용 가능); (2) `create_target`가 Browser로 새 Session 생성 →
-  targetId 등록 + `Target.targetCreated`/`attachedToTarget`(새 sessionId) 이벤트;
-  (3) `dispatch_command`가 들어오는 메시지의 `sessionId`로 대상 Session 해석 (현재는
-  항상 단일 `self.session` 사용 — `session.rs:161`); (4) 자식 타겟 이벤트에 자식
-  sessionId 부착. Phase 5 flat-protocol sessionId 멀티플렉싱은 응답/이벤트에만 있고
-  수신 라우팅엔 없음. 앵커: `crates/oxibrowser-cdp/src/domains/target.rs:120`,
-  `crates/oxibrowser-cdp/src/session.rs:160`(dispatch ctx), 
-  `crates/oxibrowser-core/src/browser.rs:48`(sessions Vec).
-- **✅ request interception** (2026-08-09) — navigate 경로에서 `emit_request_paused` +
-  oneshot 대기로 실배선 완료. continue/fail/fulfill 지원 (Playwright route()).
-  JS-fetch 경로 인터셉션은 향후 과제.
-- **tracing** — 큰 규모 (미착수).
-- **✅ viewport device-metrics 실적용** (2026-08-09) — `setDeviceMetricsOverride`가
-  `VIEWPORT_OVERRIDE` 정적을 통해 레이아웃 뷰포트에 실반영.
+남은 항목: **없음** — Phase 9 전부 완료 (2026-08-09).
+
+완료 내역:
+- **✅ 멀티탭** — `Target.createTarget`가 실 Browser 세션 생성 (`child_targets`
+  맵 등록 + `targetCreated`/`attachedToTarget`). `dispatch_command`가 들어오는
+  명령의 `sessionId`로 대상 세션 해석. 자식 탭 navigate/evaluate/DOM 동작.
+  자식 타겟 lifecycle 이벤트는 각 자식 전용 CoreEvent drainer 필요 (향후).
+- **✅ request interception** — navigate 경로에서 `emit_request_paused` + oneshot
+  대기로 실배선. continue/fail/fulfill (Playwright route()). JS-fetch 경로
+  인터셉션은 향후 과제.
+- **✅ tracing** — Tracing 도메인 (start/end/getCategories + dataCollected/
+  tracingComplete). 풀 timeline/network tracer는 범위 밖.
+- **✅ viewport device-metrics 실적용** — `VIEWPORT_OVERRIDE` 정적이 레이아웃에 반영.
 
 ---
 
