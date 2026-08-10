@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Nested-iframe contexts (W3b)** — child frames beyond depth 1 are now discovered (`DomSnapshot::extract_iframes` / `iframe_srcs` walk the tree instead of scanning top-level nodes) and given their own JS execution context (`Session::populate_iframes` populates every frame in the tree via BFS; `Session::inject_child_frames` walks the full frame tree before issuing `SetFrameDocument` commands). `Page.getFrameTree` now reports the complete recursive hierarchy and `Runtime.evaluate { contextId: <grandchild> }` reaches the grandchild DOM. New `Frame::find_by_id`, `find_mut_by_id`, and `find_by_frame_id_str` helpers back the lookup. Closing this unblocks `window.parent`/`window.top` (W3c) and dynamic-iframe creation (W3d). Regression: `acceptance/nested/run.sh` 7/7 PASS.
 - **External `<link rel=stylesheet>` applied (W2-pre / §5.2)** — pages with `<link rel=stylesheet href="/x.css">` no longer panic in Blitz's parser. New `dom_link` module (regex-based `external_stylesheet_links` / `strip_stylesheet_links` / `inject_inline_style`, compiled once via `std::sync::LazyLock`) is invoked from `Session::populate_html` *before* `Page::from_html`: each stylesheet is fetched through the existing `http_client`, folded into a single inline `<style>` block, and the `<link>` tag is stripped. Regression: `acceptance/external-stylesheet/run.sh` 4/4 PASS — pixels of the antialiased `#008000` rule reach paint. Note: `getComputedStyle` from `LayoutEngine` only inspects inline `style=` attributes; applied CSS rules show up in `Page.captureScreenshot` output (paint), not in the JS-side `getComputedStyle` object.
+- **`window.addEventListener` mirror (W3a / §5.3)** — `window.addEventListener('load', cb)` no longer throws. The JS bootstrap installed `addEventListener`/`removeEventListener`/`dispatchEvent` on `globalThis`, but `window` was a distinct JS object without those methods. Mirror at the end of `HISTORY_LOCATION_BOOTSTRAP` (same shape as the existing `matchMedia` mirror) copies the three methods onto `globalThis.window` with `||` so a future Rust-side stub still wins. Regression: `acceptance/window-ael/run.sh` 3/3 PASS.
+- **Relative fetch URL resolution (W3b / §5.3)** — `fetch('/api/x')` no longer rejects with `TypeError: Invalid URL`. The Rust-side fetch binding expects an absolute URL; the JS-side `resolveUrl` helper (already in `HISTORY_LOCATION_BOOTSTRAP` for history/location) now wraps `globalThis.fetch` and `window.fetch` to join relative refs against the current page URL before delegating. Regression: `acceptance/relative-fetch/run.sh` 3/3 PASS.
+- **`hashchange` fires on `location.hash = '#x'` (W3c / §5.3)** — assigning `window.location.hash = '#x'` now dispatches a `hashchange` event with `oldURL`/`newURL`. The host `Location`'s native `hash` setter is non-configurable, so `Object.defineProperty` was shadowed by it; instead, `HISTORY_LOCATION_BOOTSTRAP` wraps `window.location` in a `Proxy` whose `set` handler intercepts the `hash` property, mutates the top history entry, and calls a small `fireHashchange` helper that dispatches to listeners installed via the standard `addEventListener('hashchange', cb)`. Initial fires a `hashchange` when PAGE_URL carries a fragment. Regression: `acceptance/hashchange/run.sh` 3/3 PASS.
 
 ### Added
 - **`@font-face` webfont loading** — inline `<style>` `@font-face` rules are scanned for font URLs, the font files are fetched through the network stack, and the bytes are registered into a Parley `FontContext` (`Collection::register_fonts`) carried into layout via Blitz's public `DocumentConfig.font_ctx`. Custom webfonts now reach Stylo/Taffy text shaping — **no Blitz fork required** (the prior "fork required" premise confused the svg/usvg `FONT_DB` with the text-layout `FontContext`; verified by a spike + end-to-end render). `RenderDocument::from_html_with_fonts`, `HttpClient::fetch_bytes`, and a `fonts` module (`extract_font_face_urls`) are the new surface.
@@ -20,14 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **`Fetch.fulfillRequest` body decoding** — the handler only base64-decoded the body when a `base64Encoded` param was present, but CDP's `Fetch.fulfillRequest.body` is base64-encoded by spec with no such flag (Chrome/Playwright/Puppeteer always send base64). An intercepted fetch therefore resolved to the raw base64 string instead of the decoded body. Now decoded unconditionally.
-
-### Known gaps (surfaced by the acceptance harness; candidates for follow-up)
-
-- JS `fetch()` rejects relative URLs ("invalid URL"); absolute URLs are required. Real browsers resolve against the document base.
-- `hashchange` events are not fired.
-
-
-
 ## [0.18.0] - 2026-08-10
 
 ### Added

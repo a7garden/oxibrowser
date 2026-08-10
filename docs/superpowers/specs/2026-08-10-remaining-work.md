@@ -110,8 +110,7 @@ about:blank) 완료·검증. 남은 항목:
    회귀: `acceptance/nested/run.sh` 7/7 PASS. W3c(window.parent/top) / W3d(동적 iframe)의
    전제조건 충족.
 2. ~~외부 `<link rel=stylesheet>` 적용~~ — **완료 (`4df5917`)**. fetch + inline-injection path에서 panic 우회.
-3. **알려진 갭** (인수 하네스로 발견): `window.addEventListener` 부재, JS `fetch()` 상대 URL
-   미resolve("invalid URL"), `hashchange` 미발화. 상대 URL fetch는 실사이트 호환에 영향 큰 후보.
+3. ~~알려진 갭 (인수 하네스로 발견)~~ — **완료 (2026-08-10)**. `window.addEventListener/removeEventListener/dispatchEvent`는 JS 부트스트랩에서 globalThis → window로 미러, `fetch('/api/x')`는 같은 부트스트랩의 `resolveUrl` 래퍼로 해결, `hashchange`는 `window.location` Proxy에서 발화. 회귀: `acceptance/window-ael`, `acceptance/relative-fetch`, `acceptance/hashchange` 각각 3/3 PASS.
 4. 인수 하네스는 `bash acceptance/run.sh`로 재실행 가능 (회귀 게이트).
 
 끝.
