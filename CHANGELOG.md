@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Tracing domain** — `Tracing.start`/`Tracing.end`/`Tracing.getCategories` implemented. `end` emits `Tracing.dataCollected` (a minimal Chromium-format trace with a `TracingStartedInBrowser` metadata event) + `Tracing.tracingComplete`, satisfying the Playwright `page.tracing.start()`/`stop()` contract. A full timeline/network tracer is out of scope.
 - **Multi-tab** — `Target.createTarget` now creates a real Browser session (was a fake-targetId stub) and emits `Target.targetCreated`/`Target.attachedToTarget`. The flat-protocol dispatcher routes incoming commands by `sessionId` to the attached child session (a `child_targets` map), so `context.newPage()` yields a drivable tab (navigate/evaluate/DOM). Child-target lifecycle events (load, etc.) still require a per-child CoreEvent drainer — noted as remaining work.
 - **Cookie expiry / `Max-Age`** — `CookieEntry` now parses `Expires` (HTTP-date via `httpdate`) and `Max-Age`; `CookieJar::store` computes an absolute expiry. `Max-Age <= 0` and past `Expires` delete any existing matching cookie; expired cookies are purged lazily on read. Closes the Phase 6 cookie-expiry gap.
 - **Public Suffix List** — cookie `Domain=` attributes are rejected when they scope to a bare public suffix (e.g. `co.uk`, `com`) via the bundled Mozilla PSL (`psl` crate). A `registrable_domain` (eTLD+1) helper is exposed for partition keys.

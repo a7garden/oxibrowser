@@ -15,6 +15,7 @@ pub mod oxi;
 pub mod page;
 pub mod runtime;
 pub mod target;
+pub mod tracing;
 
 use crate::event::EventSender;
 use crate::protocol::CdpError;
@@ -79,6 +80,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "Page" => page::handle(method_name, params, ctx).await,
         "Runtime" => runtime::handle(method_name, params, ctx).await,
         "Target" => target::handle(method_name, params, ctx).await,
+        "Tracing" => tracing::handle(method_name, params, ctx),
         _ => Err(CdpError {
             code: -32601,
             message: format!("unknown domain: {domain}"),
