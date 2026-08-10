@@ -19,9 +19,13 @@ pub fn extract_font_face_urls(css_or_html: &str) -> Vec<String> {
     let mut rest = css_or_html;
     while let Some(start) = rest.find("@font-face") {
         rest = &rest[start..];
-        let Some(brace_off) = rest.find('{') else { break };
+        let Some(brace_off) = rest.find('{') else {
+            break;
+        };
         let after_brace = &rest[brace_off + 1..];
-        let Some(close_rel) = after_brace.find('}') else { break };
+        let Some(close_rel) = after_brace.find('}') else {
+            break;
+        };
         let body = &after_brace[..close_rel];
 
         // Only collect URLs from `src:` declarations (not other url() uses).
@@ -29,10 +33,7 @@ pub fn extract_font_face_urls(css_or_html: &str) -> Vec<String> {
         while let Some(src_off) = b.to_ascii_lowercase().find("src") {
             b = &b[src_off..];
             let Some(colon) = b.find(':') else { break };
-            let decl_end = b[colon..]
-                .find(';')
-                .map(|p| colon + p)
-                .unwrap_or(b.len());
+            let decl_end = b[colon..].find(';').map(|p| colon + p).unwrap_or(b.len());
             let decl = &b[colon + 1..decl_end];
             // Capture every url(...) within this src declaration.
             let mut d = decl;
@@ -67,7 +68,8 @@ mod tests {
 
     #[test]
     fn extracts_single_font_face_url() {
-        let css = "@font-face { font-family: 'Test'; src: url('/fonts/test.woff2') format('woff2'); }";
+        let css =
+            "@font-face { font-family: 'Test'; src: url('/fonts/test.woff2') format('woff2'); }";
         let urls = extract_font_face_urls(css);
         assert_eq!(urls, vec!["/fonts/test.woff2".to_string()]);
     }
