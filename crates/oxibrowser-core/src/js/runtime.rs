@@ -10719,7 +10719,23 @@ fn register_window_globals(
   }
   augment(globalThis.location);
   if (globalThis.window && globalThis.window.location) augment(globalThis.window.location);
-})();
+  // Wrap the native `fetch` so relative URLs resolve against the current
+  // page's base URL (real-browser behavior). The native binding expects an
+  // absolute URL — passing '/api/x' yields a TypeError. resolveUrl joins
+  // relative refs against PAGE_URL (origin-only for leading-`/`, doc
+  // directory for relative).
+  if (typeof globalThis.fetch === 'function') {
+    var __oxiFetch = globalThis.fetch;
+    var __oxiResolveForFetch = function (u) { try { return resolveUrl(u); } catch (_) { return u; } };
+    globalThis.fetch = function (input, init) {
+      if (input && typeof input === 'string') input = __oxiResolveForFetch(input);
+      else if (input && typeof input === 'object' && typeof input.url === 'string')
+        input = new (input.constructor || URL)(__oxiResolveForFetch(input.url));
+      return __oxiFetch.call(globalThis, input, init);
+    };
+    if (globalThis.window) { globalThis.window.fetch = globalThis.fetch; }
+  }
+ })();
 "#;
 }
 

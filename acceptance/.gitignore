@@ -6,3 +6,5 @@ external-stylesheet/mock.log
 external-stylesheet/serve.log
 window-ael/mock.log
 window-ael/serve.log
+relative-fetch/mock.log
+relative-fetch/serve.log
