@@ -146,6 +146,37 @@ fn emit_core_event_opt(events: &EventSender, ev: CoreEvent, session: Option<&str
                 }),
             );
         }
+        CoreEvent::RequestPaused {
+            request_id,
+            url,
+            method,
+            headers,
+            resource_type,
+            timestamp: _,
+        } => {
+            let headers_json: serde_json::Map<String, serde_json::Value> =
+                headers.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            let params = json!({
+                "requestId": request_id,
+                "request": {
+                    "url": url,
+                    "method": method,
+                    "headers": headers_json,
+                    "initialPriority": "VeryHigh",
+                    "urlFragment": "",
+                    "postData": serde_json::Value::Null,
+                },
+                "resourceType": resource_type,
+                "frameId": "main",
+                "networkIntercepted": true,
+            });
+            match session {
+                Some(sid) => {
+                    events.send_fetch_event_with_session("Fetch.requestPaused", params, sid)
+                }
+                None => events.send_fetch_event("Fetch.requestPaused", params),
+            }
+        }
     }
 }
 

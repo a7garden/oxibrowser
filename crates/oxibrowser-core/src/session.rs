@@ -100,8 +100,11 @@ pub struct Session {
     /// JS thread's dialog closures.
     dialog_gate: crate::js::DialogGate,
     /// Optional CoreEvent sender (clone of the one given to the JS runtime)
-    /// so the navigate path can emit download events from the async thread.
-    event_tx: Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>,
+    /// so the navigate path + the fetch bridge can emit download / interception
+    /// events from their async threads. Shared (Arc) so the background fetch
+    /// bridge thread can read it once `set_event_sink` populates it.
+    event_tx:
+        std::sync::Arc<parking_lot::RwLock<Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>>>,
 }
 
 /// Configurable download directory for `Content-Disposition: attachment`
@@ -136,6 +139,182 @@ pub(crate) fn current_viewport_override() -> Option<(u32, u32)> {
 }
 
 // ---------------------------------------------------------------------------
+// Fetch interception (JS fetch/XHR path)
+// ---------------------------------------------------------------------------
+
+/// Active Fetch-domain interception patterns (raw `urlPattern` strings), set by
+/// CDP `Fetch.enable`. Read by the fetch bridge to decide whether a JS-originated
+/// request should be paused.
+static FETCH_PATTERNS: std::sync::LazyLock<parking_lot::RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(Vec::new()));
+
+/// Set the active interception patterns (CDP `Fetch.enable`).
+pub fn set_fetch_patterns(patterns: Vec<String>) {
+    *FETCH_PATTERNS.write() = patterns;
+}
+
+/// Read the active interception patterns.
+pub(crate) fn fetch_patterns() -> Vec<String> {
+    FETCH_PATTERNS.read().clone()
+}
+
+/// Whether a URL matches any interception pattern. A pattern is a simple glob:
+/// `*` matches any substring; otherwise the URL must contain the pattern as a
+/// substring (covers `http://example.com/*` and bare domain fragments).
+pub(crate) fn url_matches_patterns(url: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    patterns.iter().any(|p| {
+        if p.is_empty() {
+            return false;
+        }
+        if p == "*" {
+            return true;
+        }
+        // Glob: split on '*'; every non-empty segment must appear in order.
+        if p.contains('*') {
+            let segments: Vec<&str> = p.split('*').filter(|s| !s.is_empty()).collect();
+            if segments.is_empty() {
+                return true;
+            }
+            let mut pos = 0;
+            for seg in segments {
+                let Some(found) = url[pos..].find(seg) else {
+                    return false;
+                };
+                pos += found + seg.len();
+            }
+            return true;
+        }
+        url.contains(p)
+    })
+}
+
+/// Outcome of the Fetch-domain interception check for a JS-originated request.
+#[derive(Debug)]
+enum InterceptDecision {
+    /// Proceed with the (possibly modified) request.
+    Proceed {
+        url: Url,
+        method: String,
+        headers: Vec<(String, String)>,
+    },
+    /// Respond directly (fail / fulfill) without a network request.
+    Respond(FetchResponseMsg),
+}
+
+/// If Fetch interception is enabled and `url` matches a pattern, pause the
+/// request (insert a `PausedRequest` + emit `CoreEvent::RequestPaused`), await
+/// the client's decision, and return it. Otherwise (or on no decision) proceed
+/// unchanged. The empty-pattern fast path returns immediately — no behavior
+/// change when interception is not enabled.
+async fn maybe_intercept(
+    event_tx: &std::sync::Arc<
+        parking_lot::RwLock<Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>>,
+    >,
+    request_id: u64,
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+) -> InterceptDecision {
+    use crate::js::CoreEvent;
+    use crate::network::intercept::{InterceptAction, PausedRequest, shared_registry};
+    use tokio::sync::oneshot;
+
+    let patterns = fetch_patterns();
+    if !url_matches_patterns(url, &patterns) {
+        return InterceptDecision::Proceed {
+            url: Url::parse(url).unwrap_or_else(|_| Url::parse("about:blank").unwrap()),
+            method: method.to_string(),
+            headers: headers.to_vec(),
+        };
+    }
+
+    let pause_id = format!("oxi-int-{}", uuid::Uuid::new_v4().as_simple());
+    let (tx, rx) = oneshot::channel::<InterceptAction>();
+    shared_registry().insert(
+        pause_id.clone(),
+        PausedRequest {
+            url: url.to_string(),
+            method: method.to_string(),
+            headers: headers.to_vec(),
+            resource_type: "XHR".to_string(),
+            tx,
+        },
+    );
+
+    if let Some(sender) = event_tx.read().as_ref() {
+        let _ = sender.send(CoreEvent::RequestPaused {
+            request_id: pause_id.clone(),
+            url: url.to_string(),
+            method: method.to_string(),
+            headers: headers.to_vec(),
+            resource_type: "XHR".to_string(),
+            timestamp: current_time_ms(),
+        });
+    }
+
+    match rx.await {
+        Ok(InterceptAction::Continue {
+            url: Some(u),
+            method: Some(m),
+            headers: h,
+            ..
+        }) => InterceptDecision::Proceed {
+            url: Url::parse(&u).unwrap_or_else(|_| Url::parse(url).unwrap()),
+            method: m,
+            headers: h,
+        },
+        Ok(InterceptAction::Continue { .. }) => InterceptDecision::Proceed {
+            url: Url::parse(url).unwrap(),
+            method: method.to_string(),
+            headers: headers.to_vec(),
+        },
+        Ok(InterceptAction::Fail { error_reason }) => {
+            InterceptDecision::Respond(FetchResponseMsg {
+                id: request_id,
+                status: 0,
+                status_text: "Network Error".to_string(),
+                url: url.to_string(),
+                headers: vec![],
+                body: String::new(),
+                error: Some(error_reason),
+            })
+        }
+        Ok(InterceptAction::Fulfill {
+            status_code,
+            status_text,
+            headers,
+            body,
+        }) => InterceptDecision::Respond(FetchResponseMsg {
+            id: request_id,
+            status: status_code,
+            status_text,
+            url: url.to_string(),
+            headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
+            error: None,
+        }),
+        Err(_) => {
+            // No decision (client never responded) — proceed with the request.
+            InterceptDecision::Proceed {
+                url: Url::parse(url).unwrap(),
+                method: method.to_string(),
+                headers: headers.to_vec(),
+            }
+        }
+    }
+}
+
+fn current_time_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+// ---------------------------------------------------------------------------
 // Fetch handler
 // ---------------------------------------------------------------------------
 
@@ -158,6 +337,9 @@ fn handle_fetch_requests(
     _cookie_jar: Arc<RwLock<CookieJar>>,
     max_body_bytes: usize,
     in_flight: Arc<AtomicU64>,
+    event_tx: std::sync::Arc<
+        parking_lot::RwLock<Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>>,
+    >,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -184,37 +366,57 @@ fn handle_fetch_requests(
                     let http_client = http_client.clone();
                     let response_tx = response_tx.clone();
                     let in_flight = in_flight.clone();
+                    let event_tx = event_tx.clone();
 
                     // Spawn an independent task per request so concurrent
                     // fetches run in parallel (Phase 3), not one-at-a-time.
                     tokio::spawn(async move {
                         let id = request.id;
-                        let url = match Url::parse(&request.url) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                let _ = response_tx.send(FetchResponseMsg {
-                                    id,
-                                    status: 400,
-                                    status_text: "Invalid URL".to_string(),
-                                    url: request.url,
-                                    headers: vec![],
-                                    body: String::new(),
-                                    error: Some(format!("invalid URL: {}", e)),
-                                });
+                        let method = request.method;
+                        let headers = request.headers;
+                        let body = request.body;
+                        let origin = request.origin;
+                        let url_str = request.url;
+
+                        if Url::parse(&url_str).is_err() {
+                            let _ = response_tx.send(FetchResponseMsg {
+                                id,
+                                status: 400,
+                                status_text: "Invalid URL".to_string(),
+                                url: url_str,
+                                headers: vec![],
+                                body: String::new(),
+                                error: Some("invalid URL".to_string()),
+                            });
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+
+                        // Fetch-domain interception (JS fetch/XHR path).
+                        let decision =
+                            maybe_intercept(&event_tx, id, &url_str, &method, &headers).await;
+                        let resp = match decision {
+                            InterceptDecision::Respond(msg) => {
+                                let _ = response_tx.send(msg);
                                 in_flight.fetch_sub(1, Ordering::Relaxed);
                                 return;
                             }
+                            InterceptDecision::Proceed {
+                                url,
+                                method,
+                                headers,
+                            } => {
+                                http_client
+                                    .request_with_context(
+                                        &url,
+                                        &method,
+                                        &headers,
+                                        body,
+                                        origin.as_deref(),
+                                    )
+                                    .await
+                            }
                         };
-
-                        let resp = http_client
-                            .request_with_context(
-                                &url,
-                                &request.method,
-                                &request.headers,
-                                request.body,
-                                request.origin.as_deref(),
-                            )
-                            .await;
                         match resp {
                             Ok(response) => {
                                 let status = response.status().as_u16();
@@ -276,7 +478,7 @@ fn handle_fetch_requests(
                                     id,
                                     status: 0,
                                     status_text: "Network Error".to_string(),
-                                    url: request.url,
+                                    url: url_str,
                                     headers: vec![],
                                     body: String::new(),
                                     error: Some(e.to_string()),
@@ -432,6 +634,8 @@ impl Session {
         let in_flight = Arc::new(AtomicU64::new(0));
         let in_flight_clone = in_flight.clone();
         let max_body_bytes = config.max_response_body_bytes;
+        let event_tx = std::sync::Arc::new(parking_lot::RwLock::new(None));
+        let event_tx_clone = event_tx.clone();
         let fetch_task = Some(std::thread::spawn(move || {
             handle_fetch_requests(
                 fetch_rx,
@@ -440,6 +644,7 @@ impl Session {
                 cookie_jar_clone,
                 max_body_bytes,
                 in_flight_clone,
+                event_tx_clone,
             );
         }));
         // Spawn WebSocket bridge handler thread (Phase 4)
@@ -476,7 +681,7 @@ impl Session {
             ws_task,
             closed: AtomicBool::new(false),
             dialog_gate,
-            event_tx: None,
+            event_tx,
             in_flight,
         })
     }
@@ -619,7 +824,7 @@ impl Session {
             .map_err(|e| CoreError::NetworkError(format!("failed to write download: {e}")))?;
 
         let guid = format!("dl-{}", uuid::Uuid::new_v4().as_simple());
-        if let Some(tx) = &self.event_tx {
+        if let Some(tx) = self.event_tx.read().as_ref() {
             let _ = tx.send(crate::js::CoreEvent::Download {
                 guid: guid.clone(),
                 url: url.to_string(),
@@ -971,7 +1176,7 @@ impl Session {
     /// dialog events flow to an observer (typically the CDP layer). Called by
     /// the CDP session once it has created its event drainer.
     pub fn set_event_sink(&mut self, tx: std::sync::mpsc::Sender<crate::js::CoreEvent>) {
-        self.event_tx = Some(tx.clone());
+        *self.event_tx.write() = Some(tx.clone());
         self.js_runtime.set_event_sink(tx);
     }
 
@@ -1528,5 +1733,68 @@ mod tests {
             "viewport override should drive layout width, got {}",
             img.width()
         );
+    }
+
+    // multi_thread: the test blocks on a std mpsc recv_timeout while a
+    // spawned task must run — a current-thread runtime would starve it.
+    // Single test fn: the two scenarios share the process-wide FETCH_PATTERNS
+    // static, so they MUST run serially (parallel tests would race on it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_maybe_intercept_js_fetch_interception() {
+        use crate::js::CoreEvent;
+        use crate::network::intercept::{InterceptAction, shared_registry};
+
+        // --- Fulfill scenario: matching pattern pauses, decision resolves. ---
+        set_fetch_patterns(vec!["http://example.com".to_string()]);
+        let (tx, rx) = std::sync::mpsc::channel::<CoreEvent>();
+        let event_tx = std::sync::Arc::new(parking_lot::RwLock::new(Some(tx)));
+
+        let task_tx = event_tx.clone();
+        let task = tokio::spawn(async move {
+            maybe_intercept(&task_tx, 7, "http://example.com/api", "GET", &[]).await
+        });
+
+        // The bridge must emit a RequestPaused event carrying the pause id.
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("RequestPaused event");
+        let pause_id = match ev {
+            CoreEvent::RequestPaused { request_id, .. } => request_id,
+            other => panic!("expected RequestPaused, got {other:?}"),
+        };
+
+        // Resolve the paused request with a Fulfill.
+        let paused = shared_registry()
+            .take(&pause_id)
+            .expect("paused request in registry");
+        paused
+            .tx
+            .send(InterceptAction::Fulfill {
+                status_code: 200,
+                status_text: "OK".to_string(),
+                headers: vec![],
+                body: b"mock-body".to_vec(),
+            })
+            .unwrap();
+
+        let decision = task.await.expect("task");
+        match decision {
+            InterceptDecision::Respond(msg) => {
+                assert_eq!(msg.id, 7);
+                assert_eq!(msg.status, 200);
+                assert_eq!(msg.body, "mock-body");
+            }
+            other => panic!("expected Respond, got {other:?}"),
+        }
+
+        // --- Empty-pattern fast path: no pause, proceeds unchanged. ---
+        set_fetch_patterns(vec![]);
+        let decision = maybe_intercept(&event_tx, 3, "http://example.com/api", "GET", &[]).await;
+        match decision {
+            InterceptDecision::Proceed { url, .. } => {
+                assert_eq!(url.as_str(), "http://example.com/api");
+            }
+            other => panic!("expected Proceed with empty patterns, got {other:?}"),
+        }
     }
 }

@@ -68,6 +68,10 @@ fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     let has_patterns = !patterns.is_empty();
     ctx.events.set_fetch_enabled(has_patterns);
     ctx.events.set_fetch_patterns(patterns.clone());
+    // Mirror the raw url-pattern strings into core so the JS fetch bridge can
+    // decide whether to pause a JS-originated request.
+    let raw: Vec<String> = patterns.iter().map(|p| p.url_pattern.clone()).collect();
+    oxibrowser_core::session::set_fetch_patterns(raw);
     if has_patterns {
         tracing::info!(
             patterns = patterns.len(),
@@ -83,6 +87,7 @@ fn enable(params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
 fn disable(ctx: &DispatchContext) -> DomainResult {
     ctx.events.set_fetch_enabled(false);
     ctx.events.set_fetch_patterns(vec![]);
+    oxibrowser_core::session::set_fetch_patterns(vec![]);
     tracing::info!("Fetch domain disabled");
     Ok(Some(json!({})))
 }

@@ -513,6 +513,7 @@ pub struct FetchRequestMsg {
 }
 
 /// HTTP response sent back to the JS thread via the shared response channel.
+#[derive(Debug)]
 pub struct FetchResponseMsg {
     /// Echoes the request `id`.
     pub id: u64,
@@ -589,6 +590,19 @@ pub enum CoreEvent {
         opcode: u8,
         /// Text payload for opcodes 1; base64 for opcode 2.
         data: String,
+        timestamp: f64,
+    },
+    /// A JS-originated `fetch`/`XHR` request paused by Fetch-domain
+    /// interception. The core fetch bridge inserts a `PausedRequest` into the
+    /// shared registry under `request_id`; the CDP drainer translates this into
+    /// `Fetch.requestPaused`, and the client's `continue/fail/fulfill` resolves
+    /// the registry entry.
+    RequestPaused {
+        request_id: String,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        resource_type: String,
         timestamp: f64,
     },
     /// `alert` / `confirm` / `prompt` dialog requested by the page.

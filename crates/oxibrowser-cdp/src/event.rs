@@ -145,6 +145,13 @@ impl EventSender {
         }
     }
 
+    /// Fetch domain event stamped with an explicit `sessionId` (child target).
+    pub fn send_fetch_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        if self.fetch_enabled.load(Ordering::Relaxed) {
+            self.send_event_with_session(method, params, session_id);
+        }
+    }
+
     /// Send a Log domain event (only if Log domain is enabled).
     pub fn send_log_event(&self, method: &str, params: Value) {
         if self.log_enabled.load(Ordering::Relaxed) {

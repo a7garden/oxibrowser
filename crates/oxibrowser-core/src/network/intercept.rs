@@ -112,8 +112,15 @@ impl PausedRequestRegistry {
 pub type SharedRegistry = std::sync::Arc<PausedRequestRegistry>;
 
 /// Create a new shared registry.
+///
+/// Returns a process-wide singleton so the core fetch bridge (JS fetch/XHR
+/// interception) and the CDP layer share the same paused-request registry.
+/// Request ids are uuid-based, so concurrent sessions do not collide.
 pub fn shared_registry() -> SharedRegistry {
-    std::sync::Arc::new(PausedRequestRegistry::new())
+    use std::sync::LazyLock;
+    static REGISTRY: LazyLock<SharedRegistry> =
+        LazyLock::new(|| std::sync::Arc::new(PausedRequestRegistry::new()));
+    REGISTRY.clone()
 }
 
 #[cfg(test)]
