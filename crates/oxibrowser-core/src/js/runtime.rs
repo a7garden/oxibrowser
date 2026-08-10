@@ -498,6 +498,9 @@ enum JsCommand {
         html: String,
         base_url: Option<String>,
         viewport: (u32, u32),
+        /// @font-face webfont bytes (already fetched) to register into the
+        /// RenderDocument's FontContext. Empty = no custom fonts.
+        fonts: Vec<Vec<u8>>,
         /// Page `<script>` sources to execute after the document is built
         /// (inline + fetched external, in document order). Empty = legacy
         /// behavior (no script execution).
@@ -1197,6 +1200,8 @@ pub struct JsRuntime {
     config: JsRuntimeConfig,
     /// Channel to send fetch requests (set via set_fetch_channel()).
     fetch_tx: Option<std::sync::mpsc::Sender<FetchRequestMsg>>,
+    /// @font-face webfont bytes staged for the next `SetDocument` (consumed on send).
+    pending_fonts: Vec<Vec<u8>>,
 }
 
 impl JsRuntime {
@@ -1238,7 +1243,15 @@ impl JsRuntime {
             globals: RwLock::new(HashMap::new()),
             config,
             fetch_tx: None,
+            pending_fonts: Vec::new(),
         }
+    }
+
+    /// Stage @font-face webfont bytes for the next `set_document_with_scripts`
+    /// call (consumed on send). Call before navigating to a page whose inline
+    /// `<style>` declares `@font-face` rules.
+    pub fn set_pending_fonts(&mut self, fonts: Vec<Vec<u8>>) {
+        self.pending_fonts = fonts;
     }
 
     /// Set the channels for fetch: the request sender and the shared response
@@ -1523,6 +1536,7 @@ impl JsRuntime {
                 html: html.to_string(),
                 base_url: base_url.map(|s| s.to_string()),
                 viewport,
+                fonts: std::mem::take(&mut self.pending_fonts),
                 scripts,
                 nav_loop_limit: self.config.nav_script_max_loop_iterations,
                 nav_recursion_limit: self.config.nav_script_max_recursion,
@@ -2096,6 +2110,7 @@ fn js_thread_loop(
                 html,
                 base_url,
                 viewport,
+                fonts,
                 scripts,
                 nav_loop_limit,
                 nav_recursion_limit,
@@ -2112,7 +2127,7 @@ fn js_thread_loop(
                     height: viewport.1.max(64),
                     scale: 1.0,
                 };
-                match RenderDocument::from_html(&html, base_url.as_deref(), vp) {
+                match RenderDocument::from_html_with_fonts(&html, base_url.as_deref(), vp, &fonts) {
                     Ok(doc) => {
                         *render_doc_cell.borrow_mut() = Some(doc);
                         // Shadow roots are per-document; drop stale entries.

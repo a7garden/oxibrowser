@@ -610,6 +610,19 @@ impl HttpClient {
         Ok(crate::encoding::decode_html(&buf, content_type.as_deref()))
     }
 
+    /// Fetch a URL and return the raw response bytes (binary-safe). Used for
+    /// @font-face font files. Applies the same body-size limit as `fetch_text`.
+    #[tracing::instrument(skip(self), err)]
+    pub async fn fetch_bytes(&self, url: &Url) -> Result<Vec<u8>> {
+        let response = self.fetch(url).await?;
+        let max = self.config.max_response_body_bytes;
+        let (buf, truncated) = Self::read_body_limited(response, max).await?;
+        if truncated {
+            tracing::warn!(url = %url, max_bytes = max, "response body truncated at size limit");
+        }
+        Ok(buf)
+    }
+
     /// Send a POST request with a raw body.
     #[tracing::instrument(skip(self, body), err)]
     pub async fn post(&self, url: &Url, body: impl Into<wreq::Body>) -> Result<Response> {

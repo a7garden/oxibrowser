@@ -1276,6 +1276,28 @@ impl Session {
         // tags (Phase 1 keystone).
         let viewport = current_viewport_override()
             .unwrap_or((self.config.viewport_width, self.config.viewport_height));
+        // Load @font-face webfonts declared in inline <style> and stage them for
+        // the document build (public-API path via DocumentConfig.font_ctx; no fork).
+        let font_urls = crate::fonts::extract_font_face_urls(&html);
+        if !font_urls.is_empty() {
+            let base = Url::parse(&url).ok();
+            let mut fonts = Vec::new();
+            for furl in font_urls {
+                let Some(full) = base.as_ref().and_then(|b| b.join(&furl).ok()) else {
+                    continue;
+                };
+                if full.scheme() != "http" && full.scheme() != "https" {
+                    continue;
+                }
+                match self.http_client.fetch_bytes(&full).await {
+                    Ok(bytes) => fonts.push(bytes),
+                    Err(e) => tracing::warn!(url = %full, error = %e, "@font-face fetch failed"),
+                }
+            }
+            if !fonts.is_empty() {
+                self.js_runtime.set_pending_fonts(fonts);
+            }
+        }
         if let Err(e) = self
             .js_runtime
             .set_document_with_scripts(&html, Some(&url), viewport, scripts)

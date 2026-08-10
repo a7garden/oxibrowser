@@ -10,6 +10,7 @@ pub mod css;
 pub mod event;
 pub mod extract;
 pub mod frame;
+pub mod fonts;
 pub mod page;
 pub mod script;
 pub mod session;

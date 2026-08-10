@@ -22,6 +22,7 @@ blitz-traits = { workspace = true }
 anyrender = { workspace = true }
 anyrender_vello_cpu = { workspace = true, features = ["multithreading"] }
 peniko = { workspace = true }
+parley = "0.10"
 png = { workspace = true }
 
 [lib]

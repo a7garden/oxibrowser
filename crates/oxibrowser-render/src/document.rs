@@ -117,6 +117,37 @@ impl RenderDocument {
         Ok(Self { doc, viewport })
     }
 
+    /// Like [`from_html`](Self::from_html), but registers the supplied webfont
+    /// bytes into a Parley `FontContext` used for layout — the `@font-face`
+    /// path. Each entry is raw font-file bytes (TTF/OTF/WOFF/WOFF2; WOFF is
+    /// decoded by Blitz). Families are auto-detected from the font's own name
+    /// tables, so a CSS `font-family: 'X'` matches a font whose internal family
+    /// is `X`. System fonts remain available for non-`@font-face` text. No Blitz
+    /// fork is required: `DocumentConfig.font_ctx` is public.
+    pub fn from_html_with_fonts(
+        html: &str,
+        base_url: Option<&str>,
+        viewport: Viewport,
+        fonts: &[Vec<u8>],
+    ) -> Result<Self, RenderError> {
+        let mut config = DocumentConfig::default();
+        if !fonts.is_empty() {
+            config.font_ctx = Some(build_font_ctx(fonts));
+        }
+        let mut doc = HtmlDocument::from_html(html, config).into_inner();
+        if let Some(url) = base_url {
+            doc.set_base_url(url);
+        }
+        doc.set_viewport(BlitzViewport::new(
+            viewport.width,
+            viewport.height,
+            viewport.scale as f32,
+            ColorScheme::Light,
+        ));
+        doc.resolve(0.0);
+        Ok(Self { doc, viewport })
+    }
+
     /// Borrow the inner [`BaseDocument`] (read-only).
     pub fn document(&self) -> &BaseDocument {
         &self.doc
@@ -312,4 +343,27 @@ impl RenderDocument {
         let viewport = opts.viewport.unwrap_or(self.viewport);
         paint::capture_png(&mut self.doc, viewport, opts.full_page)
     }
+}
+
+/// Build a Parley `FontContext` that keeps system fonts available and registers
+/// each supplied webfont (auto-detecting its family from the font's name tables).
+/// Empty input returns a context equivalent to the document default.
+fn build_font_ctx(fonts: &[Vec<u8>]) -> parley::FontContext {
+    use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
+    use std::sync::Arc;
+    let mut ctx = parley::FontContext {
+        source_cache: SourceCache::new_shared(),
+        collection: Collection::new(CollectionOptions {
+            shared: false,
+            // Native build: keep system fonts so ordinary text still renders,
+            // and layer the @font-face fonts on top.
+            system_fonts: !cfg!(target_arch = "wasm32"),
+        }),
+    };
+    for bytes in fonts {
+        let decoded = blitz_dom::decode_font_bytes(bytes).into_owned();
+        ctx.collection
+            .register_fonts(Blob::new(Arc::new(decoded) as _), None);
+    }
+    ctx
 }

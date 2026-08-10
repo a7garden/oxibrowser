@@ -3204,6 +3204,7 @@ dependencies = [
  "blitz-html",
  "blitz-paint",
  "blitz-traits",
+ "parley",
  "peniko",
  "png 0.18.1",
 ]
