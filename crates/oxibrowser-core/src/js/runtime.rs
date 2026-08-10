@@ -10704,6 +10704,11 @@ fn register_window_globals(
     globalThis.matchMedia = globalThis.matchMedia || mm;
     if (globalThis.window) { globalThis.window.matchMedia = globalThis.window.matchMedia || mm; }
   })();
+  function fireHashchange(oldURL, newURL) {
+    var ev = { type: 'hashchange', oldURL: oldURL || '', newURL: newURL || '', isTrusted: false };
+    var cbs = globalThis.__oxiHashchangeListeners || [];
+    for (var i = 0; i < cbs.length; i++) { try { cbs[i].call(globalThis, ev); } catch (e) {} }
+  }
   function augment(loc) {
     if (!loc) return;
     try {
@@ -10715,11 +10720,112 @@ fn register_window_globals(
         get: function () { return cur().url; },
         set: function (v) { __oxiNavigate(resolveUrl(v)); },
       });
+      // Fire `hashchange` when JS sets `location.hash`. Best-effort: only the
+      // setter route fires it (real-browser fires it on history navigation
+      // too, which we don't model here).
+      var lastHash = '';
+      try {
+        var curLoc = new URL(cur().url || PAGE_URL);
+        lastHash = curLoc.hash || '';
+      } catch (e) {}
+      Object.defineProperty(loc, 'hash', {
+        configurable: true, enumerable: true,
+        get: function () {
+          var u;
+          try { u = new URL(cur().url); } catch (e) { return ''; }
+          return u.hash || '';
+        },
+        set: function (v) {
+          var u;
+          try { u = new URL(cur().url); } catch (e) { return; }
+          var prev = u.href;
+          u.hash = (v == null ? '' : String(v));
+          // Update history entry without navigating the page.
+          var top = cur();
+          top.url = u.href;
+          globalThis.__oxiHistoryEntries[globalThis.__oxiHistoryIndex] = top;
+          fireHashchange(prev, u.href);
+        },
+      });
     } catch (e) {}
+  }
+  function makeLocationProxy(target) {
+    return new Proxy(target || {}, {
+      get: function (t, p) {
+        if (p === 'hash') {
+          var u; try { u = new URL(cur().url); } catch (e) { return ''; }
+          return u.hash || '';
+        }
+        var v = Reflect.get(t, p, t);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+      set: function (t, p, val) {
+        if (p === 'hash') {
+          var prev = (cur() && cur().url) || PAGE_URL;
+          var curStr = String(prev);
+          var hashStr = (val == null ? '' : String(val));
+          if (hashStr.charAt(0) !== '#') hashStr = '#' + hashStr;
+          var hashIdx = curStr.indexOf('#');
+          var next = (hashIdx >= 0 ? curStr.substring(0, hashIdx) : curStr) + hashStr;
+          var top = cur();
+          top.url = next;
+          if (globalThis.__oxiHistoryEntries) globalThis.__oxiHistoryEntries[globalThis.__oxiHistoryIndex] = top;
+          fireHashchange(curStr, next);
+          return true;
+        }
+        return Reflect.set(t, p, val, t);
+      },
+    });
+  }
+  function proxyLocation(loc) {
+    if (!loc) return;
+    try { return makeLocationProxy(loc); } catch (e) { return loc; }
   }
   augment(globalThis.location);
   if (globalThis.window && globalThis.window.location) augment(globalThis.window.location);
-  // Wrap the native `fetch` so relative URLs resolve against the current
+  // Replace `window.location` with a Proxy so setting `window.location.hash`
+  // (and reading it) routes through our handler. The host Location's native
+  // setter is non-configurable, so `Object.defineProperty` can't intercept
+  // `hash =` — a Proxy around the host object is the simplest way to keep
+  // the standard `location.hash = '#x'` syntax working.
+  try {
+    var wloc = globalThis.window && globalThis.window.location;
+    if (wloc) globalThis.window = Object.assign({}, globalThis.window, { location: makeLocationProxy(wloc) });
+  } catch (e) {}
+  if (globalThis.window && globalThis.window.location) augment(globalThis.window.location);
+  // Register a dedicated hashchange listener slot (regular
+  // globalThis.addEventListener('hashchange', cb) also fires via the mirror
+  // install above because the listener registry dispatches by `ev.type`).
+  globalThis.__oxiHashchangeListeners = globalThis.__oxiHashchangeListeners || [];
+  if (typeof globalThis.addEventListener === 'function') {
+    // Hook into the addEventListener registry so the existing globalThis mirror
+    // also lands hashchange callbacks here. The current bootstrap writes
+    // listeners into __oxiWinListeners[type]; we double-tap into the same slot.
+    var __oxiAddEv = globalThis.addEventListener;
+    if (typeof __oxiAddEv === 'function' && !globalThis.__oxiHashAddTap) {
+      globalThis.__oxiHashAddTap = true;
+      globalThis.addEventListener = function (type, cb) {
+        if (type === 'hashchange' && typeof cb === 'function') {
+          (globalThis.__oxiHashchangeListeners = globalThis.__oxiHashchangeListeners || []).push(cb);
+          return;
+        }
+        return __oxiAddEv.call(this, type, cb);
+      };
+      if (globalThis.window) globalThis.window.addEventListener = globalThis.addEventListener;
+    }
+  }
+  // Fire an initial hashchange on first load if the page URL has a fragment.
+  if (!globalThis.__oxiHashchangeInit) {
+    globalThis.__oxiHashchangeInit = true;
+    try {
+      var u0 = new URL(PAGE_URL);
+      if (u0.hash && u0.hash !== '') {
+        // oldURL is the URL without the fragment (best-effort).
+        var bare = u0.href.split('#')[0];
+        fireHashchange(bare, u0.href);
+      }
+    } catch (e) {}
+  }
   // page's base URL (real-browser behavior). The native binding expects an
   // absolute URL — passing '/api/x' yields a TypeError. resolveUrl joins
   // relative refs against PAGE_URL (origin-only for leading-`/`, doc

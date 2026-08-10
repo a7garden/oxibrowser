@@ -8,3 +8,5 @@ window-ael/mock.log
 window-ael/serve.log
 relative-fetch/mock.log
 relative-fetch/serve.log
+hashchange/mock.log
+hashchange/serve.log
