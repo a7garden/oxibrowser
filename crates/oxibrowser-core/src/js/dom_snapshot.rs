@@ -180,6 +180,15 @@ pub struct ResourceUrl {
     pub kind: ResourceKind,
 }
 
+/// A discovered `<iframe>` element and its content source (W3a: srcdoc/about:blank).
+#[derive(Debug, Clone, Default)]
+pub struct IframeElement {
+    /// The `src` attribute, if present.
+    pub src: Option<String>,
+    /// The `srcdoc` attribute (inline iframe content), if present.
+    pub srcdoc: Option<String>,
+}
+
 /// Whether a `<script>` is a classic or module script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptKind {
@@ -1187,6 +1196,19 @@ impl DomSnapshot {
             .values()
             .filter(|n| n.node_type == 1 && n.tag.eq_ignore_ascii_case("iframe"))
             .filter_map(|n| n.attributes.get("src").cloned())
+            .collect()
+    }
+
+    /// Extract every `<iframe>` with its `src`/`srcdoc` attributes (document order).
+    /// Used by iframe population to handle `srcdoc`/`about:blank` alongside `http(s)` iframes.
+    pub fn extract_iframes(&self) -> Vec<IframeElement> {
+        self.nodes
+            .values()
+            .filter(|n| n.node_type == 1 && n.tag.eq_ignore_ascii_case("iframe"))
+            .map(|n| IframeElement {
+                src: n.attributes.get("src").cloned(),
+                srcdoc: n.attributes.get("srcdoc").cloned(),
+            })
             .collect()
     }
 

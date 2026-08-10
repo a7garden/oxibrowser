@@ -1,11 +1,11 @@
 {
   "pass": 8,
   "fail": 0,
-  "total_ms": 753,
+  "total_ms": 530,
   "cdp": 19321,
   "mock": 18080,
   "spa": "http://127.0.0.1:18080/",
-  "timestamp": "2026-08-10T06:09:48.065Z",
+  "timestamp": "2026-08-10T06:19:05.968Z",
   "steps": [
     {
       "name": "CDP attach (sessionId)",
@@ -16,13 +16,13 @@
     {
       "name": "navigate to SPA",
       "ok": true,
-      "ms": 305,
+      "ms": 158,
       "detail": ""
     },
     {
       "name": "landing view rendered (#login-link)",
       "ok": true,
-      "ms": 1,
+      "ms": 0,
       "detail": ""
     },
     {
@@ -52,7 +52,7 @@
     {
       "name": "screenshot captured",
       "ok": true,
-      "ms": 350,
+      "ms": 278,
       "detail": ""
     }
   ]

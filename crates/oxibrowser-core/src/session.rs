@@ -857,32 +857,39 @@ impl Session {
     /// Failures (bad URL, network error) are logged and skipped so a single
     /// broken iframe can't abort navigation.
     async fn populate_iframes(&self, page: &mut Page, base_url: &Url) {
-        let iframe_srcs: Vec<String> = page
-            .root_frame()
-            .document()
-            .extract_resource_urls()
-            .into_iter()
-            .filter(|r| matches!(r.kind, crate::js::dom_snapshot::ResourceKind::Iframe))
-            .map(|r| r.url)
-            .collect();
-        for src in iframe_srcs {
-            let Ok(full) = base_url.join(&src) else {
-                continue;
-            };
-            // Skip non-http(s) iframes (about:, javascript:, etc.).
-            if full.scheme() != "http" && full.scheme() != "https" {
+        let iframes = page.root_frame().document().extract_iframes();
+        for iframe in iframes {
+            // 1. srcdoc → inline content, no fetch (W3a).
+            if let Some(srcdoc) = iframe.srcdoc {
+                let child_url =
+                    Url::parse("about:srcdoc").unwrap_or_else(|_| base_url.clone());
+                match Frame::from_html(child_url, &srcdoc).await {
+                    Ok(child) => page.root_frame_mut().add_child(child),
+                    Err(e) => tracing::warn!(error = %e, "failed to parse srcdoc iframe"),
+                }
                 continue;
             }
+            // 2. src present — resolve against the page URL.
+            let Some(src) = iframe.src else { continue };
+            let Ok(full) = base_url.join(&src) else { continue };
+            // 2a. non-http(s) (about:blank, javascript:, etc.) → empty child (W3a).
+            if full.scheme() != "http" && full.scheme() != "https" {
+                let child_url =
+                    Url::parse("about:blank").unwrap_or_else(|_| base_url.clone());
+                let empty = "<!DOCTYPE html><html><head></head><body></body></html>";
+                match Frame::from_html(child_url, empty).await {
+                    Ok(child) => page.root_frame_mut().add_child(child),
+                    Err(e) => tracing::warn!(src = %src, error = %e, "failed to parse about:blank iframe"),
+                }
+                continue;
+            }
+            // 2b. http(s) → fetch + parse (original behavior).
             match self.http_client.fetch_text(&full).await {
                 Ok(child_html) => match Frame::from_html(full.clone(), &child_html).await {
                     Ok(child) => page.root_frame_mut().add_child(child),
-                    Err(e) => {
-                        tracing::warn!(src = %src, error = %e, "failed to parse iframe document")
-                    }
+                    Err(e) => tracing::warn!(src = %src, error = %e, "failed to parse iframe document"),
                 },
-                Err(e) => {
-                    tracing::warn!(src = %src, error = %e, "failed to fetch iframe")
-                }
+                Err(e) => tracing::warn!(src = %src, error = %e, "failed to fetch iframe"),
             }
         }
     }
