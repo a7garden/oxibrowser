@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// Dispatch Runtime domain methods.
 pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     match method {
-        "enable" => enable(ctx),
+        "enable" => enable(ctx).await,
         "disable" => disable(ctx),
         "evaluate" => evaluate(params, ctx).await,
         "callFunctionOn" => call_function_on(params, ctx).await,
@@ -32,10 +32,10 @@ pub async fn handle(method: &str, params: Option<Value>, ctx: &DispatchContext) 
 }
 
 /// Runtime.enable — enables runtime event reporting.
-fn enable(ctx: &DispatchContext) -> DomainResult {
+async fn enable(ctx: &DispatchContext) -> DomainResult {
     ctx.events.set_runtime_enabled(true);
 
-    // Emit executionContextCreated
+    // Main frame execution context (always id=1).
     ctx.events.send_runtime_event(
         "Runtime.executionContextCreated",
         json!({
@@ -46,11 +46,35 @@ fn enable(ctx: &DispatchContext) -> DomainResult {
                 "uniqueId": format!("context-{}", uuid::Uuid::new_v4()),
                 "auxData": {
                     "isDefault": true,
-                    "type": "default"
+                    "type": "default",
+                    "frameId": "main"
                 }
             }
         }),
     );
+
+    // Child frame execution contexts (Phase 8).
+    let guard = ctx.session.read().await;
+    let frame_map = guard.frame_context_map().read().clone();
+    for (frame_id, context_id) in &frame_map {
+        ctx.events.send_runtime_event(
+            "Runtime.executionContextCreated",
+            json!({
+                "context": {
+                    "id": context_id,
+                    "origin": "",
+                    "name": format!("iframe:{frame_id}"),
+                    "uniqueId": format!("context-{}", uuid::Uuid::new_v4()),
+                    "auxData": {
+                        "isDefault": true,
+                        "type": "default",
+                        "frameId": frame_id
+                    }
+                }
+            }),
+        );
+    }
+    drop(guard);
 
     Ok(Some(json!({})))
 }
@@ -76,13 +100,24 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
         .get("awaitPromise")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let context_id = params
+        .get("contextId")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
 
     let mut guard = ctx.session.write().await;
 
-    match guard
-        .evaluate_js_with_await(expression, await_promise)
-        .await
-    {
+    let eval_result = if context_id == 1 {
+        guard
+            .evaluate_js_with_await(expression, await_promise)
+            .await
+    } else {
+        guard
+            .evaluate_js_in_context(expression, context_id, await_promise)
+            .await
+    };
+
+    match eval_result {
         Ok(result) => {
             // Handle exceptions
             if let Some(exception) = &result.exception {
@@ -116,7 +151,7 @@ async fn evaluate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                     json!({
                         "type": "log",
                         "args": args,
-                        "executionContextId": 1,
+                        "executionContextId": context_id,
                         "timestamp": EventSender::timestamp_ms()
                     }),
                 );

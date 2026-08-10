@@ -105,6 +105,12 @@ pub struct Session {
     /// bridge thread can read it once `set_event_sink` populates it.
     event_tx:
         std::sync::Arc<parking_lot::RwLock<Option<std::sync::mpsc::Sender<crate::js::CoreEvent>>>>,
+    /// Frame-id → execution-context-id mapping for per-frame JS evaluation
+    /// (Phase 8). The main frame is always context_id=1 and is NOT stored
+    /// here; only child iframe contexts (≥ 2) appear.
+    frame_contexts: parking_lot::RwLock<HashMap<String /* "frame-N" */, u32 /* context_id */>>,
+    /// Next child execution-context id to assign (starts at 2; main=1).
+    next_context_id: std::sync::atomic::AtomicU32,
 }
 
 /// Configurable download directory for `Content-Disposition: attachment`
@@ -682,6 +688,8 @@ impl Session {
             closed: AtomicBool::new(false),
             dialog_gate,
             event_tx,
+            frame_contexts: parking_lot::RwLock::new(HashMap::new()),
+            next_context_id: std::sync::atomic::AtomicU32::new(2),
             in_flight,
         })
     }
@@ -772,10 +780,8 @@ impl Session {
         // Create a new page for this navigation (use final URL after redirects)
         let mut page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
 
-        // Phase 8 (partial): populate child <iframe> frames by fetching each
+        // Phase 8: populate child <iframe> frames by fetching each
         // src (resolved against the page URL) and parsing it into a child Frame.
-        // Frame scripts run in the parent context for now; isolated per-frame
-        // contexts + cross-frame evaluate remain future work.
         self.populate_iframes(&mut page, &final_url).await;
 
         // Update history
@@ -789,8 +795,17 @@ impl Session {
 
         self.active_page = Some(page);
 
+        // Clear previous navigation's child-frame contexts (Phase 8).
+        self.js_runtime.clear_child_contexts();
+        self.frame_contexts.write().clear();
+        self.next_context_id
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+
         // Inject DOM snapshot into JS runtime
         self.inject_dom_snapshot().await;
+
+        // Phase 8: build per-frame execution contexts for child iframes.
+        self.inject_child_frames().await;
 
         Ok(())
     }
@@ -1283,6 +1298,107 @@ impl Session {
             "DOM snapshot injected"
         );
         self.js_runtime.set_dom_snapshot(snapshot);
+    }
+
+    /// Build per-frame execution contexts for each child iframe (Phase 8).
+    ///
+    /// For each child `Frame` in the page's root frame, assigns a unique
+    /// `context_id` (≥ 2), fetches external `<script src>` bodies, and sends a
+    /// `SetFrameDocument` command to the JS thread which creates a dedicated
+    /// `Context` + `RenderDocument` and runs the frame's scripts. The
+    /// frame-id → context-id mapping is stored in `frame_contexts` for CDP
+    /// routing (`Runtime.evaluate` with `contextId`).
+    async fn inject_child_frames(&mut self) {
+        let Some(page) = &self.active_page else {
+            return;
+        };
+        // Collect child frame data upfront to avoid holding a borrow across await.
+        let base_url = match self.current_url() {
+            Some(u) => u.clone(),
+            None => return,
+        };
+        let children: Vec<(String, String, Vec<crate::js::dom_snapshot::ScriptSource>)> = page
+            .root_frame()
+            .children()
+            .iter()
+            .map(|child| {
+                (
+                    child.id().to_string(),
+                    child.url().to_string(),
+                    child.extract_scripts(),
+                )
+            })
+            .collect();
+        let viewport = current_viewport_override()
+            .unwrap_or((self.config.viewport_width, self.config.viewport_height));
+
+        for (frame_id_str, url_str, mut scripts) in children {
+            // Fetch external <script src> bodies for this child frame.
+            if !scripts.is_empty() {
+                let base = Url::parse(&url_str).ok().or_else(|| base_url.join("").ok());
+                for s in scripts.iter_mut() {
+                    let Some(src) = s.src_url.clone() else {
+                        continue;
+                    };
+                    let Some(full_url) = base.as_ref().and_then(|b| b.join(&src).ok()) else {
+                        continue;
+                    };
+                    let _in_flight = InFlightGuard::new(self.in_flight.clone());
+                    match self.http_client.fetch_text(&full_url).await {
+                        Ok(body) => s.source = body,
+                        Err(e) => {
+                            tracing::warn!(src = %src, error = %e, "failed to fetch child frame script")
+                        }
+                    }
+                }
+            }
+
+            // Get the child frame's HTML.
+            let Some(child_frame) = self.active_page.as_ref().and_then(|p| {
+                p.root_frame()
+                    .children()
+                    .iter()
+                    .find(|c| c.id().to_string() == frame_id_str)
+            }) else {
+                continue;
+            };
+            let html = child_frame.html().to_string();
+
+            let context_id = self
+                .next_context_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if let Err(e) = self
+                .js_runtime
+                .set_frame_document(context_id, &html, &url_str, viewport, scripts)
+                .await
+            {
+                tracing::warn!(frame_id = %frame_id_str, url = %url_str, error = %e, "failed to build child frame context");
+                continue;
+            }
+            tracing::debug!(frame_id = %frame_id_str, context_id, url = %url_str, "child frame context built");
+            self.frame_contexts.write().insert(frame_id_str, context_id);
+        }
+    }
+
+    /// Evaluate a JS expression in a specific frame's execution context
+    /// (Phase 8). `context_id` must correspond to a known frame context.
+    pub async fn evaluate_js_in_context(
+        &mut self,
+        expression: &str,
+        context_id: u32,
+        await_promise: bool,
+    ) -> Result<crate::js::runtime::JsEvalResult> {
+        self.js_runtime
+            .evaluate_in_context(expression, context_id, await_promise)
+            .await
+    }
+
+    /// Return the frame-id → context-id map for CDP execution-context routing
+    /// (Phase 8). Includes only child frames; the main frame is always
+    /// context_id=1.
+    pub fn frame_context_map(&self) -> &parking_lot::RwLock<HashMap<String, u32>> {
+        &self.frame_contexts
     }
 
     /// Serialize the live (post-JS) document to a [`DomSnapshot`].
@@ -1796,5 +1912,93 @@ mod tests {
             }
             other => panic!("expected Proceed with empty patterns, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_iframe_creates_child_execution_context() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<html><body>
+                        <h1 id="main-title">main-page</h1>
+                        <iframe src="/child.html"></iframe>
+                       </body></html>"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/child.html"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string(
+                        r#"<html><body>
+                            <p id="iframe-text">inside-iframe-content</p>
+                            <script>window.__iframeVar = 42;</script>
+                           </body></html>"#,
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let mut session = make_session().await;
+        session
+            .navigate(&format!("{}/", server.uri()))
+            .await
+            .expect("navigate");
+
+        // The frame_contexts map should contain one child entry.
+        let frame_map = session.frame_context_map().read().clone();
+        assert_eq!(
+            frame_map.len(),
+            1,
+            "one child iframe should have a context: {frame_map:?}"
+        );
+        let (_child_frame_id, &child_context_id) = frame_map.iter().next().unwrap();
+        assert!(
+            child_context_id >= 2,
+            "child context_id should be ≥ 2, got {child_context_id}"
+        );
+
+        // Evaluate in the child frame context: query the iframe's DOM.
+        let r = session
+            .evaluate_js_in_context(
+                "document.getElementById('iframe-text').textContent",
+                child_context_id,
+                false,
+            )
+            .await
+            .expect("evaluate in child context");
+        assert_eq!(
+            r.value,
+            Some(serde_json::json!("inside-iframe-content")),
+            "child context eval should return the iframe's DOM text"
+        );
+
+        // The iframe's script should have executed (window.__iframeVar = 42).
+        let r2 = session
+            .evaluate_js_in_context("window.__iframeVar", child_context_id, false)
+            .await
+            .expect("evaluate iframe var");
+        assert_eq!(
+            r2.value,
+            Some(serde_json::json!(42)),
+            "child frame scripts should execute in their own context"
+        );
+
+        // Main frame should NOT see the iframe's global (isolation).
+        let r3 = session
+            .evaluate_js("typeof window.__iframeVar")
+            .await
+            .expect("evaluate in main context");
+        assert_eq!(
+            r3.value,
+            Some(serde_json::json!("undefined")),
+            "main frame should be isolated from child frame globals"
+        );
     }
 }

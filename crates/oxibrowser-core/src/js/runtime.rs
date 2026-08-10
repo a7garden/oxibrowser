@@ -59,7 +59,8 @@ static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1_000_000);
 // any element object, regardless of object identity (each DOM query mints a
 // fresh JS object, so `__listeners` on one instance is invisible to another).
 thread_local! {
-    static LISTENER_REGISTRY: RefCell<HashMap<u32, HashMap<String, Vec<JsObject>>>> =
+    #[allow(clippy::type_complexity)]
+    static LISTENER_REGISTRY: RefCell<HashMap<(u32, u32), HashMap<String, Vec<JsObject>>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -83,6 +84,9 @@ enum PendingFetch {
         /// Optional AbortSignal. Polled by the drain pass; when `.aborted`
         /// becomes true the promise is rejected with an AbortError.
         signal: Option<JsObject>,
+        /// Owning execution context (frame). Responses are settled only when
+        /// their owning context is the active one (Phase 8).
+        context_id: u32,
     },
     Xhr {
         ready_state: Arc<RwLock<f64>>,
@@ -92,15 +96,37 @@ enum PendingFetch {
         onload: Arc<RwLock<Option<JsValue>>>,
         onerror: Arc<RwLock<Option<JsValue>>>,
         onrsc: Arc<RwLock<Option<JsValue>>>,
+        /// Owning execution context (frame).
+        context_id: u32,
     },
 }
+
+impl PendingFetch {
+    fn context_id(&self) -> u32 {
+        match self {
+            PendingFetch::Fetch { context_id, .. } | PendingFetch::Xhr { context_id, .. } => {
+                *context_id
+            }
+        }
+    }
+}
+
 /// JS-side per-socket WebSocket state. The live JS object owns all properties
 /// (url, readyState, protocol, on*, hidden `__listeners_<type>` arrays); this
 /// wrapper exists only to track liveness for the idle condition
 /// (`pending_ws = any non-Closed`).
 enum WsState {
-    Live { obj: JsObject },
+    Live { obj: JsObject, context_id: u32 },
     Closed,
+}
+
+impl WsState {
+    fn context_id(&self) -> Option<u32> {
+        match self {
+            WsState::Live { context_id, .. } => Some(*context_id),
+            WsState::Closed => None,
+        }
+    }
 }
 
 /// JS→bridge WebSocket request, id-keyed (mirrors `FetchRequestMsg`).
@@ -137,10 +163,33 @@ thread_local! {
 }
 
 thread_local! {
+    /// Fetch responses received during another context's pump but belonging to
+    /// a different (non-active) frame. Buffered and retried when the owning
+    /// context next pumps (Phase 8 per-frame isolation).
+    static DEFERRED_RESPONSES: RefCell<Vec<FetchResponseMsg>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
     /// The current page origin (`scheme://host[:port]`), updated on every
     /// navigation. Read by the fetch native so cross-origin requests carry an
     /// `Origin` header and a `Referer` (CORS / referrer policy).
     static CURRENT_ORIGIN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+// ── Per-frame execution context tracking (Phase 8) ────────────────────────
+// The JS thread processes one frame's Context at a time. This cell records
+// *which* context is currently active, so thread-local registries (listeners,
+// pending fetch/WS) can tag/namespace their entries. Defaults to 1 (main
+// frame); the loop sets it before entering any frame's eval/pump.
+thread_local! {
+    static ACTIVE_CONTEXT_ID: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// Read the currently-active execution context id (set by `js_thread_loop`
+/// before entering a frame's `Context`). Used to namespace thread-local
+/// registries so per-frame entries never collide.
+fn active_context_id() -> u32 {
+    ACTIVE_CONTEXT_ID.with(|c| c.get())
 }
 
 /// Set the current page origin (called from the SetDocument/SetPageUrl
@@ -245,6 +294,12 @@ thread_local! {
     static NEXT_WS_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
+thread_local! {
+    /// WS events received during another context's pump but belonging to a
+    /// different frame. Buffered and retried when the owning context next pumps.
+    static DEFERRED_WS_EVENTS: RefCell<Vec<WsEvent>> = const { RefCell::new(Vec::new()) };
+}
+
 /// Mint a fresh WebSocket id on the JS thread (never 0).
 fn next_ws_id() -> u64 {
     NEXT_WS_ID.with(|c| {
@@ -256,9 +311,10 @@ fn next_ws_id() -> u64 {
 
 /// Register a listener callback for a node in the thread-local registry.
 fn registry_add(node_id: u32, event_type: &str, callback: JsObject) {
+    let key = (active_context_id(), node_id);
     LISTENER_REGISTRY.with(|r| {
         r.borrow_mut()
-            .entry(node_id)
+            .entry(key)
             .or_default()
             .entry(event_type.to_string())
             .or_default()
@@ -269,9 +325,10 @@ fn registry_add(node_id: u32, event_type: &str, callback: JsObject) {
 /// Get all callbacks for a node + event type (cloned out to release the borrow
 /// before calling them — callbacks may themselves call addEventListener).
 fn registry_get(node_id: u32, event_type: &str) -> Vec<JsObject> {
+    let key = (active_context_id(), node_id);
     LISTENER_REGISTRY.with(|r| {
         r.borrow()
-            .get(&node_id)
+            .get(&key)
             .and_then(|m| m.get(event_type))
             .cloned()
             .unwrap_or_default()
@@ -280,11 +337,12 @@ fn registry_get(node_id: u32, event_type: &str) -> Vec<JsObject> {
 
 /// Remove all callbacks for a node + event type.
 fn registry_remove(node_id: u32, event_type: &str) {
+    let key = (active_context_id(), node_id);
     LISTENER_REGISTRY.with(|r| {
-        if let Some(m) = r.borrow_mut().get_mut(&node_id) {
+        if let Some(m) = r.borrow_mut().get_mut(&key) {
             m.remove(event_type);
         }
-    });
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +433,8 @@ pub struct NodeInfo {
 enum JsCommand {
     /// Evaluate a JS expression.
     Eval {
+        /// Execution context (frame) to evaluate in. 1 = main frame (default).
+        context_id: u32,
         expression: String,
         timeout_ms: Option<u64>,
         max_loop_iterations: Option<u64>,
@@ -467,6 +527,24 @@ enum JsCommand {
         url: String,
         response_tx: Sender<JsResponse>,
     },
+    /// Build a child frame's execution context: creates a new `Context` +
+    /// `RenderDocument`, runs the frame's `<script>` tags, and registers it
+    /// under `context_id` (Phase 8). The main frame (context_id=1) is built
+    /// via `SetDocument`; this is for iframe children only.
+    SetFrameDocument {
+        context_id: u32,
+        html: String,
+        base_url: String,
+        viewport: (u32, u32),
+        scripts: Vec<ScriptSource>,
+        nav_loop_limit: u64,
+        nav_recursion_limit: usize,
+        nav_stack_limit: usize,
+        nav_timeout_ms: u64,
+        response_tx: Sender<JsResponse>,
+    },
+    /// Drop all child-frame contexts (context_id > 1) on navigation.
+    ClearChildContexts { response_tx: Sender<JsResponse> },
     /// Shut down the JS thread.
     Shutdown,
 }
@@ -1284,6 +1362,7 @@ impl JsRuntime {
         let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
         self.cmd_tx
             .send(JsCommand::Eval {
+                context_id: 1,
                 expression: expression.to_string(),
                 timeout_ms: Some(timeout_ms.unwrap_or(self.config.timeout_ms)),
                 max_loop_iterations: Some(self.config.max_loop_iterations),
@@ -1529,6 +1608,108 @@ impl JsRuntime {
             _ => Err(CoreError::JsError("unexpected response".into())),
         }
     }
+
+    // ── Phase 8: per-frame execution contexts ────────────────────────────
+
+    /// Evaluate a JS expression in a specific frame's execution context.
+    /// `context_id: 1` is the main frame (equivalent to `evaluate`).
+    pub async fn evaluate_in_context(
+        &mut self,
+        expression: &str,
+        context_id: u32,
+        await_promise: bool,
+    ) -> Result<JsEvalResult> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::Eval {
+                context_id,
+                expression: expression.to_string(),
+                timeout_ms: Some(self.config.timeout_ms),
+                max_loop_iterations: Some(self.config.max_loop_iterations),
+                max_recursion: Some(self.config.max_recursion),
+                max_stack_size: Some(self.config.max_stack_size),
+                await_promise,
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|_| CoreError::JsError("JS eval recv task panicked".into()))?
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::EvalResult {
+                value,
+                exception,
+                console_output,
+                timed_out,
+            } => {
+                if timed_out {
+                    return Err(CoreError::JsTimeout(self.config.timeout_ms));
+                }
+                Ok(JsEvalResult {
+                    value,
+                    exception,
+                    console_output,
+                    timed_out: false,
+                })
+            }
+            JsResponse::Error { message } => Err(CoreError::JsError(message)),
+            _ => Err(CoreError::JsError(
+                "unexpected response from JS thread".into(),
+            )),
+        }
+    }
+
+    /// Build a child frame's execution context from HTML + scripts (Phase 8).
+    /// Creates a new `Context` + `RenderDocument` on the JS thread under the
+    /// given `context_id` (must be ≥ 2).
+    pub async fn set_frame_document(
+        &mut self,
+        context_id: u32,
+        html: &str,
+        base_url: &str,
+        viewport: (u32, u32),
+        scripts: Vec<ScriptSource>,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        self.cmd_tx
+            .send(JsCommand::SetFrameDocument {
+                context_id,
+                html: html.to_string(),
+                base_url: base_url.to_string(),
+                viewport,
+                scripts,
+                nav_loop_limit: self.config.nav_script_max_loop_iterations,
+                nav_recursion_limit: self.config.nav_script_max_recursion,
+                nav_stack_limit: self.config.nav_script_max_stack_size,
+                nav_timeout_ms: self.config.nav_script_timeout_ms,
+                response_tx,
+            })
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        let resp = tokio::task::spawn_blocking(move || response_rx.recv())
+            .await
+            .map_err(|_| CoreError::JsError("JS frame doc recv task panicked".into()))?
+            .map_err(|_| CoreError::JsError("JS thread has died".into()))?;
+        match resp {
+            JsResponse::Done => Ok(()),
+            JsResponse::Error { message } => Err(CoreError::ScreenshotError(message)),
+            _ => Err(CoreError::JsError("unexpected response".into())),
+        }
+    }
+
+    /// Drop all child-frame execution contexts (context_id > 1). Called on
+    /// navigation before building new child frames.
+    pub fn clear_child_contexts(&mut self) {
+        let (response_tx, response_rx) = mpsc::channel::<JsResponse>();
+        if let Err(e) = self
+            .cmd_tx
+            .send(JsCommand::ClearChildContexts { response_tx })
+        {
+            tracing::error!(error = %e, "failed to send ClearChildContexts: JS thread has died");
+            return;
+        }
+        let _ = response_rx.recv();
+    }
 }
 
 impl Default for JsRuntime {
@@ -1547,6 +1728,115 @@ impl Drop for JsRuntime {
 // ---------------------------------------------------------------------------
 // JS thread
 // ---------------------------------------------------------------------------
+
+/// A child frame's JS execution context (Phase 8). Each iframe gets its own
+/// `Context` + `RenderDocument`, co-located on the JS thread alongside the
+/// main frame's context. The main frame (context_id=1) is NOT stored here —
+/// it lives directly in `js_thread_loop` as `ctx`/`render_doc_cell`.
+struct ChildFrame {
+    ctx: Context,
+    job_queue: Rc<TokioJobQueue>,
+    render_doc_cell: Rc<RefCell<Option<RenderDocument>>>,
+    dom_snapshot_arc: Arc<RwLock<Option<DomSnapshot>>>,
+}
+
+/// Outcome of `run_eval`: either a response to send back, or a timeout signal
+/// (the caller recreates the context).
+enum EvalOutcome {
+    Response(JsResponse),
+    TimedOut {
+        console: Vec<String>,
+        elapsed_ms: u128,
+    },
+}
+
+/// Core eval logic shared by the main frame and child frames. Does everything
+/// except context recreation on timeout (the caller handles that, since main
+/// and child frames recreate differently).
+#[allow(clippy::too_many_arguments)]
+fn run_eval(
+    ctx: &mut Context,
+    job_queue: &Rc<TokioJobQueue>,
+    console_output: &Arc<RwLock<Vec<String>>>,
+    mutations: &Arc<RwLock<Vec<DomMutation>>>,
+    expression: &str,
+    timeout_ms: Option<u64>,
+    max_loop_iterations: Option<u64>,
+    max_recursion: Option<usize>,
+    max_stack_size: Option<usize>,
+    await_promise: bool,
+) -> EvalOutcome {
+    console_output.write().clear();
+    mutations.write().clear();
+
+    let loop_limit = max_loop_iterations.unwrap_or(100_000);
+    let recursion_limit = max_recursion.unwrap_or(100);
+    let stack_limit = max_stack_size.unwrap_or(1024);
+
+    {
+        let limits = ctx.runtime_limits_mut();
+        limits.set_loop_iteration_limit(loop_limit);
+        limits.set_recursion_limit(recursion_limit);
+        limits.set_stack_size_limit(stack_limit);
+    }
+
+    let timeout = timeout_ms.unwrap_or(5000);
+    let start = std::time::Instant::now();
+    let source = Source::from_bytes(expression);
+    let result = ctx.eval(source);
+
+    ctx.run_jobs();
+    drain_timers(job_queue, ctx);
+
+    let act = active_context_id();
+    if PENDING_FETCH.with(|m| m.borrow().values().any(|p| p.context_id() == act))
+        || PENDING_WS.with(|m| m.borrow().values().any(|s| s.context_id() == Some(act)))
+    {
+        settle_to_idle(ctx, job_queue, start, Duration::from_millis(timeout));
+    }
+
+    let elapsed = start.elapsed();
+    let console = console_output.read().clone();
+
+    if elapsed.as_millis() > timeout as u128 {
+        return EvalOutcome::TimedOut {
+            console,
+            elapsed_ms: elapsed.as_millis(),
+        };
+    }
+
+    match result {
+        Ok(value) => {
+            let final_value = if await_promise {
+                await_promise_value(value, ctx, job_queue)
+            } else {
+                value
+            };
+            let json_value = js_value_to_json(&final_value, ctx);
+            EvalOutcome::Response(JsResponse::EvalResult {
+                value: Some(json_value),
+                exception: None,
+                console_output: console,
+                timed_out: false,
+            })
+        }
+        Err(err) => {
+            let (msg, err_name, err_stack) = error_sink_details(&err, ctx);
+            push_event(CoreEvent::Exception {
+                message: msg.clone(),
+                name: err_name,
+                stack: err_stack,
+                timestamp: now_ms(),
+            });
+            EvalOutcome::Response(JsResponse::EvalResult {
+                value: None,
+                exception: Some(msg),
+                console_output: console,
+                timed_out: false,
+            })
+        }
+    }
+}
 
 /// Main loop for the JS thread.
 ///
@@ -1584,9 +1874,14 @@ fn js_thread_loop(
         &render_doc_cell,
     );
 
+    // Per-iframe execution contexts (Phase 8). Keyed by context_id (≥ 2).
+    // The main frame (context_id=1) uses `ctx`/`render_doc_cell` above.
+    let mut child_frames: HashMap<u32, ChildFrame> = HashMap::new();
+
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             JsCommand::Eval {
+                context_id,
                 expression,
                 timeout_ms,
                 max_loop_iterations,
@@ -1595,123 +1890,94 @@ fn js_thread_loop(
                 await_promise,
                 response_tx,
             } => {
-                // Clear console buffer before eval
-                console_output.write().clear();
-                // Clear mutation buffer before eval
-                mutations.write().clear();
+                ACTIVE_CONTEXT_ID.set(context_id);
 
-                // Apply runtime limits to context
-                let loop_limit = max_loop_iterations.unwrap_or(100_000);
-                let recursion_limit = max_recursion.unwrap_or(100);
-                let stack_limit = max_stack_size.unwrap_or(1024);
-
-                {
-                    let limits = ctx.runtime_limits_mut();
-                    limits.set_loop_iteration_limit(loop_limit);
-                    limits.set_recursion_limit(recursion_limit);
-                    limits.set_stack_size_limit(stack_limit);
-                }
-
-                let timeout = timeout_ms.unwrap_or(5000);
-                let start = std::time::Instant::now();
-
-                let source = Source::from_bytes(&expression);
-                let result = ctx.eval(source);
-
-                // Drain Promise microtasks queued during eval
-                ctx.run_jobs();
-
-                // Drain due timers and fire their callbacks
-                drain_timers(&job_queue, &mut ctx);
-
-                // Settle async fetch/XHR kicked off by the script (Phase 3): a
-                // top-level `fetch().then(cb)` must resolve before the result
-                // is returned. Gate on pending fetches so a top-level
-                // setInterval(0) doesn't over-fire during this pump.
-                if PENDING_FETCH.with(|m| !m.borrow().is_empty())
-                    || PENDING_WS
-                        .with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)))
-                {
-                    settle_to_idle(&mut ctx, &job_queue, start, Duration::from_millis(timeout));
-                }
-
-                let elapsed = start.elapsed();
-                let console = console_output.read().clone();
-
-                // Check if we timed out
-                if elapsed.as_millis() > timeout as u128 {
-                    // Context may be in a bad state — recreate it
-                    let (new_ctx, new_queue) = create_context(
+                let outcome = if context_id == 1 {
+                    run_eval(
+                        &mut ctx,
+                        &job_queue,
                         &console_output,
-                        &dom_snapshot,
                         &mutations,
-                        viewport,
-                        "",
-                        &user_agent,
-                        &fetch_tx_arc,
-                        &cookie_jar_arc,
-                        &render_doc_cell,
-                    );
-                    ctx = new_ctx;
-                    job_queue = new_queue;
-                    let _ = response_tx.send(JsResponse::EvalResult {
-                        value: None,
-                        exception: Some(format!(
-                            "JS execution timed out after {}ms — context was reset, previous state lost",
-                            elapsed.as_millis()
-                        )),
-                        console_output: console,
-                        timed_out: true,
-                    });
-                    continue;
-                }
-
-                match result {
-                    Ok(value) => {
-                        // If awaitPromise is requested, check if the result is a Promise
-                        // and drain microtasks until it resolves.
-                        let final_value = if await_promise {
-                            await_promise_value(value, &mut ctx, &job_queue)
-                        } else {
-                            value
-                        };
-                        let json_value = js_value_to_json(&final_value, &mut ctx);
-                        let _ = response_tx.send(JsResponse::EvalResult {
-                            value: Some(json_value),
-                            exception: None,
-                            console_output: console,
-                            timed_out: false,
-                        });
-                    }
-                    Err(err) => {
-                        let (msg, err_name, err_stack) = error_sink_details(&err, &mut ctx);
-                        // Mirror to the CoreEvent sink (CDP Runtime.exceptionThrown).
-                        push_event(CoreEvent::Exception {
-                            message: msg.clone(),
-                            name: err_name,
-                            stack: err_stack,
-                            timestamp: now_ms(),
-                        });
-                        // Check if it was a runtime limit error (loop/recursion/stack)
-                        let is_runtime_limit = msg.contains("Maximum loop iteration limit")
-                            || msg.contains("exceeded the maximum call stack size")
-                            || msg.contains("recursion limit");
-
-                        if is_runtime_limit {
-                            // Runtime limit hit — context is still valid,
-                            // but the partial execution may have left state.
-                            // We don't reset the context here since boa throws
-                            // a catchable error (the context is fine).
+                        &expression,
+                        timeout_ms,
+                        max_loop_iterations,
+                        max_recursion,
+                        max_stack_size,
+                        await_promise,
+                    )
+                } else {
+                    match child_frames.get_mut(&context_id) {
+                        Some(cf) => run_eval(
+                            &mut cf.ctx,
+                            &cf.job_queue,
+                            &console_output,
+                            &mutations,
+                            &expression,
+                            timeout_ms,
+                            max_loop_iterations,
+                            max_recursion,
+                            max_stack_size,
+                            await_promise,
+                        ),
+                        None => {
+                            let _ = response_tx.send(JsResponse::Error {
+                                message: format!("unknown execution context id {context_id}"),
+                            });
+                            ACTIVE_CONTEXT_ID.set(1);
+                            continue;
                         }
+                    }
+                };
 
+                match outcome {
+                    EvalOutcome::Response(resp) => {
+                        let _ = response_tx.send(resp);
+                    }
+                    EvalOutcome::TimedOut {
+                        console,
+                        elapsed_ms,
+                    } => {
+                        // Recreate the timed-out context.
+                        if context_id == 1 {
+                            let (new_ctx, new_queue) = create_context(
+                                &console_output,
+                                &dom_snapshot,
+                                &mutations,
+                                viewport,
+                                "",
+                                &user_agent,
+                                &fetch_tx_arc,
+                                &cookie_jar_arc,
+                                &render_doc_cell,
+                            );
+                            ctx = new_ctx;
+                            job_queue = new_queue;
+                        } else if let Some(cf) = child_frames.get_mut(&context_id) {
+                            let (new_ctx, new_queue) = create_context(
+                                &console_output,
+                                &cf.dom_snapshot_arc,
+                                &mutations,
+                                viewport,
+                                "",
+                                &user_agent,
+                                &fetch_tx_arc,
+                                &cookie_jar_arc,
+                                &cf.render_doc_cell,
+                            );
+                            cf.ctx = new_ctx;
+                            cf.job_queue = new_queue;
+                        }
                         let _ = response_tx.send(JsResponse::EvalResult {
                             value: None,
-                            exception: Some(msg),
+                            exception: Some(format!(
+                                "JS execution timed out after {elapsed_ms}ms — context was reset, previous state lost"
+                            )),
                             console_output: console,
-                            timed_out: false,
+                            timed_out: true,
                         });
                     }
                 }
+                ACTIVE_CONTEXT_ID.set(1);
             }
             JsCommand::SetGlobal {
                 name,
@@ -1958,6 +2224,96 @@ fn js_thread_loop(
                     }
                 }
             }
+            JsCommand::SetFrameDocument {
+                context_id,
+                html,
+                base_url,
+                viewport: vp,
+                scripts,
+                nav_loop_limit,
+                nav_recursion_limit,
+                nav_stack_limit,
+                nav_timeout_ms,
+                response_tx,
+            } => {
+                ACTIVE_CONTEXT_ID.set(context_id);
+                let child_dom_snapshot: Arc<RwLock<Option<DomSnapshot>>> =
+                    Arc::new(RwLock::new(None));
+                let child_render_doc: Rc<RefCell<Option<RenderDocument>>> =
+                    Rc::new(RefCell::new(None));
+                let (mut child_ctx, child_jq) = create_context(
+                    &console_output,
+                    &child_dom_snapshot,
+                    &mutations,
+                    vp,
+                    &base_url,
+                    &user_agent,
+                    &fetch_tx_arc,
+                    &cookie_jar_arc,
+                    &child_render_doc,
+                );
+                // Build the child frame's RenderDocument + run scripts.
+                let boar_vp = Viewport {
+                    width: vp.0.max(64),
+                    height: vp.1.max(64),
+                    scale: 1.0,
+                };
+                match RenderDocument::from_html(&html, Some(&base_url), boar_vp) {
+                    Ok(doc) => {
+                        *child_render_doc.borrow_mut() = Some(doc);
+                        crate::js::dom_snapshot::clear_shadow_roots();
+                        {
+                            let mut guard = child_render_doc.borrow_mut();
+                            if let Some(doc) = guard.as_mut() {
+                                process_declarative_shadow_dom(doc);
+                            }
+                        }
+                        {
+                            let guard = child_render_doc.borrow();
+                            if let Some(doc) = guard.as_ref() {
+                                let title = doc
+                                    .query_selector("title")
+                                    .map(|id| doc.node_text(id))
+                                    .unwrap_or_default();
+                                let snap =
+                                    crate::js::dom_snapshot::DomSnapshot::from_render_document(
+                                        doc, &base_url, &title,
+                                    );
+                                *child_dom_snapshot.write() = Some(snap);
+                            }
+                        }
+                        run_navigation_scripts(
+                            &mut child_ctx,
+                            &child_jq,
+                            &scripts,
+                            nav_loop_limit,
+                            nav_recursion_limit,
+                            nav_stack_limit,
+                            nav_timeout_ms,
+                        );
+                        child_frames.insert(
+                            context_id,
+                            ChildFrame {
+                                ctx: child_ctx,
+                                job_queue: child_jq,
+                                render_doc_cell: child_render_doc,
+                                dom_snapshot_arc: child_dom_snapshot,
+                            },
+                        );
+                        let _ = response_tx.send(JsResponse::Done);
+                    }
+                    Err(e) => {
+                        let _ = response_tx.send(JsResponse::Error {
+                            message: e.to_string(),
+                        });
+                    }
+                }
+                ACTIVE_CONTEXT_ID.set(1);
+            }
+            JsCommand::ClearChildContexts { response_tx } => {
+                child_frames.clear();
+                let _ = response_tx.send(JsResponse::Done);
+            }
             JsCommand::Shutdown => {
                 break;
             }
@@ -2178,9 +2534,11 @@ fn settle_to_idle(
 
         let pending_timers = job_queue.timer_count();
         let pending_microtasks = job_queue.microtask_count();
-        let pending_fetch = PENDING_FETCH.with(|m| !m.borrow().is_empty());
+        let act = active_context_id();
+        let pending_fetch =
+            PENDING_FETCH.with(|m| m.borrow().values().any(|p| p.context_id() == act));
         let pending_ws =
-            PENDING_WS.with(|m| m.borrow().values().any(|s| !matches!(s, WsState::Closed)));
+            PENDING_WS.with(|m| m.borrow().values().any(|s| s.context_id() == Some(act)));
         if pending_timers == 0 && pending_microtasks == 0 && !pending_fetch && !pending_ws {
             return;
         }
@@ -2390,13 +2748,15 @@ fn settle_xhr(
 /// top-level `evaluate()`. Responses are collected before settling to release
 /// the channel borrow before re-entering boa (settling may issue more JS/fetch).
 fn drain_pending_fetch_responses(ctx: &mut Context) {
+    let active = active_context_id();
     // Abort pass: reject any pending fetch whose AbortSignal has fired since
-    // the last pump. Signal refs are cloned out first — reading `.aborted`
-    // needs `&mut ctx`, which can't happen under the `PENDING_FETCH` borrow.
+    // the last pump. Only checks the active context's fetches — other frames'
+    // aborts are handled when they next pump (Phase 8).
     let aborted_ids: Vec<u64> = PENDING_FETCH
         .with(|m| {
             m.borrow()
                 .iter()
+                .filter(|(_, pf)| pf.context_id() == active)
                 .filter_map(|(id, pf)| match pf {
                     PendingFetch::Fetch { signal, .. } => signal.clone().map(|s| (*id, s)),
                     PendingFetch::Xhr { .. } => None,
@@ -2425,7 +2785,13 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
             let _ = resolvers.reject.call(&JsValue::undefined(), &[err], ctx);
         }
     }
-    let responses: Vec<FetchResponseMsg> = RESPONSE_RX.with(|cell| {
+
+    // Collect deferred responses (from a previous context's pump) + fresh
+    // channel responses, then settle only those belonging to the active
+    // context. Others are re-deferred for their owning context's next pump.
+    let mut responses: Vec<FetchResponseMsg> =
+        DEFERRED_RESPONSES.with(|d| d.borrow_mut().drain(..).collect());
+    responses.extend(RESPONSE_RX.with(|cell| {
         let mut borrowed = cell.borrow_mut();
         let Some(rx) = borrowed.as_mut() else {
             return Vec::new();
@@ -2435,9 +2801,22 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
             out.push(resp);
         }
         out
-    });
+    }));
 
+    let mut to_defer = Vec::new();
     for resp in responses {
+        // Check whether this response belongs to the active context.
+        let belongs_here = PENDING_FETCH
+            .with(|m| m.borrow().get(&resp.id).map(|p| p.context_id()) == Some(active));
+        if !belongs_here {
+            // Entry missing → stale, discard. Entry for another context → defer.
+            if PENDING_FETCH.with(|m| m.borrow().contains_key(&resp.id)) {
+                to_defer.push(resp);
+            } else {
+                tracing::trace!(id = resp.id, "stale fetch response — no pending entry");
+            }
+            continue;
+        }
         // Emit Network.responseReceived + loadingFinished before `resp` is
         // moved into settle_fetch/settle_xhr.
         if event_sink_attached() {
@@ -2465,6 +2844,7 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
                 onload,
                 onerror,
                 onrsc,
+                ..
             }) => settle_xhr(
                 ready_state,
                 status,
@@ -2481,6 +2861,9 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
             }
         }
     }
+    if !to_defer.is_empty() {
+        DEFERRED_RESPONSES.with(|d| d.borrow_mut().extend(to_defer));
+    }
     // Flush microtasks scheduled by abort/response settlement (the `.catch`/
     // `.then` reactions) within this pump. Without it, an abort that empties
     // `pending_fetch` suppresses the settle_to_idle loop and leaves the
@@ -2491,7 +2874,10 @@ fn drain_pending_fetch_responses(ctx: &mut Context) {
 /// Collects into a Vec first to release the `WS_EVENT_RX` borrow before
 /// re-entering boa (settling may issue more JS / WS / fetch).
 fn drain_ws_events(ctx: &mut Context) {
-    let events: Vec<WsEvent> = WS_EVENT_RX.with(|cell| {
+    let active = active_context_id();
+    // Collect deferred events + fresh channel events.
+    let mut events: Vec<WsEvent> = DEFERRED_WS_EVENTS.with(|d| d.borrow_mut().drain(..).collect());
+    events.extend(WS_EVENT_RX.with(|cell| {
         let mut borrowed = cell.borrow_mut();
         let Some(rx) = borrowed.as_mut() else {
             return Vec::new();
@@ -2501,8 +2887,26 @@ fn drain_ws_events(ctx: &mut Context) {
             out.push(ev);
         }
         out
-    });
+    }));
+    let mut to_defer = Vec::new();
     for ev in events {
+        // Only settle WS events whose owning socket belongs to the active
+        // context. Others are deferred for their owning context's next pump.
+        let id = match &ev {
+            WsEvent::Open { id, .. }
+            | WsEvent::Message { id, .. }
+            | WsEvent::Close { id, .. }
+            | WsEvent::Error { id, .. } => *id,
+        };
+        let belongs_here =
+            PENDING_WS.with(|m| m.borrow().get(&id).and_then(|s| s.context_id()) == Some(active));
+        if !belongs_here {
+            // Socket not found (stale) → discard; belongs to another context → defer.
+            if PENDING_WS.with(|m| m.borrow().contains_key(&id)) {
+                to_defer.push(ev);
+            }
+            continue;
+        }
         match ev {
             WsEvent::Open {
                 id,
@@ -2518,6 +2922,9 @@ fn drain_ws_events(ctx: &mut Context) {
             } => settle_ws_close(id, code, reason, was_clean, ctx),
             WsEvent::Error { id, message } => settle_ws_error(id, message, ctx),
         }
+    }
+    if !to_defer.is_empty() {
+        DEFERRED_WS_EVENTS.with(|d| d.borrow_mut().extend(to_defer));
     }
 }
 
@@ -2553,7 +2960,7 @@ fn ws_fire(obj: &JsObject, type_name: &str, event: JsValue, ctx: &mut Context) {
 fn settle_ws_open(id: u64, protocol: String, extensions: String, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         m.borrow().get(&id).and_then(|s| match s {
-            WsState::Live { obj } => Some(obj.clone()),
+            WsState::Live { obj, .. } => Some(obj.clone()),
             _ => None,
         })
     });
@@ -2591,7 +2998,7 @@ fn settle_ws_open(id: u64, protocol: String, extensions: String, ctx: &mut Conte
 fn settle_ws_message(id: u64, data: WsData, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         m.borrow().get(&id).and_then(|s| match s {
-            WsState::Live { obj } => Some(obj.clone()),
+            WsState::Live { obj, .. } => Some(obj.clone()),
             _ => None,
         })
     });
@@ -2736,7 +3143,7 @@ fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mu
     let obj = PENDING_WS.with(|m| {
         let mut borrowed = m.borrow_mut();
         let obj = borrowed.get(&id).and_then(|s| match s {
-            WsState::Live { obj } => Some(obj.clone()),
+            WsState::Live { obj, .. } => Some(obj.clone()),
             _ => None,
         });
         borrowed.insert(id, WsState::Closed);
@@ -2775,7 +3182,7 @@ fn settle_ws_close(id: u64, code: u16, reason: String, was_clean: bool, ctx: &mu
 fn settle_ws_error(id: u64, _message: String, ctx: &mut Context) {
     let obj = PENDING_WS.with(|m| {
         m.borrow().get(&id).and_then(|s| match s {
-            WsState::Live { obj } => Some(obj.clone()),
+            WsState::Live { obj, .. } => Some(obj.clone()),
             _ => None,
         })
     });
@@ -3206,6 +3613,7 @@ fn create_context(
                     PendingFetch::Fetch {
                         resolvers,
                         signal: signal_obj,
+                        context_id: active_context_id(),
                     },
                 );
             });
@@ -3373,6 +3781,7 @@ fn create_context(
                                         onload: send_onload.clone(),
                                         onerror: send_onerror.clone(),
                                         onrsc: send_onrsc.clone(),
+                                        context_id: active_context_id(),
                                     },
                                 );
                             });
@@ -3613,7 +4022,7 @@ fn create_context(
                     .unwrap_or_default();
                 PENDING_WS.with(|m| {
                     let borrowed = m.borrow();
-                    if let Some(WsState::Live { obj }) = borrowed.get(&ael_id) {
+                    if let Some(WsState::Live { obj, .. }) = borrowed.get(&ael_id) {
                         let key = JsString::from(format!("__listeners_{t}").as_str());
                         let existing = obj.get(key.clone(), ctx).unwrap_or(JsValue::null());
                         let arr = if let Some(o) = existing.as_object() {
@@ -3664,8 +4073,13 @@ fn create_context(
                 .build();
 
             PENDING_WS.with(|m| {
-                m.borrow_mut()
-                    .insert(id, WsState::Live { obj: obj.clone() });
+                m.borrow_mut().insert(
+                    id,
+                    WsState::Live {
+                        obj: obj.clone(),
+                        context_id: active_context_id(),
+                    },
+                );
             });
             let _ = WS_REQ_TX.with(|cell| {
                 cell.borrow().as_ref().map(|tx| {

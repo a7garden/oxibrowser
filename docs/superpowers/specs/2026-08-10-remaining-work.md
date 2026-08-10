@@ -13,32 +13,28 @@
 
 ## 1. 현재 위치 (한 줄)
 
-**Phase 1–9 전부 완료 (2026-08-10).** Phase 9의 마지막 잔여였던 **JS-fetch 인터셉션**
-(`Fetch.enable` → 페이지 `fetch()`/XHR 페이즈 → `Fetch.requestPaused` → continue/fail/fulfill)
-구현·배선·유닛 테스트 완료(커밋 `e031352`). 검증 게이트 전부 통과: fmt, clippy `-D warnings`,
-workspace 602 tests / 0 failed, `--features browser` 바이너리 빌드, raw-CDP 인수 프로브
-**10/10 PASS**.
+**Phase 1–9 + Phase 8(iframe 분리 컨텍스트) 전부 완료 (2026-08-10).** iframe별 분리된
+JS 실행 컨텍스트 + cross-frame `Runtime.evaluate` 구현 완료. 검증 게이트 전부 통과: fmt,
+clippy `-D warnings`, workspace **604 tests** / 0 failed, `--features browser` 빌드,
+CDP iframe 프로브 **11/11 PASS**.
 
 | Phase | 내용 | 상태 |
 |---|---|---|
 | 1–5 + follow-ups | navigate 스크립트, 이벤트 루프, 비동기 fetch, Web API, CDP 완전성 | ✅ |
 | 6 | 네트워크 정확성 (CORS, 쿠키 만료/PSL/CHIPS, proxy, auth, Referer, streaming) | ✅ |
 | 7 | 렌더/상호작용 (hit-testing `hit_test_element`, `printToPDF` 실 PDF) | 🟡 (폰트만 차단, §3) |
-| 8 | iframe population 완료 | 🟡 (분리 컨텍스트/cross-frame 잔여, §2) |
+| 8 | iframe 분리 JS 컨텍스트 + cross-frame evaluate | ✅ (2026-08-10) |
 | 9 | 멀티탭, downloads, geolocation/timezone, interception(네비+JS-fetch), tracing | ✅ (2026-08-10) |
 
 ---
 
 ## 2. 남은 구현 작업 (전부)
 
-### 2.1 [대규모] Phase 8 — iframe 분리 JS 컨텍스트 + cross-frame evaluate
-- **상태:** 미착수. 자식 프레임 **population만** 완료 — `Session::populate_iframes`가
-  `<iframe src>`를 fetch해 자식 `Frame`으로 추가 (커밋 `87e75bc`).
-- **남음:** 프레임별 분리된 JS 실행 컨텍스트 (현재 런타임이 페이지당 `Context` 하나 소유),
-  프레임 경계를 가로지르는 hit-test/evaluate (`Runtime.evaluate`의 `contextId` 선택).
-- **앵커:** `crates/oxibrowser-core/src/frame.rs`, `session.rs::populate_iframes`.
-- **비고:** 깊은 재구성(per-frame JS context) 필요. 자동화(correctness) 가치는 iframe 페이지
-  대상 스크래핑에서 높음.
+### 2.1 [완료] Phase 8 — iframe 분리 JS 컨텍스트 + cross-frame evaluate
+- **상태:** 완료 (2026-08-10). 각 iframe마다 독립된 `boa::Context` + `RenderDocument` 생성,
+  스크립트 실행, `Runtime.evaluate`의 `contextId` 라우팅, `Page.getFrameTree` 자식 보고,
+  `executionContextCreated` per-frame 발생. 자세한 설계는
+  `docs/superpowers/specs/2026-08-10-phase8-iframe-contexts.md` 참조.
 
 ### 2.2 [차단] Phase 7 — 폰트 로딩 (`@font-face`)
 - **상태:** 차단. Blitz 0.3.0-beta.1의 `fontdb` 정적 `FONT_DB`가 `pub(crate)`이고 `svg`
@@ -103,10 +99,11 @@ cargo test --workspace
 
 ## 5. 다음 세션 시작점
 
-1. 작업 우선순위: **2.1 (iframe 분리 컨텍스트)** 가 유일한 남은 기능 작업 — 대규모이므로
-   착수 시 전용 spec 먼저 (`docs/superpowers/specs/<date>-phase8-iframe-contexts.md`).
-2. 2.3 (JS-fetch e2e) 또는 3의 React SPA 인수 baseline을 먼저 닫고 싶다면 그렇게 해도 됨 —
-   어느 쪽도 블로커 아님.
+1. **2.1 (iframe 분리 컨텍스트) 완료.** 기능 작업으로 남은 것은 폰트(2.2, 차단)뿐.
+2. 2.3 (JS-fetch e2e) 또는 §3의 React SPA 인수 baseline을 닫을 수 있음 — 어느 쪽도
+   블로커 아님.
 3. 2.2 (폰트)는 차단 유지 — 재개 금지 unless Blitz 포크 결정.
+4. Phase 8 v1 비목표(spec §6): `window.parent`/`window.top`, `srcdoc`/`about:blank`
+   iframe, 동적 iframe 추가/제거 추적, 중첩 iframe. 필요 시 재개 가능.
 
 끝.

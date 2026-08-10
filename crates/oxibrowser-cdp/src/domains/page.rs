@@ -195,6 +195,52 @@ async fn navigate(params: Option<Value>, ctx: &DispatchContext) -> DomainResult 
                 }),
             );
 
+            // 3b. Emit Page.frameNavigated + executionContextCreated for each
+            // child iframe (Phase 8).
+            if let Some(page) = guard.page() {
+                let frame_map = guard.frame_context_map().read().clone();
+                for child in page.root_frame().children() {
+                    let child_url = child.url();
+                    let child_frame_id = child.id().to_string();
+                    ctx.events.send_page_event(
+                        "Page.frameNavigated",
+                        json!({
+                            "frame": {
+                                "id": child_frame_id,
+                                "parentId": frame_id,
+                                "loaderId": loader_id,
+                                "url": child_url.to_string(),
+                                "domainAndRegistry": "",
+                                "securityOrigin": child_url.origin().unicode_serialization(),
+                                "mimeType": "text/html",
+                                "secureContextType": "Secure",
+                                "crossOriginIsolatedContextType": "NotIsolated",
+                            },
+                            "type": "Navigation"
+                        }),
+                    );
+                    // Emit the matching execution context.
+                    if let Some(&context_id) = frame_map.get(&child_frame_id) {
+                        ctx.events.send_runtime_event(
+                            "Runtime.executionContextCreated",
+                            json!({
+                                "context": {
+                                    "id": context_id,
+                                    "origin": child_url.origin().unicode_serialization(),
+                                    "name": format!("iframe:{child_frame_id}"),
+                                    "uniqueId": format!("context-{}", uuid::Uuid::new_v4()),
+                                    "auxData": {
+                                        "isDefault": true,
+                                        "type": "default",
+                                        "frameId": child_frame_id
+                                    }
+                                }
+                            }),
+                        );
+                    }
+                }
+            }
+
             // 4-5. Emit Network.responseReceived and Network.loadingFinished
             network::emit_response_events(
                 &ctx.events,
@@ -340,23 +386,15 @@ async fn reload(_params: Option<Value>, ctx: &DispatchContext) -> DomainResult {
     }
 }
 
-/// Page.getFrameTree — returns the actual frame tree from the session.
+/// Page.getFrameTree — returns the actual frame tree from the session,
+/// including child iframe frames (Phase 8).
 async fn get_frame_tree(ctx: &DispatchContext) -> DomainResult {
     let guard = ctx.session.read().await;
     match guard.page() {
         Some(page) => {
             let frame = page.root_frame();
-            let url = frame.url();
             Ok(Some(json!({
-                "frameTree": {
-                    "frame": {
-                        "id": frame.id().to_string(),
-                        "url": url.to_string(),
-                        "securityOrigin": url.origin().unicode_serialization(),
-                        "mimeType": "text/html"
-                    },
-                    "childFrames": []
-                }
+                "frameTree": frame_tree_node(frame)
             })))
         }
         None => Ok(Some(json!({
@@ -371,6 +409,21 @@ async fn get_frame_tree(ctx: &DispatchContext) -> DomainResult {
             }
         }))),
     }
+}
+
+/// Build a recursive frame-tree JSON node for `Page.getFrameTree`.
+fn frame_tree_node(frame: &oxibrowser_core::frame::Frame) -> Value {
+    let url = frame.url();
+    let child_frames: Vec<Value> = frame.children().iter().map(frame_tree_node).collect();
+    json!({
+        "frame": {
+            "id": frame.id().to_string(),
+            "url": url.to_string(),
+            "securityOrigin": url.origin().unicode_serialization(),
+            "mimeType": "text/html"
+        },
+        "childFrames": child_frames
+    })
 }
 
 /// Page.getFrameMetrics — returns frame layout metrics.
