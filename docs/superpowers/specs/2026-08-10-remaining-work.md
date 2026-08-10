@@ -109,7 +109,7 @@ about:blank) 완료·검증. 남은 항목:
    iframe을 보고한다. 새 `Frame::find_by_id`/`find_mut_by_id`/`find_by_frame_id_str` 헬퍼.
    회귀: `acceptance/nested/run.sh` 7/7 PASS. W3c(window.parent/top) / W3d(동적 iframe)의
    전제조건 충족.
-2. **외부 `<link rel=stylesheet>` 적용** — `data:` base URL로 Blitz가 panic. W2-pre.
+2. ~~외부 `<link rel=stylesheet>` 적용~~ — **완료 (`4df5917`)**. fetch + inline-injection path에서 panic 우회.
 3. **알려진 갭** (인수 하네스로 발견): `window.addEventListener` 부재, JS `fetch()` 상대 URL
    미resolve("invalid URL"), `hashchange` 미발화. 상대 URL fetch는 실사이트 호환에 영향 큰 후보.
 4. 인수 하네스는 `bash acceptance/run.sh`로 재실행 가능 (회귀 게이트).
