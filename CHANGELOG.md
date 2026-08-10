@@ -6,8 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [0.19.0] - 2026-08-10
+## [Unreleased]
 
+### Fixed
+- **Nested-iframe contexts (W3b)** — child frames beyond depth 1 are now discovered (`DomSnapshot::extract_iframes` / `iframe_srcs` walk the tree instead of scanning top-level nodes) and given their own JS execution context (`Session::populate_iframes` populates every frame in the tree via BFS; `Session::inject_child_frames` walks the full frame tree before issuing `SetFrameDocument` commands). `Page.getFrameTree` now reports the complete recursive hierarchy and `Runtime.evaluate { contextId: <grandchild> }` reaches the grandchild DOM. New `Frame::find_by_id`, `find_mut_by_id`, and `find_by_frame_id_str` helpers back the lookup. Closing this unblocks `window.parent`/`window.top` (W3c) and dynamic-iframe creation (W3d). Regression: `acceptance/nested/run.sh` 7/7 PASS.
+
+
+ ## [0.19.0] - 2026-08-10
 ### Added
 - **`@font-face` webfont loading** — inline `<style>` `@font-face` rules are scanned for font URLs, the font files are fetched through the network stack, and the bytes are registered into a Parley `FontContext` (`Collection::register_fonts`) carried into layout via Blitz's public `DocumentConfig.font_ctx`. Custom webfonts now reach Stylo/Taffy text shaping — **no Blitz fork required** (the prior "fork required" premise confused the svg/usvg `FONT_DB` with the text-layout `FontContext`; verified by a spike + end-to-end render). `RenderDocument::from_html_with_fonts`, `HttpClient::fetch_bytes`, and a `fonts` module (`extract_font_face_urls`) are the new surface.
 - **`srcdoc` / `about:blank` iframe contexts** — `<iframe srcdoc="…">` now builds a child frame from the inline HTML (no fetch), and non-http(s) `src` (`about:blank`, `javascript:`) builds an empty child frame. Both get their own JS execution context, so `Runtime.evaluate` with the child `contextId` reaches their DOM. A new `DomSnapshot::extract_iframes` surfaces `src` + `srcdoc`.
@@ -22,10 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `window.addEventListener` is absent (`window` is a distinct object from `globalThis` and lacks the method); use `globalThis.addEventListener` / element listeners.
 - JS `fetch()` rejects relative URLs ("invalid URL"); absolute URLs are required. Real browsers resolve against the document base.
 - `hashchange` events are not fired.
-- Nested-iframe execution contexts deadlock the JS thread (frame-tree nesting itself works; context creation for a grandchild hangs). W3b/c/d are blocked on hardening the Phase 8 per-context concurrency.
 
-### Internal
-- `oxibrowser-render` gains a `parley` dependency and a `build_font_ctx` helper; `JsRuntime` stages fetched fonts via a `pending_fonts` field consumed on the next `SetDocument` (so `set_document_with_scripts`'s signature is unchanged).
+
 
 ## [0.18.0] - 2026-08-10
 

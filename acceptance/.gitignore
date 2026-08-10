@@ -2,3 +2,5 @@
 # are committed as evidence)
 server.log
 serve.log
+nested/mock.log
+nested/serve.log

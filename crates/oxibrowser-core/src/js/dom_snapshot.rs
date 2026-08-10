@@ -1189,34 +1189,59 @@ impl DomSnapshot {
         }
         out
     }
-
-    /// Extract `<iframe src>` URLs from the document.
-    pub fn iframe_srcs(&self) -> Vec<String> {
-        self.nodes
-            .values()
-            .filter(|n| n.node_type == 1 && n.tag.eq_ignore_ascii_case("iframe"))
-            .filter_map(|n| n.attributes.get("src").cloned())
-            .collect()
+    /// DFS pre-order walk over the snapshot tree (root first, then each child),
+    /// yielding every `<iframe>` element regardless of nesting depth. Used by
+    /// `iframe_srcs` / `extract_iframes` so that `<iframe>` inside an iframe's
+    /// body (the live `RenderDocument`'s nested structure) is reported, not
+    /// missed at depth ≥ 2.
+    fn collect_iframes(&self) -> Vec<u32> {
+        // Iterative DFS to match `extract_scripts`'s shape — root first so the
+        // document order is preserved across parent/child iframes.
+        let mut out = Vec::new();
+        let mut stack = vec![self.root_id];
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            for &child in node.children.iter().rev() {
+                stack.push(child);
+            }
+            if node.node_type == 1 && node.tag.eq_ignore_ascii_case("iframe") {
+                out.push(id);
+            }
+        }
+        out
     }
 
     /// Extract every `<iframe>` with its `src`/`srcdoc` attributes (document order).
-    /// Used by iframe population to handle `srcdoc`/`about:blank` alongside `http(s)` iframes.
+    /// Walks the full tree so iframes nested inside other iframes are reported
+    /// — the prior `nodes.values()` scan missed depth ≥ 2 and silently truncated
+    /// multi-level frame hierarchies.
+    ///
+    /// Used by iframe population to handle `srcdoc`/`about:blank` alongside
+    /// `http(s)` iframes.
     pub fn extract_iframes(&self) -> Vec<IframeElement> {
-        self.nodes
-            .values()
-            .filter(|n| n.node_type == 1 && n.tag.eq_ignore_ascii_case("iframe"))
+        self.collect_iframes()
+            .into_iter()
+            .filter_map(|id| self.nodes.get(&id))
             .map(|n| IframeElement {
                 src: n.attributes.get("src").cloned(),
                 srcdoc: n.attributes.get("srcdoc").cloned(),
             })
             .collect()
     }
+    /// Extract `<iframe src>` URLs from the document.
+    /// DFS over the snapshot tree so nested iframes are reported (matches
+    /// `extract_iframes`'s behavior — kept consistent so both extraction
+    /// entry points see the same set of frames at every depth).
+    pub fn iframe_srcs(&self) -> Vec<String> {
+        self.collect_iframes()
+            .into_iter()
+            .filter_map(|id| self.nodes.get(&id))
+            .filter_map(|n| n.attributes.get("src").cloned())
+            .collect()
+    }
 
-    /// Extract executable `<script>` elements in document order.
-    ///
-    /// Skips non-JS script types (e.g. `application/json` data blocks) and
-    /// `nomodule` scripts (this engine supports modules). External (`src`)
-    /// scripts return an empty `source`; the caller fills it after fetching.
     pub fn extract_scripts(&self) -> Vec<ScriptSource> {
         let mut out = Vec::new();
         // Iterative DFS pre-order = document order. `tag_index` would also

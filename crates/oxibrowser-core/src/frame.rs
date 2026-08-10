@@ -22,6 +22,10 @@ impl FrameId {
         static COUNTER: AtomicU32 = AtomicU32::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
+    pub(crate) fn from_string(s: &str) -> Option<Self> {
+        let rest = s.strip_prefix("frame-")?;
+        rest.parse::<u32>().ok().map(Self)
+    }
 }
 
 impl std::fmt::Display for FrameId {
@@ -106,6 +110,45 @@ impl Frame {
     pub fn add_child(&mut self, frame: Frame) {
         self.dom_version += 1;
         self.children.push(frame);
+    }
+
+    /// Find a frame by id, returning a mutable borrow of the matching node
+    /// (this frame or any descendant). Used by iframe population to attach
+    /// nested child frames to the correct parent in the tree, not just to
+    /// the root.
+    pub fn find_mut_by_id(&mut self, target: FrameId) -> Option<&mut Frame> {
+        if self.id == target {
+            return Some(self);
+        }
+        for child in self.children.iter_mut() {
+            if let Some(found) = child.find_mut_by_id(target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Find a frame by id, immutable variant (used during frame-tree walks
+    /// that must not hold a mutable borrow across an `await`).
+    pub fn find_by_id(&self, target: FrameId) -> Option<&Frame> {
+        if self.id == target {
+            return Some(self);
+        }
+        for child in self.children.iter() {
+            if let Some(found) = child.find_by_id(target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Same as `find_by_id` but accepts the printed form (`frame-N`) so the
+    /// session's `frame_contexts` map (keyed by the string id) can be looked
+    /// up during child-frame script prefetch without exposing FrameId
+    /// internals to that module.
+    pub fn find_by_frame_id_str(&self, id_str: &str) -> Option<&Frame> {
+        let target = FrameId::from_string(id_str)?;
+        self.find_by_id(target)
     }
 
     /// Get the DOM version (for cache invalidation).

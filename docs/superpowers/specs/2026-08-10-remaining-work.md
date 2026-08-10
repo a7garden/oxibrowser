@@ -103,12 +103,12 @@ cargo test --workspace
 v0.19.0 (2026-08-10) 기준. W1(인수 하네스 + JS-fetch e2e), W2-core(@font-face), W3a(srcdoc/
 about:blank) 완료·검증. 남은 항목:
 
-1. **[최우선] Phase 8 컨텍스트 동시성 경화** — 중첩 iframe의 실행 컨텍스트 생성이 JS 스레드를
-   **deadlock**시킴 (`inject_child_frames` → `set_frame_document` for grandchild → 이후
-   `Runtime.evaluate` hang). 프레임 트리 중첩 자체는 동작 (getFrameTree가 level2 보고)하나
-   컨텍스트 생성이 교착. 원인은 per-context 아키텍처(ACTIVE_CONTEXT_ID + deferred fetch/ws
-   buffer)의 중첩 생성 시 취약점. 이걸 해결해야 W3b(중첩), W3c(window.parent/top), W3d(동적
-   iframe) 모두 재개 가능.
+1. ~~[최우선] Phase 8 컨텍스트 동시성 경화~~ — **완료 (W3b)**. `inject_child_frames`가 전체
+     frame 트리를 순회하도록 재귀화되고, `populate_iframes`가 BFS로 모든 frame의 중첩 iframe을
+     처리하며, `DomSnapshot::extract_iframes` / `iframe_srcs`가 트리 walk로 깊이에 무관하게
+   iframe을 보고한다. 새 `Frame::find_by_id`/`find_mut_by_id`/`find_by_frame_id_str` 헬퍼.
+   회귀: `acceptance/nested/run.sh` 7/7 PASS. W3c(window.parent/top) / W3d(동적 iframe)의
+   전제조건 충족.
 2. **외부 `<link rel=stylesheet>` 적용** — `data:` base URL로 Blitz가 panic. W2-pre.
 3. **알려진 갭** (인수 하네스로 발견): `window.addEventListener` 부재, JS `fetch()` 상대 URL
    미resolve("invalid URL"), `hashchange` 미발화. 상대 URL fetch는 실사이트 호환에 영향 큰 후보.

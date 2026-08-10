@@ -7,6 +7,7 @@ use crate::browser::BrowserId;
 use crate::config::BrowserConfig;
 use crate::error::{CoreError, Result};
 use crate::frame::Frame;
+use crate::frame::FrameId;
 use crate::js::JsRuntime;
 use crate::js::dom_snapshot::DomMutation;
 use crate::js::runtime::JsRuntimeConfig;
@@ -852,48 +853,98 @@ impl Session {
         Ok(())
     }
 
-    /// Fetch each `<iframe src>` in the page's root frame and attach the
-    /// fetched document as a child [`Frame`] (Phase 8 population step).
+    /// Fetch each `<iframe>` in **every** frame (root and descendants) and
+    /// attach the fetched document as a child [`Frame`] (Phase 8 population
+    /// step, extended in W3b for nested iframes).
+    ///
+    /// Operates level-by-level: at each level every frame's `<iframe>` elements
+    /// are collected, fetched asynchronously, and the produced [`Frame`]s are
+    /// then attached to the correct parent via `Frame::find_mut_by_id`. Mixing
+    /// the fetch await with a `&mut Frame` borrow would collide, so the
+    /// framework here is
+    ///   1. collect (immutable references),
+    ///   2. fetch + parse (produces new `Frame` values, no page borrows),
+    ///   3. attach (mutates `page`'s root frame tree).
+    ///
     /// Failures (bad URL, network error) are logged and skipped so a single
     /// broken iframe can't abort navigation.
     async fn populate_iframes(&self, page: &mut Page, base_url: &Url) {
-        let iframes = page.root_frame().document().extract_iframes();
-        for iframe in iframes {
-            // 1. srcdoc → inline content, no fetch (W3a).
-            if let Some(srcdoc) = iframe.srcdoc {
-                let child_url = Url::parse("about:srcdoc").unwrap_or_else(|_| base_url.clone());
-                match Frame::from_html(child_url, &srcdoc).await {
-                    Ok(child) => page.root_frame_mut().add_child(child),
-                    Err(e) => tracing::warn!(error = %e, "failed to parse srcdoc iframe"),
-                }
-                continue;
-            }
-            // 2. src present — resolve against the page URL.
-            let Some(src) = iframe.src else { continue };
-            let Ok(full) = base_url.join(&src) else {
-                continue;
+        let mut worklist: Vec<FrameId> = vec![page.root_frame().id()];
+        // `pages` mutated while we hold root_frame_mut; we never hold it across
+        // an await — the fetch phase runs without a page borrow.
+        while let Some(parent_id) = worklist.pop() {
+            // Phase 1: collect this parent's iframe list without holding the
+            // mutable borrow past a single synchronous walk.
+            let iframes: Vec<crate::js::dom_snapshot::IframeElement> = {
+                let Some(parent) = page.root_frame_mut().find_mut_by_id(parent_id) else {
+                    continue;
+                };
+                parent.document().extract_iframes()
+                // `parent` borrow ends here.
             };
-            // 2a. non-http(s) (about:blank, javascript:, etc.) → empty child (W3a).
-            if full.scheme() != "http" && full.scheme() != "https" {
-                let child_url = Url::parse("about:blank").unwrap_or_else(|_| base_url.clone());
-                let empty = "<!DOCTYPE html><html><head></head><body></body></html>";
-                match Frame::from_html(child_url, empty).await {
-                    Ok(child) => page.root_frame_mut().add_child(child),
-                    Err(e) => {
-                        tracing::warn!(src = %src, error = %e, "failed to parse about:blank iframe")
-                    }
-                }
+            if iframes.is_empty() {
                 continue;
             }
-            // 2b. http(s) → fetch + parse (original behavior).
-            match self.http_client.fetch_text(&full).await {
-                Ok(child_html) => match Frame::from_html(full.clone(), &child_html).await {
-                    Ok(child) => page.root_frame_mut().add_child(child),
-                    Err(e) => {
-                        tracing::warn!(src = %src, error = %e, "failed to parse iframe document")
+            // Phase 2: fetch + parse (no page borrow).
+            let parent_url_for_join: Option<Url> = {
+                let Some(parent_ref) = page.root_frame().find_by_id(parent_id) else {
+                    continue;
+                };
+                Some(parent_ref.url().clone())
+            };
+            let mut new_frames: Vec<Frame> = Vec::with_capacity(iframes.len());
+            for iframe in iframes {
+                // 1. srcdoc → inline content, no fetch (W3a).
+                if let Some(srcdoc) = iframe.srcdoc {
+                    let child_url = Url::parse("about:srcdoc").unwrap_or_else(|_| base_url.clone());
+                    match Frame::from_html(child_url, &srcdoc).await {
+                        Ok(child) => new_frames.push(child),
+                        Err(e) => tracing::warn!(error = %e, "failed to parse srcdoc iframe"),
                     }
-                },
-                Err(e) => tracing::warn!(src = %src, error = %e, "failed to fetch iframe"),
+                    continue;
+                }
+                let Some(src) = iframe.src else { continue };
+                let join_base = parent_url_for_join.as_ref().unwrap_or(base_url);
+                let Ok(full) = join_base.join(&src) else {
+                    continue;
+                };
+                // 2a. non-http(s) (about:blank, javascript:, etc.) → empty
+                // child (W3a).
+                if full.scheme() != "http" && full.scheme() != "https" {
+                    let child_url = Url::parse("about:blank").unwrap_or_else(|_| base_url.clone());
+                    let empty = "<!DOCTYPE html><html><head></head><body></body></html>";
+                    match Frame::from_html(child_url, empty).await {
+                        Ok(child) => new_frames.push(child),
+                        Err(e) => tracing::warn!(
+                            src = %src,
+                            error = %e,
+                            "failed to parse about:blank iframe"
+                        ),
+                    }
+                    continue;
+                }
+                // 2b. http(s) → fetch + parse (original behavior).
+                match self.http_client.fetch_text(&full).await {
+                    Ok(child_html) => match Frame::from_html(full.clone(), &child_html).await {
+                        Ok(child) => new_frames.push(child),
+                        Err(e) => tracing::warn!(
+                            src = %src,
+                            error = %e,
+                            "failed to parse iframe document"
+                        ),
+                    },
+                    Err(e) => tracing::warn!(src = %src, error = %e, "failed to fetch iframe"),
+                }
+            }
+            // Phase 3: attach each freshly-built frame to its parent, then
+            // schedule the new frame for population on the next iteration.
+            for frame in new_frames {
+                let new_id = frame.id();
+                let parent = page.root_frame_mut().find_mut_by_id(parent_id);
+                if let Some(parent) = parent {
+                    parent.add_child(frame);
+                    worklist.push(new_id);
+                }
             }
         }
     }
@@ -1333,11 +1384,13 @@ impl Session {
         self.js_runtime.set_dom_snapshot(snapshot);
     }
 
-    /// Build per-frame execution contexts for each child iframe (Phase 8).
+    /// Build per-frame execution contexts for each **descendant** iframe
+    /// (Phase 8, extended in W3b to multi-level frame trees).
     ///
-    /// For each child `Frame` in the page's root frame, assigns a unique
-    /// `context_id` (≥ 2), fetches external `<script src>` bodies, and sends a
-    /// `SetFrameDocument` command to the JS thread which creates a dedicated
+    /// Walks the page's root frame tree and for every frame (root excluded —
+    /// the root is built by `SetDocument`, not here) assigns a unique
+    /// `context_id` (≥ 2), fetches external `<script src>` bodies, and sends
+    /// a `SetFrameDocument` command to the JS thread which creates a dedicated
     /// `Context` + `RenderDocument` and runs the frame's scripts. The
     /// frame-id → context-id mapping is stored in `frame_contexts` for CDP
     /// routing (`Runtime.evaluate` with `contextId`).
@@ -1345,25 +1398,29 @@ impl Session {
         let Some(page) = &self.active_page else {
             return;
         };
-        // Collect child frame data upfront to avoid holding a borrow across await.
         let base_url = match self.current_url() {
             Some(u) => u.clone(),
             None => return,
         };
-        let children: Vec<(String, String, Vec<crate::js::dom_snapshot::ScriptSource>)> = page
-            .root_frame()
-            .children()
-            .iter()
-            .map(|child| {
-                (
+        let viewport = current_viewport_override()
+            .unwrap_or((self.config.viewport_width, self.config.viewport_height));
+
+        // Phase 1: collect every (frame_id_str, url, scripts) tuple without
+        // holding a page borrow. `page.root_frame()` is immutable so this is
+        // a single walk over the full tree.
+        let mut stack: Vec<&Frame> = vec![page.root_frame()];
+        let mut children: Vec<(String, String, Vec<crate::js::dom_snapshot::ScriptSource>)> =
+            Vec::new();
+        while let Some(frame) = stack.pop() {
+            for child in frame.children().iter() {
+                children.push((
                     child.id().to_string(),
                     child.url().to_string(),
                     child.extract_scripts(),
-                )
-            })
-            .collect();
-        let viewport = current_viewport_override()
-            .unwrap_or((self.config.viewport_width, self.config.viewport_height));
+                ));
+                stack.push(child);
+            }
+        }
 
         for (frame_id_str, url_str, mut scripts) in children {
             // Fetch external <script src> bodies for this child frame.
@@ -1386,16 +1443,22 @@ impl Session {
                 }
             }
 
-            // Get the child frame's HTML.
-            let Some(child_frame) = self.active_page.as_ref().and_then(|p| {
-                p.root_frame()
-                    .children()
-                    .iter()
-                    .find(|c| c.id().to_string() == frame_id_str)
-            }) else {
+            // Locate the child frame by id so the right frame is built —
+            // includes deeply-nested frames added by `populate_iframes`.
+            let html = self
+                .active_page
+                .as_ref()
+                .and_then(|p| p.root_frame().find_by_frame_id_str(&frame_id_str))
+                .map(|f| f.html().to_string())
+                .unwrap_or_default();
+            if html.is_empty() {
+                tracing::warn!(
+                    frame_id = %frame_id_str,
+                    url = %url_str,
+                    "child frame html missing — skipping context build"
+                );
                 continue;
-            };
-            let html = child_frame.html().to_string();
+            }
 
             let context_id = self
                 .next_context_id
