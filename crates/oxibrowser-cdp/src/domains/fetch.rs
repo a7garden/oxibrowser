@@ -221,19 +221,18 @@ async fn fulfill_request(params: Option<Value>, ctx: &DispatchContext) -> Domain
         }
     }
 
-    // Body — decode from base64 if needed
+    // Body — CDP `Fetch.fulfillRequest.body` is base64-encoded by spec (there
+    // is no `base64Encoded` flag on this method; Chrome/Playwright/Puppeteer
+    // always send base64). Decode unconditionally, falling back to raw bytes
+    // for malformed input so a bad payload can't hard-fail the interception.
     let raw_body = p.get("body").and_then(|v| v.as_str()).unwrap_or("");
-    let body_bytes = if p
-        .get("base64Encoded")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    let body_bytes = if raw_body.is_empty() {
+        Vec::new()
+    } else {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(raw_body)
             .unwrap_or_else(|_| raw_body.as_bytes().to_vec())
-    } else {
-        raw_body.as_bytes().to_vec()
     };
 
     let body_size = body_bytes.len();
