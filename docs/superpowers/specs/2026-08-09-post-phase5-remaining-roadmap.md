@@ -133,7 +133,8 @@ attachment` → 저장 + `Page.downloadWillBegin`/`downloadProgress`).
 - **✅ 멀티탭** — `Target.createTarget`가 실 Browser 세션 생성 (`child_targets`
   맵 등록 + `targetCreated`/`attachedToTarget`). `dispatch_command`가 들어오는
   명령의 `sessionId`로 대상 세션 해석. 자식 탭 navigate/evaluate/DOM 동작.
-  자식 타겟 lifecycle 이벤트는 각 자식 전용 CoreEvent drainer 필요 (향후).
+  **자식 세션 JS-발생 이벤트**(console/exception/fetch/WS)도 `emit_core_event_with_session`
+  drainer로 자식 sessionId와 함께 발신됨 (2026-08-09).
 - **✅ request interception** — navigate 경로에서 `emit_request_paused` + oneshot
   대기로 실배선. continue/fail/fulfill (Playwright route()). JS-fetch 경로
   인터셉션은 향후 과제.
