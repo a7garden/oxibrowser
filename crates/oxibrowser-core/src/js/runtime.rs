@@ -10665,7 +10665,16 @@ fn register_window_globals(
     if (typeof globalThis[onprop] === 'function') { try { globalThis[onprop].call(globalThis, ev); } catch (e) {} }
     return true;
   };
-  // window.matchMedia — minimal MediaQueryList. 'matches' is derived for
+  // Mirror the event-target methods onto `window`. `globalThis` and `window`
+  // are distinct objects here, so without these copies `window.addEventListener`
+  // throws while `globalThis.addEventListener` works. Mirrors the
+  // `matchMedia` pattern below (line ~10695).
+  if (globalThis.window) {
+    globalThis.window.addEventListener = globalThis.window.addEventListener || globalThis.addEventListener;
+    globalThis.window.removeEventListener = globalThis.window.removeEventListener || globalThis.removeEventListener;
+    globalThis.window.dispatchEvent = globalThis.window.dispatchEvent || globalThis.dispatchEvent;
+  }
+   // window.matchMedia — minimal MediaQueryList. 'matches' is derived for
   // common min/max-width queries against the viewport; other queries
   // (prefers-color-scheme, hover, ...) default to false. Many SPAs only need
   // matchMedia to EXIST and not throw (responsive/CSS-in-JS feature checks).
