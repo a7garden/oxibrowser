@@ -1,11 +1,11 @@
 {
   "pass": 8,
   "fail": 0,
-  "total_ms": 726,
+  "total_ms": 628,
   "cdp": 19321,
   "mock": 18080,
   "spa": "http://127.0.0.1:18080/",
-  "timestamp": "2026-08-10T07:47:23.633Z",
+  "timestamp": "2026-08-10T08:39:54.171Z",
   "steps": [
     {
       "name": "CDP attach (sessionId)",
@@ -16,19 +16,19 @@
     {
       "name": "navigate to SPA",
       "ok": true,
-      "ms": 249,
+      "ms": 243,
       "detail": ""
     },
     {
       "name": "landing view rendered (#login-link)",
       "ok": true,
-      "ms": 2,
+      "ms": 0,
       "detail": ""
     },
     {
       "name": "hash route → login form (#username)",
       "ok": true,
-      "ms": 3,
+      "ms": 2,
       "detail": ""
     },
     {
@@ -40,19 +40,19 @@
     {
       "name": "submit → dashboard rendered (#dashboard)",
       "ok": true,
-      "ms": 14,
+      "ms": 8,
       "detail": ""
     },
     {
       "name": "async data fetched + rendered",
       "ok": true,
-      "ms": 7,
+      "ms": 1,
       "detail": "(got [\"Item alpha\",\"Item beta\",\"Item gamma\"])"
     },
     {
       "name": "screenshot captured",
       "ok": true,
-      "ms": 368,
+      "ms": 287,
       "detail": ""
     }
   ]

@@ -778,6 +778,17 @@ impl Session {
 
         tracing::debug!(html_bytes = html.len(), "response decoded");
 
+        // Resolve external <link rel=stylesheet> into a single inline <style>
+        // block so Blitz parses the document once with the rules in place
+        // (and never tries to join hrefs against a `data:`-scheme base URL,
+        // which would panic). The fetch step happens here, before
+        // `Page::from_html` is called, so the post-injection html is what
+        // `page.content()` returns — important because `inject_dom_snapshot`
+        // re-pushes that same html into the JS thread's RenderDocument.
+        let html = self
+            .inline_external_stylesheets(&html, final_url.as_str())
+            .await;
+
         // Create a new page for this navigation (use final URL after redirects)
         let mut page = Page::from_html(final_url.clone(), &html, status, ct_header).await?;
 
@@ -795,8 +806,6 @@ impl Session {
         self.history_index = self.history.len() - 1;
 
         self.active_page = Some(page);
-
-        // Clear previous navigation's child-frame contexts (Phase 8).
         self.js_runtime.clear_child_contexts();
         self.frame_contexts.write().clear();
         self.next_context_id
@@ -1307,8 +1316,16 @@ impl Session {
             None => return,
         };
 
+        // External <link rel=stylesheet> resolution (W2-pre / §5.2):
+        // Blitz's parser panics when a `<link>` href is joined against a
+        // `data:` base URL (cannot_be_a_base = true → unwrap in blitz-dom).
+        // To avoid that path entirely, we fetch each stylesheet, fold its
+        // rules into an inline `<style>` block, and strip the `<link>` from
+        // the HTML before handing it to `set_document_with_scripts`. The
+        // inline path is already exercised by @font-face rules.
+        let html = self.inline_external_stylesheets(&html, &url).await;
+
         // Fetch external (<script src>) bodies in document order, filling each
-        // entry's `source`. Inline scripts already carry their source. Fetch is
         // sequential + in-order for Phase 1 (parallel fetch is Phase 3).
         if !scripts.is_empty() {
             let base = Url::parse(&url).ok();
@@ -1382,6 +1399,55 @@ impl Session {
             "DOM snapshot injected"
         );
         self.js_runtime.set_dom_snapshot(snapshot);
+    }
+
+    /// Fetch each `<link rel=stylesheet href=…>`, fold the rules into a single
+    /// inline `<style>` block, and strip the `<link>` tags from `html`. Used by
+    /// [`Self::inject_dom_snapshot`] before handing HTML to Blitz, since Blitz
+    /// cannot resolve `<link>` hrefs against `data:` URLs (panics) and does
+    /// not otherwise fetch external stylesheets on its own.
+    ///
+    /// Failures (bad URL, network error) are logged and skipped — a single
+    async fn inline_external_stylesheets(&self, html: &str, base_url: &str) -> String {
+        use std::sync::atomic::Ordering;
+        let links = external_stylesheet_links(html);
+        tracing::debug!(
+            count = links.len(),
+            base_url,
+            "inline_external_stylesheets: scanning"
+        );
+        let base = match Url::parse(base_url) {
+            Ok(u) => u,
+            Err(_) => return html.to_string(),
+        };
+        let mut combined_css = String::new();
+        for href in links {
+            let Ok(full) = base.join(&href) else { continue };
+            if full.scheme() != "http" && full.scheme() != "https" {
+                continue;
+            }
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
+            let _g = InFlightGuard::new(self.in_flight.clone());
+            tracing::debug!(%full, "fetching external stylesheet");
+            match self.http_client.fetch_text(&full).await {
+                Ok(css) => {
+                    tracing::debug!(bytes = css.len(), %full, "fetched external stylesheet");
+                    if !combined_css.is_empty() {
+                        combined_css.push('\n');
+                    }
+                    combined_css.push_str(&css);
+                }
+                Err(e) => {
+                    tracing::warn!(url = %full, error = %e, "failed to fetch external stylesheet")
+                }
+            }
+        }
+        let stripped = strip_stylesheet_links(html);
+        if combined_css.is_empty() {
+            return stripped;
+        }
+        tracing::debug!(bytes = combined_css.len(), "injecting inline <style> block");
+        inject_inline_style(&stripped, &combined_css)
     }
 
     /// Build per-frame execution contexts for each **descendant** iframe
@@ -1759,6 +1825,9 @@ fn filename_from_disposition(disposition: &str) -> Option<String> {
     }
     .filter(|s| !s.is_empty())
 }
+
+// External stylesheet plumbing lives in [`crate::dom_link`].
+use crate::dom_link::{external_stylesheet_links, inject_inline_style, strip_stylesheet_links};
 
 #[cfg(test)]
 mod tests {

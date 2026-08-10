@@ -7,6 +7,7 @@ pub mod browser;
 pub mod challenge;
 pub mod config;
 pub mod css;
+pub mod dom_link;
 pub mod event;
 pub mod extract;
 pub mod fonts;

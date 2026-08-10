@@ -63,7 +63,6 @@ fn snapshot_from_html(url: &Url, html: &str) -> Result<DomSnapshot> {
         .unwrap_or_default();
     Ok(DomSnapshot::from_render_document(&rd, url.as_str(), &title))
 }
-
 impl Frame {
     /// Parse HTML into a Frame with its DOM snapshot.
     #[tracing::instrument(skip(html), err)]
