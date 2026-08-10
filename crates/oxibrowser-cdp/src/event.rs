@@ -60,12 +60,22 @@ impl EventSender {
 
     /// Send a typed event with a method name and JSON params.
     pub fn send_event(&self, method: &str, params: Value) {
+        self.send_event_opt(method, params, None);
+    }
+
+    /// Send an event stamped with an explicit `sessionId` (used for child-target
+    /// events whose session differs from the currently attached one).
+    pub fn send_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        self.send_event_opt(method, params, Some(session_id.to_string()));
+    }
+
+    fn send_event_opt(&self, method: &str, params: Value, explicit_session: Option<String>) {
         debug!(method = %method, "queuing CDP event");
         let mut event = CdpEvent::new(method, params);
-        if let Ok(guard) = self.attached_session_id.read()
-            && let Some(sid) = guard.as_ref()
-        {
-            event.session_id = Some(sid.clone());
+        let sid = explicit_session
+            .or_else(|| self.attached_session_id.read().ok().and_then(|g| g.clone()));
+        if let Some(sid) = sid {
+            event.session_id = Some(sid);
         }
         self.send(event);
     }
@@ -93,6 +103,13 @@ impl EventSender {
         }
     }
 
+    /// Page domain event stamped with an explicit `sessionId` (child target).
+    pub fn send_page_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        if self.page_enabled.load(Ordering::Relaxed) {
+            self.send_event_with_session(method, params, session_id);
+        }
+    }
+
     /// Send a Runtime domain event (only if Runtime domain is enabled).
     pub fn send_runtime_event(&self, method: &str, params: Value) {
         if self.runtime_enabled.load(Ordering::Relaxed) {
@@ -100,10 +117,24 @@ impl EventSender {
         }
     }
 
+    /// Runtime domain event stamped with an explicit `sessionId` (child target).
+    pub fn send_runtime_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        if self.runtime_enabled.load(Ordering::Relaxed) {
+            self.send_event_with_session(method, params, session_id);
+        }
+    }
+
     /// Send a Network domain event (only if Network domain is enabled).
     pub fn send_network_event(&self, method: &str, params: Value) {
         if self.network_enabled.load(Ordering::Relaxed) {
             self.send_event(method, params);
+        }
+    }
+
+    /// Network domain event stamped with an explicit `sessionId` (child target).
+    pub fn send_network_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        if self.network_enabled.load(Ordering::Relaxed) {
+            self.send_event_with_session(method, params, session_id);
         }
     }
 
@@ -118,6 +149,13 @@ impl EventSender {
     pub fn send_log_event(&self, method: &str, params: Value) {
         if self.log_enabled.load(Ordering::Relaxed) {
             self.send_event(method, params);
+        }
+    }
+
+    /// Log domain event stamped with an explicit `sessionId` (child target).
+    pub fn send_log_event_with_session(&self, method: &str, params: Value, session_id: &str) {
+        if self.log_enabled.load(Ordering::Relaxed) {
+            self.send_event_with_session(method, params, session_id);
         }
     }
 

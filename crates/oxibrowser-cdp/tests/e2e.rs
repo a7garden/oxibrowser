@@ -533,6 +533,34 @@ async fn test_create_target_creates_drivable_session() {
         "child session should evaluate its own DOM"
     );
 
+    // Child-originated events flow stamped with the child's sessionId:
+    // enable Runtime (top-level sessionId), log from the child tab, and check
+    // the console event.
+    let enable_msg = json!({
+        "id": 4, "method": "Runtime.enable", "sessionId": child_session
+    });
+    sink.send(tungstenite::Message::Text(enable_msg.to_string().into()))
+        .await
+        .unwrap();
+    let _ = read_command_response(&mut ws, 4, 5000).await;
+    let log_msg = json!({
+        "id": 5, "method": "Runtime.evaluate", "sessionId": child_session,
+        "params": { "expression": "console.log('child-tab-msg')" }
+    });
+    sink.send(tungstenite::Message::Text(log_msg.to_string().into()))
+        .await
+        .unwrap();
+    let _log_resp = read_command_response(&mut ws, 5, 5000).await;
+
+    let console_events = collect_events(&mut ws, "Runtime.consoleAPICalled", 3000).await;
+    assert!(
+        console_events.iter().any(|ev| {
+            ev.get("sessionId").and_then(|v| v.as_str()) == Some(child_session.as_str())
+        }),
+        "child console event should carry the child sessionId: {:?}",
+        console_events
+    );
+
     server.shutdown();
 }
 

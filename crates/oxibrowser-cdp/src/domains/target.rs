@@ -140,6 +140,30 @@ async fn create_target(params: Option<Value>, ctx: &DispatchContext) -> DomainRe
     let target_id = format!("TID-{}", uuid::Uuid::new_v4().as_simple());
     let session_id = format!("session-{}", uuid::Uuid::new_v4().as_simple());
 
+    // Wire the child session's CoreEvent sink so its JS-thread events
+    // (console, exceptions, fetch/WS lifecycle) flow to the client stamped
+    // with this child's sessionId.
+    let (core_tx, core_rx) = std::sync::mpsc::channel::<oxibrowser_core::js::CoreEvent>();
+    {
+        let mut s = new_session.write().await;
+        s.set_event_sink(core_tx);
+    }
+    let child_events = ctx.events.clone();
+    let child_sid = session_id.clone();
+    tokio::spawn(async move {
+        loop {
+            match core_rx.try_recv() {
+                Ok(ev) => {
+                    crate::core_event::emit_core_event_with_session(&child_events, ev, &child_sid)
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+    });
+
     // Register the child session so commands routed by sessionId reach it.
     ctx.child_targets
         .write()

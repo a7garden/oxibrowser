@@ -16,18 +16,28 @@ use serde_json::{Value, json};
 /// mirroring real Chrome: a `console.log` emits both `Runtime.consoleAPICalled`
 /// (gated by `Runtime.enable`) and `Log.entryAdded` (gated by `Log.enable`).
 pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
+    emit_core_event_opt(events, ev, None);
+}
+
+/// Translate a CoreEvent originating from a child target's session, stamping
+/// the emitted CDP events with `session_id` instead of the attached session.
+pub fn emit_core_event_with_session(events: &EventSender, ev: CoreEvent, session_id: &str) {
+    emit_core_event_opt(events, ev, Some(session_id));
+}
+
+fn emit_core_event_opt(events: &EventSender, ev: CoreEvent, session: Option<&str>) {
     match ev {
         CoreEvent::Console {
             level,
             args,
             timestamp,
-        } => emit_console(events, level, args, timestamp),
+        } => emit_console(events, level, args, timestamp, session),
         CoreEvent::Exception {
             message,
             name,
             stack,
             timestamp,
-        } => emit_exception(events, message, name, stack, timestamp),
+        } => emit_exception(events, message, name, stack, timestamp, session),
         CoreEvent::FetchRequest {
             request_id,
             url,
@@ -36,7 +46,7 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
             post_data,
             timestamp,
         } => emit_request_will_be_sent(
-            events, request_id, url, method, headers, post_data, timestamp,
+            events, request_id, url, method, headers, post_data, timestamp, session,
         ),
         CoreEvent::FetchResponse {
             request_id,
@@ -44,12 +54,16 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
             status,
             mime_type,
             timestamp,
-        } => emit_response_received(events, request_id, url, status, mime_type, timestamp),
+        } => emit_response_received(
+            events, request_id, url, status, mime_type, timestamp, session,
+        ),
         CoreEvent::FetchLoadingFinished {
             request_id,
             timestamp,
         } => {
-            events.send_network_event(
+            send_net(
+                events,
+                session,
                 "Network.loadingFinished",
                 json!({
                     "requestId": request_id,
@@ -69,7 +83,9 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
                 WsDirection::Sent => "Network.webSocketFrameSent",
                 WsDirection::Received => "Network.webSocketFrameReceived",
             };
-            events.send_network_event(
+            send_net(
+                events,
+                session,
                 method,
                 json!({
                     "requestId": request_id,
@@ -87,7 +103,9 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
             message,
             default_value,
         } => {
-            events.send_page_event(
+            send_page(
+                events,
+                session,
                 "Page.javascriptDialogOpening",
                 json!({
                     "url": "",
@@ -104,7 +122,9 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
             save_path,
             total_bytes,
         } => {
-            events.send_page_event(
+            send_page(
+                events,
+                session,
                 "Page.downloadWillBegin",
                 json!({
                     "frameId": "",
@@ -113,7 +133,9 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
                     "suggestedFilename": filename,
                 }),
             );
-            events.send_page_event(
+            send_page(
+                events,
+                session,
                 "Page.downloadProgress",
                 json!({
                     "guid": guid,
@@ -127,19 +149,46 @@ pub fn emit_core_event(events: &EventSender, ev: CoreEvent) {
     }
 }
 
-fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<ConsoleArg>, timestamp: f64) {
+/// Send a Network event, routing to the with-session variant when a session is
+/// supplied (child-target events).
+fn send_net(events: &EventSender, session: Option<&str>, method: &str, params: Value) {
+    match session {
+        Some(sid) => events.send_network_event_with_session(method, params, sid),
+        None => events.send_network_event(method, params),
+    }
+}
+
+/// Send a Page event, routing to the with-session variant when a session is
+/// supplied (child-target events).
+fn send_page(events: &EventSender, session: Option<&str>, method: &str, params: Value) {
+    match session {
+        Some(sid) => events.send_page_event_with_session(method, params, sid),
+        None => events.send_page_event(method, params),
+    }
+}
+
+fn emit_console(
+    events: &EventSender,
+    level: ConsoleLevel,
+    args: Vec<ConsoleArg>,
+    timestamp: f64,
+    session: Option<&str>,
+) {
     // Runtime.consoleAPICalled — typed RemoteObjects (number/boolean/object/
     // null/undefined), not always-string.
     let remote_args: Vec<Value> = args.iter().map(console_arg_to_remote_object).collect();
-    events.send_runtime_event(
-        "Runtime.consoleAPICalled",
-        json!({
-            "type": level.api_type(),
-            "args": remote_args,
-            "executionContextId": 1,
-            "timestamp": timestamp,
-        }),
-    );
+    let api_params = json!({
+        "type": level.api_type(),
+        "args": remote_args,
+        "executionContextId": 1,
+        "timestamp": timestamp,
+    });
+    match session {
+        Some(sid) => {
+            events.send_runtime_event_with_session("Runtime.consoleAPICalled", api_params, sid)
+        }
+        None => events.send_runtime_event("Runtime.consoleAPICalled", api_params),
+    }
 
     // Log.entryAdded — mirror console messages into the Log domain.
     let text = args
@@ -147,19 +196,20 @@ fn emit_console(events: &EventSender, level: ConsoleLevel, args: Vec<ConsoleArg>
         .map(|a| a.display())
         .collect::<Vec<_>>()
         .join(" ");
-    events.send_log_event(
-        "Log.entryAdded",
-        json!({
-            "entry": {
-                "source": "console",
-                "level": log_level(&level),
-                "text": text,
-                "timestamp": timestamp,
-                "url": Value::Null,
-                "lineNumber": Value::Null,
-            }
-        }),
-    );
+    let log_params = json!({
+        "entry": {
+            "source": "console",
+            "level": log_level(&level),
+            "text": text,
+            "timestamp": timestamp,
+            "url": Value::Null,
+            "lineNumber": Value::Null,
+        }
+    });
+    match session {
+        Some(sid) => events.send_log_event_with_session("Log.entryAdded", log_params, sid),
+        None => events.send_log_event("Log.entryAdded", log_params),
+    }
 }
 
 /// Map a [`ConsoleArg`] to a CDP `RemoteObject` JSON value.
@@ -199,6 +249,7 @@ fn emit_exception(
     name: String,
     stack: Option<String>,
     timestamp: f64,
+    session: Option<&str>,
 ) {
     // boa 0.20 has no real source locations; the stack (if any) is a synthetic
     // trace string. Surface it as the stackTrace description with a single
@@ -211,26 +262,27 @@ fn emit_exception(
         }),
         None => json!({ "callFrames": [] }),
     };
-    events.send_runtime_event(
-        "Runtime.exceptionThrown",
-        json!({
-            "timestamp": timestamp,
-            "exceptionDetails": {
-                "exceptionId": 1,
-                "text": message,
-                "lineNumber": 0,
-                "columnNumber": 0,
-                "scriptId": "0",
-                "stackTrace": stack_trace,
-                "exception": {
-                    "type": "object",
-                    "subtype": "error",
-                    "className": name,
-                    "description": message,
-                }
+    let params = json!({
+        "timestamp": timestamp,
+        "exceptionDetails": {
+            "exceptionId": 1,
+            "text": message,
+            "lineNumber": 0,
+            "columnNumber": 0,
+            "scriptId": "0",
+            "stackTrace": stack_trace,
+            "exception": {
+                "type": "object",
+                "subtype": "error",
+                "className": name,
+                "description": message,
             }
-        }),
-    );
+        }
+    });
+    match session {
+        Some(sid) => events.send_runtime_event_with_session("Runtime.exceptionThrown", params, sid),
+        None => events.send_runtime_event("Runtime.exceptionThrown", params),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,6 +294,7 @@ fn emit_request_will_be_sent(
     headers: Vec<(String, String)>,
     post_data: Option<Vec<u8>>,
     timestamp: f64,
+    session: Option<&str>,
 ) {
     let hdrs: Value = headers
         .into_iter()
@@ -262,7 +315,9 @@ fn emit_request_will_be_sent(
     {
         request["postData"] = Value::String(s);
     }
-    events.send_network_event(
+    send_net(
+        events,
+        session,
         "Network.requestWillBeSent",
         json!({
             "requestId": request_id,
@@ -287,13 +342,16 @@ fn emit_response_received(
     status: u16,
     mime_type: String,
     timestamp: f64,
+    session: Option<&str>,
 ) {
     let (hdrs, mime) = if mime_type.is_empty() {
         (json!({}), "text/plain")
     } else {
         (json!({ "Content-Type": mime_type }), mime_type.as_str())
     };
-    events.send_network_event(
+    send_net(
+        events,
+        session,
         "Network.responseReceived",
         json!({
             "requestId": request_id,
