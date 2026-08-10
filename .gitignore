@@ -35,5 +35,8 @@ perf.data.old
 /test-results/
 /coverage/
 
+# Log files (test/acceptance run artifacts)
+*.log
+
 # Servo build artifacts (when full-servo feature is enabled)
 /servo-build/
