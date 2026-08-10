@@ -1,0 +1,4 @@
+# acceptance harness run artifacts (logs are noise; baseline.png + result.json
+# are committed as evidence)
+server.log
+serve.log

@@ -1,0 +1,20 @@
+/* OxiBrowser acceptance SPA — minimal but real styling.
+   Also doubles as a @font-face test fixture for W2 (see style.css @font-face). */
+:root { --bg: #0f1115; --fg: #e6e6e6; --accent: #4f9cff; --muted: #8a93a6; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+       background: var(--bg); color: var(--fg); padding: 24px; line-height: 1.5; }
+#brand { font-size: 22px; margin: 0 0 16px; }
+#view { background: #171a21; border: 1px solid #232833; border-radius: 10px; padding: 20px; }
+input[type=text], input[type=password] {
+  display: block; width: 100%; max-width: 320px; margin: 10px 0;
+  padding: 10px 12px; border-radius: 8px; border: 1px solid #2c3340;
+  background: #0f1115; color: var(--fg); font-size: 15px;
+}
+button, .btn { display: inline-block; cursor: pointer; border: 0; border-radius: 8px;
+  padding: 10px 16px; background: var(--accent); color: #07101f; font-weight: 600; font-size: 15px; }
+button:disabled { opacity: .5; cursor: default; }
+#error { color: #ff8b8b; margin-top: 8px; min-height: 1.2em; }
+#dashboard-items { list-style: none; padding: 0; margin: 12px 0; }
+#dashboard-items li { padding: 8px 10px; border-bottom: 1px solid #232833; }
+.muted { color: var(--muted); }
