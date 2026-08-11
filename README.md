@@ -27,10 +27,10 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 
 <table>
 <tr>
-<td align="center"><strong>24 MB</strong><br><sub>Single static binary</sub></td>
+<td align="center"><strong>~44 MB</strong><br><sub>Single static binary</sub></td>
 <td align="center"><strong>~50 ms</strong><br><sub>Cold start time</sub></td>
 <td align="center"><strong>~8 MB</strong><br><sub>Base memory</sub></td>
-<td align="center"><strong>554 tests</strong><br><sub>Full coverage</sub></td>
+<td align="center"><strong>697 tests</strong><br><sub>Full coverage</sub></td>
 <td align="center"><strong>Rust-first</strong><br><sub>C toolchain for TLS only</sub></td>
 </tr>
 </table>
@@ -41,7 +41,7 @@ designed from day one for automation, web scraping, and AI-driven workflows.
 <th>Headless Chrome</th>
 </tr>
 <tr>
-<td align="center">24 MB binary</td>
+<td align="center">~44 MB binary</td>
 <td align="center">~400 MB install</td>
 
 </tr>
@@ -82,33 +82,16 @@ OxiBrowser is built for exactly that use case:
 - 🦀 **Rust-First** — `boa_engine` (JS, no V8), `html5ever` (HTML) are pure Rust. TLS uses `btls` (BoringSSL C binding) for stealth fingerprint emulation. Single static binary.
 - 🔌 **CDP Compatible** — Puppeteer, Playwright, and any Chrome DevTools Protocol client works out of the box
 - 🛡️ **Secure by Default** — SSRF protection with CIDR blocking, `robots.txt` respect, no sandbox escape surface
-- 📦 **Tiny Footprint** — 24 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat
+- 📦 **Tiny Footprint** — ~44 MB binary, ~8 MB base memory. Run 100 instances without breaking a sweat
 
 ---
 
 
-## 🆕 What's New in 0.17.0
+## 📋 Changelog
 
-This release closes most of the gap between "HTML fetcher" and "real headless browser" — events now behave like a browser, `innerHTML` works for SPA-style DOM injection, and `fetch` returns a spec-compliant `Response` with `arrayBuffer()`.
+See **[CHANGELOG.md](CHANGELOG.md)** for the full version history and **[GitHub Releases](https://github.com/project-oxi/oxibrowser/releases)** for release notes.
 
-**Events & DOM**
-- Event constructors honor the init dict — `new MouseEvent('click', { clientX, clientY, ctrlKey, ... })` now actually carries those fields. Covers `MouseEvent`, `KeyboardEvent`, `FocusEvent`, `Event`, and a new `DragEvent`.
-- `dispatchEvent` sets `event.target` / `event.currentTarget` and returns `!defaultPrevented`. `preventDefault` / `stopPropagation` / `stopImmediatePropagation` work on every event.
-- **Event bubbling** walks the parent chain. Listeners are stored in a thread-local registry keyed by `nodeId`, so they survive across element-object re-queries (the bug that made `parent.addEventListener` invisible to `child.dispatchEvent`).
-- `requestAnimationFrame` / `cancelAnimationFrame` now schedule properly with a 16 ms deadline and pass a `DOMHighResTimeStamp` to the callback.
-- `innerText` getter and standalone `performance` global (`window.performance === performance`).
-
-**HTML & `innerHTML`**
-- `innerHTML` setter parses the fragment via `html5ever` and inserts child nodes into the snapshot. `outerHTML` getter serializes the node back. A new `dom_serializer` module handles the round-trip with proper void-element / attribute-escape handling (12 unit tests).
-
-**Network**
-- `Response.text()` / `json()` / `arrayBuffer()` all return spec-shaped Promises that resolve to the actual response body. `fetch` options `headers` (content-type, accept, authorization, user-agent, cookie) are now forwarded.
-- SSRF filter is now scheme-aware: only `http`/`https` go through DNS/host checks. `about:blank` is supported (Puppeteer/Playwright's default target URL now works).
-
-**CDP**
-- `Input.dispatchMouseEvent` emits a real sequence: `mousePressed` → `mousedown`; `mouseReleased` → `mouseup` + `click`; `mouseMoved` → `mousemove`. `Input.dispatchDragEvent` is wired to a `DragEvent` on the element at the point.
-
----
+Recent milestones (v0.17–v0.20): per-frame JS execution contexts (iframe isolation), Shadow DOM (open/closed/declarative/slots), async `fetch`/`XMLHttpRequest`/`WebSocket`, CORS + preflight, cookie PSL/prefixes, multi-tab, PDF export, `@font-face` webfonts, Blitz/Stylo/Taffy/Parley rendering pipeline, stealth bot-detection, Canvas 2D, custom-element lifecycle, and a 12-domain CDP server.
 
 ## 🚀 Quick Start
 
@@ -325,30 +308,30 @@ On error:
                          │ CDP WebSocket
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│                 CDP Server (10 domains)               │
-│  Browser · DOM · Fetch · Input · Network             │
-│  OXI · Page · Runtime · Target                       │
+│                 CDP Server (12 domains)               │
+│  Browser · DOM · Emulation · Fetch · Input            │
+│  Log · Network · OXI · Page · Runtime                 │
+│  Target · Tracing                                      │
 ├──────────────────────────────────────────────────────┤
 │          Browser → Session → Page → Frame            │
 ├──────────┬──────────┬──────────────┬─────────────────┤
-│  WebAPI  │  Network │  JS Runtime  │  CSS Rendering  │
-│  DOM     │  HTTP    │  boa_engine  │  PNG screenshot │
-│  Tree    │  Cookies │  ES2024+     │  ASCII/Unicode  │
-│  Storage │  SSRF    │  persistent  │  text→image     │
+│  WebAPI  │  Network │  JS Runtime  │  Rendering      │
+│  DOM     │  HTTP    │  boa_engine  │  Blitz+Stylo    │
+│  Tree    │  Cookies │  ES2024+     │  Taffy+Parley   │
+│  Storage │  SSRF    │  per-frame   │  PNG/PDF/font   │
 ├──────────┴──────────┴──────────────┴─────────────────┤
-│   html5ever · encoding_rs · reqwest · image · boa    │
+│  html5ever · encoding_rs · reqwest · boa · blitz-dom  │
 └──────────────────────────────────────────────────────┘
 ```
 
 ### Crate Structure
-
 | Crate | Lines | Purpose |
 |-------|-------|---------|
-| [`oxibrowser`](crates/oxibrowser/) | 4,242 | Binary + CLI (8 subcommands, session REPL, agent features) |
-| [`oxibrowser-core`](crates/oxibrowser-core/) | 19,794 | Browser engine: Session, Page, Frame, JS Runtime |
-| [`oxibrowser-cdp`](crates/oxibrowser-cdp/) | 4,583 | CDP WebSocket server with 10 domain handlers |
-| [`oxibrowser-webapi`](crates/oxibrowser-webapi/) | 1,587 | DOM tree, CSS selectors, Markdown conversion |
-| **Total** | **30,206** | |
+| [`oxibrowser`](crates/oxibrowser/) | 6,103 | Binary + CLI (8 subcommands, session REPL, agent features) |
+| [`oxibrowser-core`](crates/oxibrowser-core/) | 35,287 | Browser engine: Session, Page, Frame, JS Runtime, Network |
+| [`oxibrowser-cdp`](crates/oxibrowser-cdp/) | 5,643 | CDP WebSocket server with 12 domain handlers |
+| [`oxibrowser-render`](crates/oxibrowser-render/) | 513 | Blitz/Stylo/Taffy/Parley rendering pipeline (PNG/PDF/fonts) |
+| **Total** | **~47,500** | |
 
 ---
 
@@ -399,19 +382,22 @@ Powered by [`boa_engine`](https://boajs.dev/) — pure Rust, no V8 dependency:
 
 ### CDP Protocol (Chrome DevTools Protocol)
 
-10 domain handlers — Puppeteer and Playwright compatible:
+12 domain handlers — Puppeteer and Playwright compatible:
 
 | Domain | Key Methods |
 |--------|------------|
 | **Browser** | `getVersion`, `close` |
-| **DOM** | `getDocument`, `describeNode`, `querySelector`, `querySelectorAll` |
+| **DOM** | `getDocument`, `describeNode`, `querySelector`, `querySelectorAll`, `getBoxModel`, `getContentQuads` |
+| **Emulation** | `setDeviceMetricsOverride`, `clearDeviceMetricsOverride`, `setUserAgentOverride` |
 | **Fetch** | `enable/disable`, `continueRequest`, `failRequest`, `fulfillRequest`, `getResponseBody` |
-| **Input** | `dispatchKeyEvent`, `dispatchMouseEvent`, `insertText` |
-| **Network** | `enable/disable`, `setExtraHTTPHeaders`, `getResponseBody` |
+| **Input** | `dispatchKeyEvent`, `dispatchMouseEvent`, `dispatchDragEvent`, `insertText` |
+| **Log** | `enable`, `entryAdded` |
+| **Network** | `enable/disable`, `setExtraHTTPHeaders`, `getResponseBody`, JS-fetch/XHR/WS lifecycle events |
 | **OXI** 🤖 | `getMarkdown`, `getPageInfo` — AI-native extensions |
-| **Page** | `navigate`, `captureScreenshot`, `getFrameTree`, `getTitle` |
-| **Runtime** | `evaluate`, `callFunctionOn`, `enable`, `consoleAPICalled` |
-| **Target** | `getTargets`, `attachToTarget`, `detachFromTarget` |
+| **Page** | `navigate`, `captureScreenshot`, `printToPDF`, `getFrameTree`, `getTitle` |
+| **Runtime** | `evaluate`, `callFunctionOn`, `enable`, `consoleAPICalled`, `exceptionThrown` |
+| **Target** | `getTargets`, `createTarget`, `attachToTarget`, `setAutoAttach` (multi-tab) |
+| **Tracing** | `start`, `end`, `getCategories` (Playwright tracing compatible) |
 
 ### OXI Domain — Built for AI Agents
 
@@ -434,23 +420,28 @@ async def ai_scrape():
 ```
 
 ### Network Layer
-
-| Feature | Description |
-|---------|-------------|
 | **HTTP Client** | `reqwest` with cookie persistence, redirect following |
-| **Cookie Jar** | Domain-scoped cookie storage with `Set-Cookie` parsing |
-| **SSRF Protection** | CIDR blocking for private network ranges |
+| **Cookie Jar** | Domain-scoped cookies: PSL, `__Host-`/`__Secure-` prefixes, expiry, CHIPS partitioning |
+| **CORS** | Preflight (`OPTIONS`), `Access-Control-*` validation (Fetch §3.2–3.3) |
+| **Auth** | Basic + Digest (401-challenge retry) |
+| **Proxy** | HTTP / HTTPS / SOCKS proxy via `BrowserConfig.proxy` |
+| **SSRF Protection** | CIDR blocking for private network ranges, scheme-aware |
 | **robots.txt** | RFC 9309 compliant parser, `--obey-robots` flag |
 | **Network Interception** | Pause, modify, or block any request via Fetch domain |
-| **Custom Headers** | Per-session and per-request header injection |
-| **Charset Detection** | `encoding_rs` for automatic charset detection and conversion |
+| **WebSocket** | Full browser WebSocket API (ws + wss) |
+| **Stealth** | Chrome JA4+ fingerprint emulation, bot-detection challenge retry |
 
-### CSS Text Rendering
+### Rendering Pipeline
 
-- **ASCII/Unicode text output** — Render DOM to readable text with proper indentation
-- **Markdown conversion** — Full HTML→Markdown with heading, link, and list support
-- **PNG screenshots** — Built-in 8×16 bitmap font, renders text content as images
-- **No external dependencies** — Font data embedded in binary
+Powered by the Blitz rendering stack — isolated in `oxibrowser-render` so Stylo/html5ever dependency trees stay out of the core workspace:
+
+- **Blitz-dom** — DOM tree representation for layout and paint
+- **Stylo** (Firefox CSS engine) — CSS cascade, computed styles
+- **Taffy** — block/inline/flex layout
+- **Parley** — text shaping with `@font-face` webfont support
+- **PNG screenshots** — shadow-DOM-aware rasterization (flattened tree compose)
+- **PDF export** — `Page.printToPDF` / `Tab::print_to_pdf` via `printpdf`
+- **HTML → Markdown** — full conversion with heading, link, and list support
 
 ---
 

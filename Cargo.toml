@@ -65,3 +65,6 @@ png = "0.18"
 
 [workspace.metadata.release]
 version = "0.20.0"
+
+[profile.release]
+strip = true
