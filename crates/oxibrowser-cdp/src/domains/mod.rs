@@ -74,6 +74,7 @@ pub async fn dispatch(method: &str, params: Option<Value>, ctx: &DispatchContext
         "DOM" => dom::handle(method_name, params, ctx).await,
         "Emulation" => emulation::handle(method_name, params),
         "Fetch" => fetch::handle(method_name, params, ctx).await,
+        "Input" => input::handle(method_name, params, ctx).await,
         "Network" => network::handle(method_name, params, ctx).await,
         "OXI" => oxi::handle(method_name, params, ctx).await,
         "Log" => log::handle(method_name, params, ctx).await,
