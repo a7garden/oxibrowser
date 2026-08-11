@@ -93,6 +93,19 @@ pub enum BrowserEvent {
         duration: Duration,
     },
 
+    /// The page has been exported to a single-page PDF.
+    PdfExported {
+        /// ID of the tab that emitted this event.
+        #[serde(default = "uuid::Uuid::nil")]
+        tab_id: Uuid,
+        /// Size of the PDF payload, in bytes.
+        bytes: usize,
+        /// Viewport width the page was rendered at before PDF wrapping.
+        viewport_width: u32,
+        /// Wall-clock duration of the capture + PDF wrap.
+        duration: Duration,
+    },
+
     /// Navigation failed with an error.
     NavigationFailed {
         #[serde(default = "uuid::Uuid::nil")]
@@ -145,6 +158,19 @@ impl BrowserEvent {
                 let ms = duration.as_millis();
                 format!(
                     "Screenshot ready — {} · {viewport_width} px · {ms} ms",
+                    human_bytes(*bytes as u64),
+                )
+            }
+
+            Self::PdfExported {
+                bytes,
+                viewport_width,
+                duration,
+                ..
+            } => {
+                let ms = duration.as_millis();
+                format!(
+                    "PDF ready — {} · {viewport_width} px · {ms} ms",
                     human_bytes(*bytes as u64),
                 )
             }

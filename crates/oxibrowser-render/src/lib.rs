@@ -23,3 +23,4 @@ pub use blitz_dom::{BaseDocument, NodeData};
 
 pub use document::{CaptureOpts, NodeId, RenderDocument, RenderError, Viewport};
 pub use paint::blank_png;
+pub use paint::png_to_pdf;

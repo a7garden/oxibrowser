@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`Tab::print_to_pdf`** — PDF export is now a first-class `oxibrowser-core` Rust API, not just a CDP method. `Tab::print_to_pdf(width)` captures the rendered page and returns raw PDF bytes (mirroring `Tab::screenshot`), emitting a `BrowserEvent::PdfExported` event and surfacing encode failures as `CoreError::PdfError`. The PNG→PDF transform moved out of the CDP crate into `oxibrowser_render::png_to_pdf` (sibling to `blank_png`), re-exported from core; `Page.printToPDF` now delegates to it. The `printpdf` dependency moved from `oxibrowser-cdp` to `oxibrowser-render`.
+
 ## [0.20.0] - 2026-08-10
 
 ### Fixed

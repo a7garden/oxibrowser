@@ -87,3 +87,32 @@ pub fn blank_png(width: u32, height: u32) -> Vec<u8> {
     let rgba = vec![0xFFu8; (width as usize) * (height as usize) * 4];
     encode_png(&rgba, width, height).unwrap_or_default()
 }
+
+/// Wrap a PNG in a single-page PDF whose page matches the image's aspect ratio.
+///
+/// The image fills the page; the page is sized to the image at 96 dpi
+/// (1 CSS px ≈ 0.2646 mm). Returns `None` if the PNG cannot be decoded or
+/// the PDF cannot be encoded.
+pub fn png_to_pdf(png: &[u8]) -> Option<Vec<u8>> {
+    use printpdf::*;
+    let mut warnings = Vec::new();
+    let raw = RawImage::decode_from_bytes(png, &mut warnings).ok()?;
+    let (iw, ih) = (raw.width, raw.height);
+    let mut doc = PdfDocument::new("OxiBrowser");
+    let img_id = doc.add_image(&raw);
+    // 96 dpi → 1 CSS px ≈ 0.2646 mm; the image fills the page.
+    let mm_per_px = 0.264_583_33_f32;
+    let page = PdfPage::new(
+        Mm(iw as f32 * mm_per_px),
+        Mm(ih as f32 * mm_per_px),
+        vec![Op::UseXobject {
+            id: img_id,
+            transform: XObjectTransform {
+                dpi: Some(96.0),
+                ..Default::default()
+            },
+        }],
+    );
+    doc.pages.push(page);
+    Some(doc.save(&PdfSaveOptions::default(), &mut warnings))
+}

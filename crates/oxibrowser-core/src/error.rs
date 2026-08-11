@@ -71,6 +71,9 @@ pub enum CoreError {
 
     #[error("screenshot error: {0}")]
     ScreenshotError(String),
+
+    #[error("PDF render error: {0}")]
+    PdfError(String),
 }
 
 /// Convenience Result alias.

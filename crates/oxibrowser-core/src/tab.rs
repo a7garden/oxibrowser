@@ -829,6 +829,28 @@ impl Tab {
         Ok(png)
     }
 
+    /// Render the current page and embed it in a single-page PDF.
+    ///
+    /// Captures a full-page screenshot (same path as [`Tab::screenshot`]) and
+    /// wraps it in a PDF whose page matches the image's aspect ratio. Returns
+    /// the raw PDF bytes. A PDF-encode failure is surfaced as
+    /// [`CoreError::PdfError`] rather than silently dropped.
+    pub async fn print_to_pdf(&self, width: u32) -> Result<Vec<u8>> {
+        let started = std::time::Instant::now();
+        let mut session = self.inner.lock().await;
+        let png = session.capture_screenshot_png(width).await?;
+        let pdf = crate::png_to_pdf(&png)
+            .ok_or_else(|| CoreError::PdfError("PDF encoding failed".into()))?;
+
+        self.emit(BrowserEvent::PdfExported {
+            tab_id: self.tab_id,
+            bytes: pdf.len(),
+            viewport_width: width,
+            duration: started.elapsed(),
+        });
+        Ok(pdf)
+    }
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -1116,6 +1138,18 @@ mod tests {
         // PNG magic header
         assert!(png.len() > 8);
         assert_eq!(&png[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[tokio::test]
+    async fn test_tab_print_to_pdf() {
+        let html = "<!DOCTYPE html><html><head><title>PDF</title></head>\
+                     <body><p>PDF export test</p></body></html>";
+        let tab = tab_with_html(html).await;
+
+        let pdf = tab.print_to_pdf(800).await.unwrap();
+        // PDF magic header: "%PDF-"
+        assert!(pdf.len() > 8, "PDF should be non-trivial: {} bytes", pdf.len());
+        assert_eq!(&pdf[0..5], b"%PDF-", "PDF magic header mismatch");
     }
 
     #[tokio::test]

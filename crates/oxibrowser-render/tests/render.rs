@@ -4,7 +4,7 @@
 //! paint → PNG path end to end, asserting observable contracts (PNG validity,
 //! dimensions, presence of non-background content) rather than exact pixels.
 
-use oxibrowser_render::{CaptureOpts, RenderDocument, Viewport};
+use oxibrowser_render::{CaptureOpts, RenderDocument, Viewport, blank_png, png_to_pdf};
 
 const HTML: &str = r#"<html>
 <head><style>
@@ -160,5 +160,17 @@ fn mutation_reflected_in_capture() {
     assert!(
         red > 500,
         "expected an injected red box in the capture, got {red} red px"
+    );
+}
+
+#[test]
+fn png_to_pdf_wraps_png_in_valid_pdf() {
+    let png = blank_png(64, 64);
+    let pdf = png_to_pdf(&png).expect("should produce a PDF");
+    assert!(pdf.len() > 100, "PDF should be non-trivial");
+    assert!(
+        pdf.starts_with(b"%PDF-"),
+        "PDF header missing, got: {:?}",
+        String::from_utf8_lossy(&pdf[..8.min(pdf.len())])
     );
 }
