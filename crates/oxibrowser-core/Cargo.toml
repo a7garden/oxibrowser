@@ -40,12 +40,14 @@ chrono = "0.4"
 httpdate = { workspace = true }
 md-5 = { workspace = true }
 psl = { workspace = true }
+wasmi = { workspace = true }
 
 oxibrowser-render = { version = "0.20.0", path = "../oxibrowser-render" }
 getrandom = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
+wat = "1.256"
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 

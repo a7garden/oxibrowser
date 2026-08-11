@@ -11,6 +11,7 @@ pub mod job_queue;
 pub mod mouse;
 pub mod runtime;
 pub mod stealth;
+pub mod wasm;
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 

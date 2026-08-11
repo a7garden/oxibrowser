@@ -5476,6 +5476,14 @@ fn create_context(
     "#,
     ));
 
+    // --- WebAssembly support ---
+    // Registers the `WebAssembly` global namespace (compile, instantiate,
+    // validate, Module/Instance/Memory/Table). All WASM ops run synchronously
+    // on this JS thread (wasmi handles are not Send). See `js::wasm`.
+    if let Err(e) = crate::js::wasm::register_wasm_globals(&mut context) {
+        tracing::warn!(error = %e, "WebAssembly globals registration failed");
+    }
+
     (context, job_queue)
 }
 

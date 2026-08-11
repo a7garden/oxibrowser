@@ -1148,7 +1148,11 @@ mod tests {
 
         let pdf = tab.print_to_pdf(800).await.unwrap();
         // PDF magic header: "%PDF-"
-        assert!(pdf.len() > 8, "PDF should be non-trivial: {} bytes", pdf.len());
+        assert!(
+            pdf.len() > 8,
+            "PDF should be non-trivial: {} bytes",
+            pdf.len()
+        );
         assert_eq!(&pdf[0..5], b"%PDF-", "PDF magic header mismatch");
     }
 
